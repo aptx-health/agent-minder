@@ -4,10 +4,11 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/dustinlange/agent-minder/internal/config"
+	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/discovery"
 	"github.com/spf13/cobra"
 )
@@ -21,6 +22,20 @@ var initCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(initCmd)
+}
+
+// goalTypes maps goal selection number to (type, default refresh seconds).
+var goalTypes = []struct {
+	Name        string
+	Label       string
+	DefaultSec  int
+}{
+	{"feature", "Feature work — building or shipping something new", 300},
+	{"bugfix", "Bug fix — tracking down and fixing a specific issue", 180},
+	{"infrastructure", "Infrastructure — multi-repo infra, migration, or deployment", 300},
+	{"maintenance", "Maintenance — docs, deps, cleanup, refactoring", 600},
+	{"standby", "On-call / standby — monitoring, ready to respond", 900},
+	{"other", "Other — describe it", 300},
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
@@ -52,18 +67,47 @@ func runInit(cmd *cobra.Command, args []string) error {
 		projectName = suggested
 	}
 
+	// Open database (creates if needed).
+	dbPath := db.DefaultDBPath()
+	if err := db.EnsureDir(dbPath); err != nil {
+		return fmt.Errorf("creating data directory: %w", err)
+	}
+	conn, err := db.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer conn.Close()
+	store := db.NewStore(conn)
+
 	// Check if project already exists.
-	projDir, _ := config.ProjectDir(projectName)
-	if _, err := os.Stat(projDir); err == nil {
-		fmt.Printf("Warning: project %q already exists at %s\n", projectName, projDir)
+	existing, _ := store.GetProject(projectName)
+	if existing != nil {
+		fmt.Printf("Warning: project %q already exists.\n", projectName)
 		fmt.Print("Overwrite? [y/N]: ")
 		answer := readLine(reader)
 		if !strings.HasPrefix(strings.ToLower(answer), "y") {
 			return fmt.Errorf("aborted")
 		}
+		store.DeleteProject(existing.ID)
 	}
 
-	// 3. Suggest topics.
+	// 3. Goal selection.
+	fmt.Println("\nWhat's the goal for this project?")
+	for i, g := range goalTypes {
+		fmt.Printf("  %d. %s\n", i+1, g.Label)
+	}
+	fmt.Print("\n> ")
+	goalChoice := readLine(reader)
+	goalIdx := 0
+	if n := parseChoice(goalChoice, len(goalTypes)); n >= 0 {
+		goalIdx = n
+	}
+	goal := goalTypes[goalIdx]
+
+	fmt.Print("Describe the work: ")
+	goalDesc := readLine(reader)
+
+	// 4. Suggest topics.
 	topics := discovery.SuggestTopics(projectName, repos)
 	fmt.Printf("\nSuggested topics:\n")
 	for _, t := range topics {
@@ -81,7 +125,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 				topics = append(topics, t)
 			}
 		}
-		// Ensure coord topic exists.
 		coordTopic := projectName + "/coord"
 		hasCoord := false
 		for _, t := range topics {
@@ -96,114 +139,117 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 4. Configure settings.
-	fmt.Printf("\nRefresh interval [5m]: ")
-	intervalStr := readLine(reader)
-	if intervalStr == "" {
-		intervalStr = "5m"
-	}
+	// 5. Configure settings.
+	defaultMinutes := goal.DefaultSec / 60
+	interval := promptMinutes(reader, "Enter poll interval in minutes", defaultMinutes, 1, 480)
 
-	fmt.Printf("Message TTL [48h]: ")
-	ttlStr := readLine(reader)
-	if ttlStr == "" {
-		ttlStr = "48h"
-	}
+	ttl := 48 * time.Hour
 
 	fmt.Printf("Auto-enroll new worktrees? [Y/n]: ")
 	autoEnroll := readLine(reader)
 	autoEnrollBool := !strings.HasPrefix(strings.ToLower(autoEnroll), "n")
 
-	// 5. Build and save config.
-	proj := config.NewProject(projectName)
-
-	interval, err := time.ParseDuration(intervalStr)
-	if err != nil {
-		return fmt.Errorf("invalid refresh interval %q: %w", intervalStr, err)
+	// 6. Write to database.
+	project := &db.Project{
+		Name:                projectName,
+		GoalType:            goal.Name,
+		GoalDescription:     goalDesc,
+		RefreshIntervalSec:  int(interval.Seconds()),
+		MessageTTLSec:       int(ttl.Seconds()),
+		AutoEnrollWorktrees: autoEnrollBool,
+		MinderIdentity:      projectName + "/minder",
+		LLMProvider:         "anthropic",
+		LLMModel:            "claude-haiku-4-5",
 	}
-	proj.RefreshInterval = interval
-
-	ttl, err := time.ParseDuration(ttlStr)
-	if err != nil {
-		return fmt.Errorf("invalid message TTL %q: %w", ttlStr, err)
-	}
-	proj.MessageTTL = ttl
-
-	proj.AutoEnrollWorktrees = autoEnrollBool
-	proj.Repos = discovery.BuildRepoConfigs(repos)
-	proj.Topics = topics
-
-	if err := config.Save(proj); err != nil {
-		return fmt.Errorf("saving config: %w", err)
+	if err := store.CreateProject(project); err != nil {
+		return fmt.Errorf("creating project: %w", err)
 	}
 
-	// 6. Write initial state file.
-	stateContent := buildInitialState(proj, repos)
-	if err := writeInitialState(proj.Name, stateContent); err != nil {
-		return fmt.Errorf("writing state: %w", err)
+	// Add repos and worktrees.
+	for _, ri := range repos {
+		repo := &db.Repo{
+			ProjectID: project.ID,
+			Path:      ri.Path,
+			ShortName: ri.ShortName,
+		}
+		if err := store.AddRepo(repo); err != nil {
+			return fmt.Errorf("adding repo %s: %w", ri.Name, err)
+		}
+
+		// Add discovered worktrees.
+		var wts []db.Worktree
+		for _, wt := range ri.Worktrees {
+			wts = append(wts, db.Worktree{
+				Path:   wt.Path,
+				Branch: wt.Branch,
+			})
+		}
+		if len(wts) > 0 {
+			if err := store.ReplaceWorktrees(repo.ID, wts); err != nil {
+				fmt.Printf("  Warning: could not save worktrees for %s: %v\n", ri.Name, err)
+			}
+		}
 	}
 
-	configDir, _ := config.ProjectDir(projectName)
+	// Add topics.
+	for _, name := range topics {
+		store.AddTopic(&db.Topic{ProjectID: project.ID, Name: name})
+	}
+
 	fmt.Printf("\nProject %q initialized!\n", projectName)
-	fmt.Printf("  Config: %s/config.yaml\n", configDir)
-	fmt.Printf("  State:  %s/state.md\n", configDir)
+	fmt.Printf("  Goal: %s — %s\n", goal.Name, goalDesc)
+	fmt.Printf("  Repos: %d\n", len(repos))
+	fmt.Printf("  Topics: %s\n", strings.Join(topics, ", "))
+	fmt.Printf("  DB: %s\n", dbPath)
 	fmt.Printf("\nNext: run 'agent-minder start %s' to begin monitoring.\n", projectName)
 
 	return nil
 }
 
-func buildInitialState(proj *config.Project, repos []*discovery.RepoInfo) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Minder State: %s\n\n", proj.Name)
-
-	b.WriteString("## Watched Repos\n")
-	for _, r := range repos {
-		desc := r.Name
-		if r.Readme != "" {
-			for _, line := range strings.Split(r.Readme, "\n") {
-				trimmed := strings.TrimSpace(line)
-				if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-					desc = r.Name + " — " + trimmed
-					break
-				}
-			}
-		}
-		fmt.Fprintf(&b, "- %s — %s, branch: %s\n", r.Path, desc, r.Branch)
-	}
-
-	b.WriteString("\n## Active Concerns\n")
-	b.WriteString("- (none yet — monitoring will populate this)\n")
-
-	b.WriteString("\n## Recent Activity\n")
-	for _, r := range repos {
-		if len(r.RecentLogs) > 0 {
-			entry := r.RecentLogs[0]
-			fmt.Fprintf(&b, "- %s: %s (%s)\n", r.Name, entry.Subject, entry.Author)
-		}
-	}
-
-	b.WriteString("\n## Monitoring Plan\n")
-	b.WriteString("- Watch for new messages on project topics\n")
-	b.WriteString("- Watch for git activity across all repos\n")
-	b.WriteString("- Detect cross-repo conflicts (shared types, schemas, APIs)\n")
-
-	b.WriteString("\n## Last Poll\n")
-	b.WriteString("- Time: (not yet started)\n")
-
-	return b.String()
-}
-
-func writeInitialState(project string, content string) error {
-	dir, err := config.ProjectDir(project)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(dir+"/state.md", []byte(content), 0644)
-}
-
 func readLine(reader *bufio.Reader) string {
 	line, _ := reader.ReadString('\n')
 	return strings.TrimSpace(line)
+}
+
+func parseChoice(s string, max int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	n := 0
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		n = n*10 + int(ch-'0')
+	}
+	if n < 1 || n > max {
+		return 0
+	}
+	return n - 1
+}
+
+// promptMinutes asks the user for a duration in minutes, reprompting on invalid input.
+func promptMinutes(reader *bufio.Reader, label string, defaultVal, minVal, maxVal int) time.Duration {
+	for {
+		fmt.Printf("\n%s [%d]: ", label, defaultVal)
+		input := readLine(reader)
+		if input == "" {
+			return time.Duration(defaultVal) * time.Minute
+		}
+		n, err := strconv.Atoi(input)
+		if err != nil {
+			fmt.Printf("  Please enter a number between %d and %d.\n", minVal, maxVal)
+			continue
+		}
+		if n < minVal {
+			fmt.Printf("  Minimum is %d minute(s).\n", minVal)
+			continue
+		}
+		if n > maxVal {
+			fmt.Printf("  Maximum is %d minutes (%d hours).\n", maxVal, maxVal/60)
+			continue
+		}
+		return time.Duration(n) * time.Minute
+	}
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -55,6 +57,9 @@ func Start(prompt string, workDir string, allowedTools []string) (*SessionResult
 	return run(args, workDir)
 }
 
+// Verbose controls whether claude's stderr is streamed to the terminal.
+var Verbose = true
+
 // run executes the claude CLI and parses the result.
 func run(args []string, workDir string) (*SessionResult, error) {
 	cmd := exec.Command("claude", args...)
@@ -62,9 +67,17 @@ func run(args []string, workDir string) (*SessionResult, error) {
 		cmd.Dir = workDir
 	}
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+
+	// Stream stderr to terminal so the user sees progress,
+	// while also capturing it for error reporting.
+	var stderr bytes.Buffer
+	if Verbose {
+		cmd.Stderr = io.MultiWriter(&stderr, os.Stderr)
+	} else {
+		cmd.Stderr = &stderr
+	}
 
 	if err := cmd.Run(); err != nil {
 		stderrStr := stderr.String()

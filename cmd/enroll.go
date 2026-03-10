@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/dustinlange/agent-minder/internal/config"
+	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/discovery"
 	"github.com/spf13/cobra"
 )
@@ -21,12 +21,19 @@ func init() {
 }
 
 func runEnroll(cmd *cobra.Command, args []string) error {
-	project := args[0]
+	projectName := args[0]
 	repoDir := args[1]
 
-	cfg, err := config.Load(project)
+	conn, err := db.Open(db.DefaultDBPath())
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer conn.Close()
+	store := db.NewStore(conn)
+
+	project, err := store.GetProject(projectName)
+	if err != nil {
+		return fmt.Errorf("project %q not found", projectName)
 	}
 
 	// Scan the new directory.
@@ -35,74 +42,59 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("scanning %s: %w", repoDir, err)
 	}
 
-	// Check if this repo (or a worktree of it) is already enrolled.
-	for i, repo := range cfg.Repos {
+	// Check if already enrolled.
+	repos, _ := store.GetRepos(project.ID)
+	for _, repo := range repos {
 		if repo.Path == info.Path {
 			return fmt.Errorf("repo %s is already enrolled as %q", info.Path, repo.ShortName)
 		}
-		// Check if it's a worktree of an already-enrolled repo.
-		for _, wt := range info.Worktrees {
-			if wt.Path == repo.Path {
-				// It's a worktree of an existing repo — add it there.
-				fmt.Printf("Detected as worktree of %s (branch: %s)\n", repo.ShortName, info.Branch)
-				cfg.Repos[i].Worktrees = append(cfg.Repos[i].Worktrees, config.Worktree{
-					Path:   info.Path,
-					Branch: info.Branch,
-				})
-				if err := config.Save(cfg); err != nil {
-					return fmt.Errorf("saving config: %w", err)
-				}
-				fmt.Printf("Added worktree %s to %s\n", info.Path, repo.ShortName)
-				notifyMinder(cfg, fmt.Sprintf("New worktree enrolled: %s/%s (branch: %s)", repo.ShortName, info.Branch, info.Branch))
-				return nil
-			}
-		}
 	}
 
-	// New repo — add it.
-	newRepo := config.Repo{
+	// Add repo.
+	repo := &db.Repo{
+		ProjectID: project.ID,
 		Path:      info.Path,
 		ShortName: info.ShortName,
-		Worktrees: info.Worktrees,
 	}
-	cfg.Repos = append(cfg.Repos, newRepo)
-
-	// Add a topic for it.
-	newTopic := cfg.Name + "/" + info.ShortName
-	hasTopic := false
-	for _, t := range cfg.Topics {
-		if t == newTopic {
-			hasTopic = true
-			break
-		}
-	}
-	if !hasTopic {
-		cfg.Topics = append(cfg.Topics, newTopic)
+	if err := store.AddRepo(repo); err != nil {
+		return fmt.Errorf("adding repo: %w", err)
 	}
 
-	if err := config.Save(cfg); err != nil {
-		return fmt.Errorf("saving config: %w", err)
+	// Add worktrees.
+	var wts []db.Worktree
+	for _, wt := range info.Worktrees {
+		wts = append(wts, db.Worktree{
+			Path:   wt.Path,
+			Branch: wt.Branch,
+		})
+	}
+	if len(wts) > 0 {
+		store.ReplaceWorktrees(repo.ID, wts)
 	}
 
-	fmt.Printf("Enrolled %s as %q in project %q\n", info.Path, info.ShortName, project)
+	// Add a topic.
+	newTopic := project.Name + "/" + info.ShortName
+	store.AddTopic(&db.Topic{ProjectID: project.ID, Name: newTopic})
+
+	fmt.Printf("Enrolled %s as %q in project %q\n", info.Path, info.ShortName, projectName)
 	fmt.Printf("  Branch: %s\n", info.Branch)
 	fmt.Printf("  Topic:  %s\n", newTopic)
 	fmt.Printf("  Commits: %d recent\n", len(info.RecentLogs))
 
-	notifyMinder(cfg, fmt.Sprintf("New repo enrolled: %s (%s, branch: %s)", info.ShortName, info.Path, info.Branch))
+	notifyCoord(project, fmt.Sprintf("New repo enrolled: %s (%s, branch: %s)", info.ShortName, info.Path, info.Branch))
 
 	return nil
 }
 
-// notifyMinder publishes a message to the coord topic if agent-pub is available.
-func notifyMinder(cfg *config.Project, message string) {
-	coordTopic := cfg.Name + "/coord"
+// notifyCoord publishes a message to the coord topic if agent-pub is available.
+func notifyCoord(project *db.Project, message string) {
+	coordTopic := project.Name + "/coord"
 	agentPub, err := exec.LookPath("agent-pub")
 	if err != nil {
 		return
 	}
 	cmd := exec.Command(agentPub, coordTopic, message)
-	cmd.Env = append(cmd.Environ(), "AGENT_NAME="+cfg.MinderIdentity)
+	cmd.Env = append(cmd.Environ(), "AGENT_NAME="+project.MinderIdentity)
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("Warning: could not notify on %s: %v\n", coordTopic, err)
 	}
