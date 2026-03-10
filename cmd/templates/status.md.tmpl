@@ -1,0 +1,19 @@
+Minder: {{ .Project }}{{ if .Running }} (running, last poll {{ .LastPoll }}){{ else }} (stopped){{ end }}
+
+Repos:
+{{ range .Repos }}  {{ .ShortName }} ({{ .Branch }}{{ if gt .WorktreeCount 1 }} + {{ .ExtraWorktrees }} worktree{{ if gt .ExtraWorktrees 1 }}s{{ end }}{{ end }})
+{{ if .RecentCommits }}    {{ .RecentCommits }} new commit{{ if gt .RecentCommits 1 }}s{{ end }} since yesterday{{ if .CommitSummary }} ({{ .CommitSummary }}){{ end }}
+{{ else }}    no recent commits
+{{ end }}{{ end }}
+{{ if .Messages }}Messages ({{ .UnreadCount }} unread):
+{{ range .Messages }}  [{{ .ID }}] {{ .Topic }} — {{ .Sender }}: "{{ .Message }}"
+{{ end }}{{ end }}
+{{ if .Concerns }}Active concerns:
+{{ range .Concerns }}  {{ . }}
+{{ end }}{{ end }}
+{{ if .StaleWorktrees }}Stale worktrees:
+{{ range .StaleWorktrees }}  {{ .Path }} — {{ .Note }}
+{{ end }}{{ end }}
+{{ if .Agents }}Active agents:
+{{ range .Agents }}  {{ . }}
+{{ end }}{{ end }}
