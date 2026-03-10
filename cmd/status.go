@@ -115,9 +115,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Last LLM response.
-	if lastPoll != nil && lastPoll.LLMResponse != "" {
+	if lastPoll != nil && lastPoll.LLMResponse() != "" {
 		fmt.Println("Last Analysis:")
-		fmt.Printf("  %s\n", lastPoll.LLMResponse)
+		fmt.Printf("  %s\n", lastPoll.LLMResponse())
 		fmt.Println()
 	}
 

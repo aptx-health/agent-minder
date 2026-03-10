@@ -201,3 +201,38 @@ func (c *Client) ActiveAgents(since time.Duration, repoPrefix string) ([]string,
 	}
 	return names, nil
 }
+
+// Publisher provides write access to the agent-msg SQLite database.
+type Publisher struct {
+	db *sqlx.DB
+}
+
+// NewPublisher opens the agent-msg database in read-write mode for publishing messages.
+func NewPublisher(dbPath string) (*Publisher, error) {
+	db, err := sqlx.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	if err != nil {
+		return nil, fmt.Errorf("opening agent-msg DB for writing %s: %w", dbPath, err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connecting to agent-msg DB %s: %w", dbPath, err)
+	}
+	return &Publisher{db: db}, nil
+}
+
+// Publish inserts a message into the agent-msg messages table.
+func (p *Publisher) Publish(topic, sender, message string) error {
+	_, err := p.db.Exec(
+		`INSERT INTO messages (topic, sender, message, created_at) VALUES (?, ?, ?, datetime('now'))`,
+		topic, sender, message,
+	)
+	if err != nil {
+		return fmt.Errorf("publishing message to %s: %w", topic, err)
+	}
+	return nil
+}
+
+// Close closes the publisher's database connection.
+func (p *Publisher) Close() error {
+	return p.db.Close()
+}

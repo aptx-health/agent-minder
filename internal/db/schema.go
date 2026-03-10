@@ -7,7 +7,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 1
+const currentVersion = 2
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS projects (
 	minder_identity       TEXT,
 	llm_provider          TEXT DEFAULT 'anthropic',
 	llm_model             TEXT DEFAULT 'claude-haiku-4-5',
+	llm_summarizer_model  TEXT DEFAULT 'claude-haiku-4-5',
+	llm_analyzer_model    TEXT DEFAULT 'claude-sonnet-4-6',
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -68,6 +70,9 @@ CREATE TABLE IF NOT EXISTS polls (
 	new_messages    INTEGER DEFAULT 0,
 	concerns_raised INTEGER DEFAULT 0,
 	llm_response    TEXT,
+	tier1_response  TEXT DEFAULT '',
+	tier2_response  TEXT DEFAULT '',
+	bus_message_sent TEXT DEFAULT '',
 	polled_at       TEXT DEFAULT (datetime('now'))
 );
 `
@@ -111,10 +116,47 @@ func migrate(db *sqlx.DB) error {
 		return nil
 	}
 
-	// Future migrations go here: if version < 2 { ... }
+	if version < 2 {
+		if err := migrateV2(db); err != nil {
+			return fmt.Errorf("apply migration v2: %w", err)
+		}
+	}
 
 	_, err = db.Exec("UPDATE schema_version SET version = ?", currentVersion)
 	return err
+}
+
+func migrateV2(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN llm_summarizer_model TEXT DEFAULT 'claude-haiku-4-5'`,
+		`ALTER TABLE projects ADD COLUMN llm_analyzer_model TEXT DEFAULT 'claude-sonnet-4-6'`,
+		`ALTER TABLE polls ADD COLUMN tier1_response TEXT`,
+		`ALTER TABLE polls ADD COLUMN tier2_response TEXT`,
+		`ALTER TABLE polls ADD COLUMN bus_message_sent TEXT`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	// Copy existing data into new columns.
+	if _, err := db.Exec(`UPDATE projects SET llm_summarizer_model = llm_model WHERE llm_model IS NOT NULL AND llm_model != ''`); err != nil {
+		return fmt.Errorf("copy llm_model to llm_summarizer_model: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE polls SET tier1_response = llm_response WHERE llm_response IS NOT NULL`); err != nil {
+		return fmt.Errorf("copy llm_response to tier1_response: %w", err)
+	}
+	// Ensure no NULLs in new text columns (Go strings can't scan NULL).
+	if _, err := db.Exec(`UPDATE polls SET tier1_response = '' WHERE tier1_response IS NULL`); err != nil {
+		return fmt.Errorf("null-fill tier1_response: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE polls SET tier2_response = '' WHERE tier2_response IS NULL`); err != nil {
+		return fmt.Errorf("null-fill tier2_response: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE polls SET bus_message_sent = '' WHERE bus_message_sent IS NULL`); err != nil {
+		return fmt.Errorf("null-fill bus_message_sent: %w", err)
+	}
+	return nil
 }
 
 // DefaultDBPath returns the default path for the agent-minder database.

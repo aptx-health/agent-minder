@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/llm"
+	"github.com/dustinlange/agent-minder/internal/msgbus"
 	"github.com/dustinlange/agent-minder/internal/poller"
 	"github.com/dustinlange/agent-minder/internal/tui"
 	"github.com/spf13/cobra"
@@ -47,11 +49,22 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("creating LLM provider: %w", err)
 	}
 
+	// Create bus publisher (non-fatal if unavailable).
+	var publisher *msgbus.Publisher
+	msgDBPath := msgbus.DefaultDBPath()
+	pub, err := msgbus.NewPublisher(msgDBPath)
+	if err != nil {
+		log.Printf("Warning: bus publishing unavailable: %v", err)
+	} else {
+		publisher = pub
+		defer publisher.Close()
+	}
+
 	// Create poller.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	p := poller.New(store, project, provider)
+	p := poller.New(store, project, provider, publisher)
 	p.Start(ctx)
 	defer p.Stop()
 

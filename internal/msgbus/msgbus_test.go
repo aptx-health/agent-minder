@@ -180,6 +180,63 @@ func TestActiveAgents(t *testing.T) {
 	}
 }
 
+func TestPublisher(t *testing.T) {
+	// Create a file-based DB for the publisher (can't use :memory: across connections).
+	dbPath := filepath.Join(t.TempDir(), "pub_test.db")
+	db, err := sqlx.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	schema := `
+		CREATE TABLE messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			topic TEXT NOT NULL,
+			sender TEXT NOT NULL,
+			message TEXT NOT NULL,
+			created_at TEXT DEFAULT (datetime('now'))
+		);
+	`
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	db.Close()
+
+	// Test the publisher.
+	pub, err := NewPublisher(dbPath)
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	defer pub.Close()
+
+	if err := pub.Publish("test/coord", "test/minder", "Hello from publisher"); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Verify via read-only client.
+	client, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer client.Close()
+
+	msgs, err := client.RecentMessages(1*time.Hour, "test")
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("got %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Topic != "test/coord" {
+		t.Errorf("topic = %q, want %q", msgs[0].Topic, "test/coord")
+	}
+	if msgs[0].Sender != "test/minder" {
+		t.Errorf("sender = %q, want %q", msgs[0].Sender, "test/minder")
+	}
+	if msgs[0].Message != "Hello from publisher" {
+		t.Errorf("message = %q, want %q", msgs[0].Message, "Hello from publisher")
+	}
+}
+
 func TestOpenEmptyDB(t *testing.T) {
 	// Opening a path that auto-creates an empty DB should fail
 	// when we try to query (no tables), but Open itself succeeds

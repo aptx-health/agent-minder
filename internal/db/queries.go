@@ -27,9 +27,11 @@ func (s *Store) DB() *sqlx.DB {
 func (s *Store) CreateProject(p *Project) error {
 	result, err := s.db.NamedExec(`
 		INSERT INTO projects (name, goal_type, goal_description, refresh_interval_sec,
-			message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model)
+			message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model,
+			llm_summarizer_model, llm_analyzer_model)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
-			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model)
+			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
+			:llm_summarizer_model, :llm_analyzer_model)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -80,7 +82,9 @@ func (s *Store) UpdateProject(p *Project) error {
 			auto_enroll_worktrees = :auto_enroll_worktrees,
 			minder_identity = :minder_identity,
 			llm_provider = :llm_provider,
-			llm_model = :llm_model
+			llm_model = :llm_model,
+			llm_summarizer_model = :llm_summarizer_model,
+			llm_analyzer_model = :llm_analyzer_model
 		WHERE id = :id
 	`, p)
 	return err
@@ -254,8 +258,10 @@ func (s *Store) ResolveConcern(id int64) error {
 // RecordPoll inserts a poll result.
 func (s *Store) RecordPoll(p *Poll) error {
 	result, err := s.db.NamedExec(`
-		INSERT INTO polls (project_id, new_commits, new_messages, concerns_raised, llm_response)
-		VALUES (:project_id, :new_commits, :new_messages, :concerns_raised, :llm_response)
+		INSERT INTO polls (project_id, new_commits, new_messages, concerns_raised, llm_response,
+			tier1_response, tier2_response, bus_message_sent)
+		VALUES (:project_id, :new_commits, :new_messages, :concerns_raised, :llm_response,
+			:tier1_response, :tier2_response, :bus_message_sent)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert poll: %w", err)

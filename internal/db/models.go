@@ -17,6 +17,8 @@ type Project struct {
 	MinderIdentity       string `db:"minder_identity"`
 	LLMProvider          string `db:"llm_provider"`
 	LLMModel             string `db:"llm_model"`
+	LLMSummarizerModel   string `db:"llm_summarizer_model"`
+	LLMAnalyzerModel     string `db:"llm_analyzer_model"`
 	CreatedAt            string `db:"created_at"`
 }
 
@@ -72,6 +74,20 @@ type Poll struct {
 	NewCommits     int    `db:"new_commits"`
 	NewMessages    int    `db:"new_messages"`
 	ConcernsRaised int    `db:"concerns_raised"`
-	LLMResponse    string `db:"llm_response"`
+	LLMResponseRaw string `db:"llm_response"`
+	Tier1Response  string `db:"tier1_response"`
+	Tier2Response  string `db:"tier2_response"`
+	BusMessageSent string `db:"bus_message_sent"`
 	PolledAt       string `db:"polled_at"`
+}
+
+// LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.
+func (p *Poll) LLMResponse() string {
+	if p.Tier2Response != "" {
+		return p.Tier2Response
+	}
+	if p.Tier1Response != "" {
+		return p.Tier1Response
+	}
+	return p.LLMResponseRaw
 }

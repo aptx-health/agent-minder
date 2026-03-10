@@ -160,6 +160,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 		MinderIdentity:      projectName + "/minder",
 		LLMProvider:         "anthropic",
 		LLMModel:            "claude-haiku-4-5",
+		LLMSummarizerModel:  "claude-haiku-4-5",
+		LLMAnalyzerModel:    "claude-sonnet-4-6",
 	}
 	if err := store.CreateProject(project); err != nil {
 		return fmt.Errorf("creating project: %w", err)
