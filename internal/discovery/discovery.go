@@ -77,8 +77,10 @@ func DeriveProjectName(repos []*RepoInfo) string {
 	}
 
 	prefix := longestCommonPrefix(names)
-	// Strip trailing separator (e.g., "ripit-" → "ripit").
-	prefix = strings.TrimRight(prefix, "-_")
+	// Trim back to a clean word boundary. The common prefix may end
+	// mid-word (e.g., "agent-m" from "agent-minder"/"agent-msg").
+	// We want to snap back to "agent".
+	prefix = trimToWordBoundary(prefix, names)
 
 	if prefix == "" || len(prefix) < 2 {
 		return repos[0].ShortName
@@ -127,6 +129,41 @@ func readFileIfExists(path string) string {
 		return string(data[:maxLen])
 	}
 	return string(data)
+}
+
+// trimToWordBoundary ensures the prefix ends at a separator boundary
+// relative to the original names. If the prefix lands mid-segment
+// (e.g., "agent-m" from "agent-minder"/"agent-msg"), it trims back
+// to the last separator ("agent").
+func trimToWordBoundary(prefix string, names []string) string {
+	prefix = strings.TrimRight(prefix, "-_")
+	if prefix == "" {
+		return ""
+	}
+
+	// Check if the prefix is at a clean boundary in all names:
+	// either the name equals the prefix, or the next char is a separator.
+	atBoundary := true
+	for _, name := range names {
+		if len(name) > len(prefix) {
+			next := name[len(prefix)]
+			if next != '-' && next != '_' {
+				atBoundary = false
+				break
+			}
+		}
+	}
+
+	if atBoundary {
+		return prefix
+	}
+
+	// Not at a boundary — trim back to the last separator.
+	lastSep := strings.LastIndexAny(prefix, "-_")
+	if lastSep < 0 {
+		return prefix // single segment, no separator to trim to
+	}
+	return prefix[:lastSep]
 }
 
 func longestCommonPrefix(strs []string) string {

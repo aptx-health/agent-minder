@@ -80,6 +80,8 @@ func TestDeriveProjectName(t *testing.T) {
 		want  string
 	}{
 		{[]string{"ripit-app", "ripit-infra"}, "ripit"},
+		{[]string{"agent-minder", "agent-msg"}, "agent"},
+		{[]string{"foo-bar-baz", "foo-bar-qux"}, "foo-bar"},
 		{[]string{"frontend", "backend"}, "frontend"},
 		{[]string{"myapp"}, "myapp"},
 		{nil, "project"},
