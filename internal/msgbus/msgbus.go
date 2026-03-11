@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/sqliteutil"
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
@@ -46,15 +47,12 @@ func DefaultDBPath() string {
 	return "messages.db"
 }
 
-// Open connects to the agent-msg SQLite database (read-only).
+// Open connects to the agent-msg SQLite database (read-only) with automatic
+// WAL recovery if stale -shm/-wal files are detected.
 func Open(dbPath string) (*Client, error) {
-	db, err := sqlx.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL")
+	db, err := sqliteutil.OpenWithRecovery(dbPath, dbPath+"?mode=ro&_journal_mode=WAL")
 	if err != nil {
-		return nil, fmt.Errorf("opening agent-msg DB %s: %w", dbPath, err)
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("connecting to agent-msg DB %s: %w", dbPath, err)
+		return nil, fmt.Errorf("opening agent-msg DB: %w", err)
 	}
 	return &Client{db: db}, nil
 }
@@ -207,15 +205,12 @@ type Publisher struct {
 	db *sqlx.DB
 }
 
-// NewPublisher opens the agent-msg database in read-write mode for publishing messages.
+// NewPublisher opens the agent-msg database in read-write mode for publishing messages,
+// with automatic WAL recovery if stale -shm/-wal files are detected.
 func NewPublisher(dbPath string) (*Publisher, error) {
-	db, err := sqlx.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	db, err := sqliteutil.OpenWithRecovery(dbPath, dbPath+"?_journal_mode=WAL")
 	if err != nil {
-		return nil, fmt.Errorf("opening agent-msg DB for writing %s: %w", dbPath, err)
-	}
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("connecting to agent-msg DB %s: %w", dbPath, err)
+		return nil, fmt.Errorf("opening agent-msg DB for writing: %w", err)
 	}
 	return &Publisher{db: db}, nil
 }

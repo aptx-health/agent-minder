@@ -82,6 +82,10 @@ func concernWarningStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Warning)
 }
 
+func concernDangerStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(currentTheme().Error).Bold(true)
+}
+
 func concernInfoStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Muted)
 }

@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 
+	"github.com/dustinlange/agent-minder/internal/sqliteutil"
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
@@ -77,16 +78,12 @@ CREATE TABLE IF NOT EXISTS polls (
 );
 `
 
-// Open opens (or creates) the agent-minder SQLite database and runs migrations.
+// Open opens (or creates) the agent-minder SQLite database and runs migrations,
+// with automatic WAL recovery if stale -shm/-wal files are detected.
 func Open(path string) (*sqlx.DB, error) {
-	db, err := sqlx.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	db, err := sqliteutil.OpenWithRecovery(path, path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
-	}
-
-	if err := db.Ping(); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("ping db: %w", err)
 	}
 
 	if err := migrate(db); err != nil {

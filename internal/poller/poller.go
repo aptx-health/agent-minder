@@ -2,6 +2,7 @@
 // It checks git repos and the message bus for changes, then runs a two-tier
 // LLM pipeline: tier 1 (Haiku) summarizes, tier 2 (Sonnet) analyzes and
 // optionally publishes to the agent-msg bus.
+// THIS FILE CONTAINS PROMPTS FOR MINDER AGENTS
 package poller
 
 import (
@@ -378,22 +379,10 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		}
 	}
 
-	// Handle concerns from the analyzer — deduplicate against active concerns.
-	for _, c := range analysis.Concerns {
-		severity := c.Severity
-		if severity != "warning" && severity != "info" {
-			severity = "info"
-		}
-		if isDuplicateConcern(c.Message, concerns) {
-			continue
-		}
-		p.store.AddConcern(&db.Concern{
-			ProjectID: p.project.ID,
-			Severity:  severity,
-			Message:   c.Message,
-		})
-		result.Concerns = append(result.Concerns, fmt.Sprintf("[%s] %s", severity, c.Message))
-	}
+	// Reconcile concerns: the analyzer returns the full desired list.
+	// Resolve any existing concerns not present in the new list,
+	// and add any new ones.
+	result.Concerns = reconcileConcerns(p.store, p.project.ID, concerns, analysis.Concerns)
 
 	result.Duration = time.Since(start)
 	p.recordPollResult(result)
@@ -423,6 +412,7 @@ Rules:
 - Do NOT provide recommendations — just summarize the facts`
 }
 
+// Tier 2 System Prompt
 func tier2SystemPrompt(projectName string) string {
 	return fmt.Sprintf(`You are an AI project analyzer for %q. You receive a summary of recent activity and must produce a structured analysis.
 
@@ -430,7 +420,7 @@ Respond with a JSON object (no markdown fences):
 {
   "analysis": "Your 2-4 sentence analysis with actionable insights",
   "concerns": [
-    {"severity": "warning", "message": "description of concern"}
+    {"severity": "info|warning|danger", "message": "description of concern"}
   ],
   "bus_message": {
     "topic": "%s/coord",
@@ -440,7 +430,8 @@ Respond with a JSON object (no markdown fences):
 
 Rules:
 - "analysis": Always provide a clear, actionable status update
-- "concerns": Only include NEW concerns not already listed under Active Concerns. Do NOT re-raise, reword, or duplicate existing active concerns. If all concerns are already tracked, return an empty concerns array.
+- "concerns": Return the FULL list of currently valid concerns. You are given the existing active concerns with timestamps — use them as your starting point. Remove concerns that are resolved or no longer relevant. Add new concerns as needed. Update severity or wording if the situation has changed. If there are no concerns, return an empty array.
+  - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
 - "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
 
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
@@ -490,13 +481,16 @@ func (p *Poller) buildTier2Prompt(tier1Summary string, concerns []db.Concern) st
 
 	fmt.Fprintf(&b, "## Tier 1 Summary\n%s\n\n", tier1Summary)
 
+	b.WriteString("## Active Concerns\n")
 	if len(concerns) > 0 {
-		b.WriteString("## Active Concerns\n")
+		b.WriteString("Review and return the updated full list. Remove resolved ones, adjust severity/wording as needed, add new ones.\n")
 		for _, c := range concerns {
-			fmt.Fprintf(&b, "- [%s] %s\n", c.Severity, c.Message)
+			fmt.Fprintf(&b, "- [%s] (since %s) %s\n", c.Severity, c.CreatedAt, c.Message)
 		}
-		b.WriteString("\n")
+	} else {
+		b.WriteString("No active concerns. Add any if warranted by the activity summary.\n")
 	}
+	b.WriteString("\n")
 
 	b.WriteString("Analyze the above and respond with JSON.")
 	return b.String()

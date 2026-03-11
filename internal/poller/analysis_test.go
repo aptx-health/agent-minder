@@ -53,37 +53,55 @@ func TestParseAnalysisEmpty(t *testing.T) {
 	}
 }
 
-func TestIsDuplicateConcernExactMatch(t *testing.T) {
+func TestMatchExistingConcernExactMatch(t *testing.T) {
 	active := []db.Concern{
-		{Message: "Schema drift: 'priority' column added to agent-msg messages table"},
+		{ID: 1, Message: "Schema drift: 'priority' column added to agent-msg messages table"},
 	}
-	if !isDuplicateConcern("Schema drift: 'priority' column added to agent-msg messages table", active) {
-		t.Error("exact match should be duplicate")
+	if matchExistingConcern("Schema drift: 'priority' column added to agent-msg messages table", active) == 0 {
+		t.Error("exact match should find existing concern")
 	}
 }
 
-func TestIsDuplicateConcernReworded(t *testing.T) {
+func TestMatchExistingConcernReworded(t *testing.T) {
 	active := []db.Concern{
-		{Message: "Schema drift: 'priority' column added to agent-msg messages table. All consumers must update."},
+		{ID: 2, Message: "Schema drift: 'priority' column added to agent-msg messages table. All consumers must update."},
 	}
-	// Similar but reworded — shares most significant words
-	if !isDuplicateConcern("Schema drift detected: 'priority' column added to messages table. Consumers should update queries.", active) {
-		t.Error("reworded concern should be detected as duplicate")
+	if matchExistingConcern("Schema drift detected: 'priority' column added to messages table. Consumers should update queries.", active) == 0 {
+		t.Error("reworded concern should match existing")
 	}
 }
 
-func TestIsDuplicateConcernDifferent(t *testing.T) {
+func TestMatchExistingConcernDifferent(t *testing.T) {
 	active := []db.Concern{
-		{Message: "Schema drift: 'priority' column added to agent-msg messages table"},
+		{ID: 3, Message: "Schema drift: 'priority' column added to agent-msg messages table"},
 	}
-	if isDuplicateConcern("Stale branch detected: feature/auth has not been updated in 14 days", active) {
-		t.Error("unrelated concern should not be duplicate")
+	if matchExistingConcern("Stale branch detected: feature/auth has not been updated in 14 days", active) != 0 {
+		t.Error("unrelated concern should not match")
 	}
 }
 
-func TestIsDuplicateConcernEmptyActive(t *testing.T) {
-	if isDuplicateConcern("Some new concern", nil) {
+func TestMatchExistingConcernEmptyActive(t *testing.T) {
+	if matchExistingConcern("Some new concern", nil) != 0 {
 		t.Error("should not match against empty active list")
+	}
+}
+
+func TestValidSeverity(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{"info", "info"},
+		{"warning", "warning"},
+		{"warn", "warning"},
+		{"danger", "danger"},
+		{"critical", "danger"},
+		{"unknown", "info"},
+		{"", "info"},
+	}
+	for _, tt := range tests {
+		if got := validSeverity(tt.input); got != tt.want {
+			t.Errorf("validSeverity(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
 

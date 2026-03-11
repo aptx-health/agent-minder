@@ -74,14 +74,69 @@ func parseJSON(raw string, target interface{}) error {
 	return nil
 }
 
-// isDuplicateConcern checks whether a new concern message is semantically
-// similar to any existing active concern. Uses keyword overlap — if 50%+
-// of significant words (4+ chars) in the new message match an existing one,
-// it's considered a duplicate.
-func isDuplicateConcern(newMsg string, active []db.Concern) bool {
+// validSeverity normalizes a severity string to one of the three valid levels.
+func validSeverity(s string) string {
+	switch strings.ToLower(s) {
+	case "warning", "warn":
+		return "warning"
+	case "danger", "critical":
+		return "danger"
+	default:
+		return "info"
+	}
+}
+
+// reconcileConcerns replaces the append-only concern model with full-list
+// reconciliation. The analyzer returns the complete desired concern list;
+// we match against existing concerns using keyword overlap, resolve any
+// that were dropped, and add any that are new.
+func reconcileConcerns(store *db.Store, projectID int64, existing []db.Concern, desired []AnalysisConcern) []string {
+	var result []string
+
+	// Track which existing concerns are "kept" by the analyzer.
+	kept := make(map[int64]bool)
+
+	for _, d := range desired {
+		severity := validSeverity(d.Severity)
+
+		// Check if this matches an existing concern (reuse keyword overlap).
+		matchID := matchExistingConcern(d.Message, existing)
+		if matchID > 0 {
+			kept[matchID] = true
+			// Update severity if it changed.
+			for _, e := range existing {
+				if e.ID == matchID && e.Severity != severity {
+					store.UpdateConcernSeverity(matchID, severity)
+				}
+			}
+			continue
+		}
+
+		// New concern — add it.
+		store.AddConcern(&db.Concern{
+			ProjectID: projectID,
+			Severity:  severity,
+			Message:   d.Message,
+		})
+		result = append(result, fmt.Sprintf("[%s] %s", severity, d.Message))
+	}
+
+	// Resolve any existing concerns the analyzer dropped.
+	for _, e := range existing {
+		if !kept[e.ID] {
+			store.ResolveConcern(e.ID)
+		}
+	}
+
+	return result
+}
+
+// matchExistingConcern finds the best-matching existing concern using keyword
+// overlap (50%+ of significant words). Returns the matched concern ID or 0.
+func matchExistingConcern(newMsg string, active []db.Concern) int64 {
 	newWords := significantWords(newMsg)
 	if len(newWords) == 0 {
-		return false
+		return 0
 	}
 	for _, existing := range active {
 		existingWords := significantWords(existing.Message)
@@ -92,10 +147,10 @@ func isDuplicateConcern(newMsg string, active []db.Concern) bool {
 			}
 		}
 		if float64(overlap)/float64(len(newWords)) >= 0.5 {
-			return true
+			return existing.ID
 		}
 	}
-	return false
+	return 0
 }
 
 // significantWords extracts lowercase words of 4+ characters from text.

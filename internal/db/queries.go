@@ -253,6 +253,12 @@ func (s *Store) ResolveConcern(id int64) error {
 	return err
 }
 
+// UpdateConcernSeverity changes the severity level of an existing concern.
+func (s *Store) UpdateConcernSeverity(id int64, severity string) error {
+	_, err := s.db.Exec(`UPDATE concerns SET severity = ? WHERE id = ?`, severity, id)
+	return err
+}
+
 // --- Polls ---
 
 // RecordPoll inserts a poll result.

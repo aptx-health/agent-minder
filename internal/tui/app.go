@@ -10,7 +10,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/textinput"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
@@ -56,7 +55,7 @@ type Model struct {
 
 	// Broadcast mode.
 	mode            string // "normal", "broadcast", or "usermsg"
-	broadcastInput  textinput.Model
+	broadcastInput  textarea.Model
 	broadcastStatus string
 
 	// User message mode.
@@ -66,10 +65,11 @@ type Model struct {
 
 // New creates a new TUI model.
 func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
-	ti := textinput.New()
-	ti.Prompt = "broadcast> "
-	ti.Placeholder = "Type a message for other agents..."
-	ti.CharLimit = 500
+	bi := textarea.New()
+	bi.Placeholder = "Type a message for other agents..."
+	bi.CharLimit = 500
+	bi.SetHeight(3)
+	bi.SetWidth(80)
 
 	sp := spinner.New(
 		spinner.WithSpinner(spinner.MiniDot),
@@ -88,7 +88,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		poller:         p,
 		events:         make([]poller.Event, 0, 64),
 		mode:           "normal",
-		broadcastInput: ti,
+		broadcastInput: bi,
 		userMsgInput:   ta,
 		spinner:        sp,
 	}
@@ -213,6 +213,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = "broadcast"
 		m.broadcastStatus = ""
 		m.broadcastInput.Reset()
+		if m.width > 4 {
+			m.broadcastInput.SetWidth(m.width - 4)
+		}
 		cmd := m.broadcastInput.Focus()
 		return m, cmd
 	}
@@ -226,7 +229,7 @@ func (m Model) updateBroadcast(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.broadcastStatus = ""
 		m.broadcastInput.Blur()
 		return m, nil
-	case "enter":
+	case "ctrl+d":
 		value := m.broadcastInput.Value()
 		if strings.TrimSpace(value) == "" {
 			m.mode = "normal"
@@ -245,7 +248,7 @@ func (m Model) updateBroadcast(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Delegate to textinput.
+	// Delegate to textarea (Enter inserts newline by default).
 	var cmd tea.Cmd
 	m.broadcastInput, cmd = m.broadcastInput.Update(msg)
 	return m, cmd
@@ -348,9 +351,13 @@ func (m Model) View() tea.View {
 		for _, c := range shown {
 			style := concernInfoStyle().Width(m.width - 2)
 			prefix := "INFO"
-			if c.Severity == "warning" {
+			switch c.Severity {
+			case "warning":
 				style = concernWarningStyle().Width(m.width - 2)
 				prefix = "WARN"
+			case "danger":
+				style = concernDangerStyle().Width(m.width - 2)
+				prefix = "DANGER"
 			}
 			b.WriteString(style.Render(fmt.Sprintf("  [%s] %s", prefix, c.Message)))
 			b.WriteString("\n")
@@ -443,7 +450,7 @@ func (m Model) View() tea.View {
 		}
 		b.WriteString("\n")
 		if m.broadcastStatus == "" {
-			b.WriteString(helpStyle().Render("enter: send • esc: cancel"))
+			b.WriteString(helpStyle().Render("ctrl+d: send • esc: cancel"))
 		}
 		b.WriteString("\n")
 	case "usermsg":
