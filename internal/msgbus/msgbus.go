@@ -227,6 +227,29 @@ func (p *Publisher) Publish(topic, sender, message string) error {
 	return nil
 }
 
+// PublishReplace deletes all existing messages on the topic, then inserts
+// the new message. Used for single-message topics like onboarding where
+// only the latest version matters.
+func (p *Publisher) PublishReplace(topic, sender, message string) error {
+	tx, err := p.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin tx for replace on %s: %w", topic, err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM messages WHERE topic = ?`, topic); err != nil {
+		return fmt.Errorf("delete existing messages on %s: %w", topic, err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO messages (topic, sender, message, created_at) VALUES (?, ?, ?, datetime('now'))`,
+		topic, sender, message,
+	); err != nil {
+		return fmt.Errorf("insert replacement on %s: %w", topic, err)
+	}
+
+	return tx.Commit()
+}
+
 // Close closes the publisher's database connection.
 func (p *Publisher) Close() error {
 	return p.db.Close()

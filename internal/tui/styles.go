@@ -106,6 +106,10 @@ func helpStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Muted).PaddingLeft(1)
 }
 
+func helpKeyStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(currentTheme().Secondary).Bold(true).PaddingLeft(1)
+}
+
 func errorStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Error)
 }

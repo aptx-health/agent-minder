@@ -224,6 +224,127 @@ Keep messages actionable and concise. Use the project's coordination topic.`
 	return nil, fmt.Errorf("LLM did not produce a publishable message")
 }
 
+// Onboard generates an onboarding message for new agents joining the project and
+// publishes it to <project>/onboarding using replace semantics (single canonical message).
+// The optional userGuidance lets the user steer the message (e.g., "focus on test writing").
+func (p *Poller) Onboard(ctx context.Context, userGuidance string) (*BusMessage, error) {
+	if p.publisher == nil {
+		return nil, fmt.Errorf("bus publishing not available")
+	}
+
+	// Gather rich project context.
+	repos, _ := p.store.GetRepos(p.project.ID)
+	concerns, _ := p.store.ActiveConcerns(p.project.ID)
+	recentPolls, _ := p.store.RecentPolls(p.project.ID, 5)
+	topics, _ := p.store.GetTopics(p.project.ID)
+
+	var contextBuf strings.Builder
+	fmt.Fprintf(&contextBuf, "Project: %s\nGoal: %s — %s\n", p.project.Name, p.project.GoalType, p.project.GoalDescription)
+	fmt.Fprintf(&contextBuf, "Minder Identity: %s\n", p.project.MinderIdentity)
+
+	if len(repos) > 0 {
+		contextBuf.WriteString("\nRepos:\n")
+		for _, r := range repos {
+			fmt.Fprintf(&contextBuf, "- %s (%s)\n", r.ShortName, r.Path)
+		}
+	}
+
+	if len(topics) > 0 {
+		contextBuf.WriteString("\nActive topics:\n")
+		for _, t := range topics {
+			fmt.Fprintf(&contextBuf, "- %s\n", t.Name)
+		}
+	}
+
+	if len(concerns) > 0 {
+		contextBuf.WriteString("\nActive concerns:\n")
+		for _, c := range concerns {
+			fmt.Fprintf(&contextBuf, "- [%s] (since %s) %s\n", c.Severity, c.CreatedAt, c.Message)
+		}
+	}
+
+	if len(recentPolls) > 0 {
+		contextBuf.WriteString("\nRecent activity summaries:\n")
+		for _, poll := range recentPolls {
+			resp := poll.LLMResponse()
+			if len(resp) > 300 {
+				resp = resp[:300] + "..."
+			}
+			fmt.Fprintf(&contextBuf, "- %s\n", resp)
+		}
+	}
+
+	model := p.project.LLMAnalyzerModel
+	if model == "" {
+		model = "claude-sonnet-4-6"
+	}
+
+	system := fmt.Sprintf(`You are an AI project coordinator for %q. Generate an onboarding message for a new AI agent joining this project.
+
+The message should help the new agent understand:
+1. What the project is about and its current goal
+2. What repos are involved and what they do
+3. Who else is working (other agents) and their focus areas
+4. Current state: recent progress, active concerns, what needs attention
+5. How to communicate (message bus topics, coordination patterns)
+
+Write a clear, actionable onboarding briefing. Be concise but thorough — this is the new agent's primary orientation document.
+
+Respond with ONLY a JSON object:
+{
+  "topic": "%s/onboarding",
+  "message": "your onboarding message here"
+}`, p.project.Name, p.project.Name)
+
+	var prompt string
+	if strings.TrimSpace(userGuidance) != "" {
+		prompt = fmt.Sprintf("## Project Context\n%s\n\n## User Guidance for Onboarding\n%s\n\nGenerate the onboarding message incorporating the user's guidance.", contextBuf.String(), userGuidance)
+	} else {
+		prompt = fmt.Sprintf("## Project Context\n%s\n\nGenerate a general onboarding message for any new agent joining this project.", contextBuf.String())
+	}
+
+	resp, err := p.provider.Complete(ctx, &llm.Request{
+		Model:     model,
+		System:    system,
+		Messages:  []llm.Message{{Role: "user", Content: prompt}},
+		MaxTokens: 1024,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("LLM onboard call: %w", err)
+	}
+
+	parsed := parseAnalysis(resp.Content)
+	if parsed.BusMessage != nil {
+		if err := p.publisher.PublishReplace(parsed.BusMessage.Topic, p.project.MinderIdentity, parsed.BusMessage.Message); err != nil {
+			return nil, fmt.Errorf("publishing onboarding: %w", err)
+		}
+		p.emit("broadcast", fmt.Sprintf("Onboarding published to %s", parsed.BusMessage.Topic), nil)
+		return parsed.BusMessage, nil
+	}
+
+	// Fallback: try parsing as a bare BusMessage.
+	var msg BusMessage
+	raw := strings.TrimSpace(resp.Content)
+	if idx := strings.Index(raw, "```"); idx >= 0 {
+		start := idx + 3
+		if jIdx := strings.Index(raw[idx:], "json"); jIdx >= 0 && jIdx < 10 {
+			start = idx + jIdx + 4
+		}
+		if end := strings.Index(raw[start:], "```"); end >= 0 {
+			raw = strings.TrimSpace(raw[start : start+end])
+		}
+	}
+	if err := parseJSON(raw, &msg); err == nil && msg.Topic != "" && msg.Message != "" {
+		if err := p.publisher.PublishReplace(msg.Topic, p.project.MinderIdentity, msg.Message); err != nil {
+			return nil, fmt.Errorf("publishing onboarding: %w", err)
+		}
+		p.emit("broadcast", fmt.Sprintf("Onboarding published to %s", msg.Topic), nil)
+		return &msg, nil
+	}
+
+	return nil, fmt.Errorf("LLM did not produce a publishable onboarding message")
+}
+
 // PostUserMessage publishes a verbatim user message to the bus without LLM processing.
 // The sender is "user@<minder-identity>" so doPoll picks it up as bus activity.
 func (p *Poller) PostUserMessage(ctx context.Context, message string) error {

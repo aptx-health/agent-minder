@@ -28,23 +28,26 @@ Each poll cycle with new activity runs two sequential LLM calls:
 ```
 
 - `parseAnalysis()` in `analysis.go` handles raw JSON, markdown-fenced JSON, and plain text fallback
-- Concerns are deduplicated before insert via `isDuplicateConcern()` (50%+ keyword overlap with active concerns)
+- Concerns are managed by the analyzer: each cycle returns the full desired concern list, `reconcileConcerns()` diffs against existing (adds new, resolves dropped, updates severity)
+- Concern severity levels: `info`, `warning`, `danger` — color-coded in TUI
 - Bus messages are published via `msgbus.Publisher` only when the analyzer includes `bus_message`
 
 ### Bus integration (internal/msgbus)
 
 - `Client` — read-only connection (`?mode=ro`) for polling messages
-- `Publisher` — read-write connection for publishing messages back to agent-msg
+- `Publisher` — read-write connection for publishing messages back to agent-msg; supports `PublishReplace()` for single-message topics (e.g., onboarding)
 - Both work against the same `messages.db` file; agent-msg bash scripts remain compatible
+- Both use `sqliteutil.OpenWithRecovery()` to auto-detect and recover from stale WAL/SHM files
 
 ### TUI (internal/tui)
 
-Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `m` broadcast, `t` theme, `q` quit.
+Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `u` user msg, `m` broadcast, `o` onboard, `t` theme, `q` quit.
 
-- Spinner (bubbles/v2/spinner MiniDot) shown during manual poll (`r`) and broadcast send
-- Concerns capped at 5 displayed with "+N more" indicator
+- Spinner (bubbles/v2/spinner MiniDot) shown during manual poll (`r`), broadcast, and onboard generation
+- Concerns capped at 5 displayed with "+N more" indicator; color-coded by severity (info=muted, warning=amber, danger=bold red)
 - Event log dynamically sized to remaining terminal height
-- Broadcast mode: `m` opens textinput, Enter sends through tier 2 LLM → publishes to bus
+- Broadcast mode: `m` opens textarea, ctrl+d sends through tier 2 LLM → publishes to bus
+- Onboard mode: `o` opens textarea for optional guidance, ctrl+d generates onboarding message via tier 2 LLM → publishes to `<project>/onboarding` with replace semantics
 
 ### DB schema (internal/db) — currently v2
 
@@ -69,7 +72,8 @@ Migration v1→v2 adds `llm_summarizer_model`/`llm_analyzer_model` to projects a
 | `internal/tui` | Bubbletea dashboard | `app.go` (model/update/view), `styles.go` (themes) |
 | `internal/git` | Git CLI wrappers | `LogSince()`, `Branches()`, `WorktreeList()` |
 | `internal/discovery` | Repo scanning | `ScanRepo()`, `DeriveProjectName()`, `SuggestTopics()` |
-| `internal/msgbus` | Agent-msg client + publisher | Read-only `Client`, read-write `Publisher` |
+| `internal/sqliteutil` | SQLite health + WAL recovery | `OpenWithRecovery()`, stale -shm/-wal cleanup |
+| `internal/msgbus` | Agent-msg client + publisher | Read-only `Client`, read-write `Publisher` + `PublishReplace()` |
 
 ### Legacy packages (still present, unused by v2)
 
@@ -98,6 +102,7 @@ go test -tags integration -run TestIntegrationTwoTierPipeline -v ./internal/poll
 
 - `Poller.doPoll()` is the main loop body — gathers git + bus data, runs both LLM tiers, publishes, records
 - `Poller.Broadcast()` is the user-initiated broadcast path — gathers context, calls tier 2, publishes
+- `Poller.Onboard()` generates onboarding messages — gathers rich context, calls tier 2, publishes to `<project>/onboarding` with replace semantics
 - All TUI async operations use bubbletea Cmd pattern (return `func() tea.Msg`), not raw goroutines
 - Spinner ticks flow through the standard bubbletea Update loop via `spinner.TickMsg`
 - Theme is global mutable state (package-level `themeIndex`), cycled via `cycleTheme()`

@@ -32,6 +32,12 @@ type userMsgResultMsg struct {
 	err   error
 }
 
+// onboardResultMsg is sent when an onboarding message generation completes.
+type onboardResultMsg struct {
+	topic string
+	err   error
+}
+
 // clearUserMsgStatusMsg clears the user message status after a delay.
 type clearUserMsgStatusMsg struct{}
 
@@ -54,13 +60,17 @@ type Model struct {
 	polling bool // true while a manual poll is in progress
 
 	// Broadcast mode.
-	mode            string // "normal", "broadcast", or "usermsg"
+	mode            string // "normal", "broadcast", "usermsg", or "onboard"
 	broadcastInput  textarea.Model
 	broadcastStatus string
 
 	// User message mode.
 	userMsgInput  textarea.Model
 	userMsgStatus string
+
+	// Onboard mode.
+	onboardInput  textarea.Model
+	onboardStatus string
 }
 
 // New creates a new TUI model.
@@ -82,6 +92,12 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	ta.SetHeight(3)
 	ta.SetWidth(80)
 
+	oi := textarea.New()
+	oi.Placeholder = "Optional: guide the onboarding message (e.g., 'focus on test writing for feature A')... Leave empty for a general onboarding message."
+	oi.CharLimit = 500
+	oi.SetHeight(3)
+	oi.SetWidth(80)
+
 	return Model{
 		project:        project,
 		store:          store,
@@ -90,6 +106,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		mode:           "normal",
 		broadcastInput: bi,
 		userMsgInput:   ta,
+		onboardInput:   oi,
 		spinner:        sp,
 	}
 }
@@ -115,6 +132,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateBroadcast(msg)
 		case "usermsg":
 			return m.updateUserMsg(msg)
+		case "onboard":
+			return m.updateOnboard(msg)
 		default:
 			return m.updateNormal(msg)
 		}
@@ -167,6 +186,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = "normal"
 		return m, nil
 
+	case onboardResultMsg:
+		if msg.err != nil {
+			m.onboardStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.onboardStatus = fmt.Sprintf("Onboarding published to %s", msg.topic)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearOnboardStatusMsg{}
+		})
+
+	case clearOnboardStatusMsg:
+		m.onboardStatus = ""
+		m.mode = "normal"
+		return m, nil
+
 	case tickMsg:
 		return m, tickEvery()
 	}
@@ -175,6 +209,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 type clearBroadcastStatusMsg struct{}
+type clearOnboardStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -217,6 +252,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.broadcastInput.SetWidth(m.width - 4)
 		}
 		cmd := m.broadcastInput.Focus()
+		return m, cmd
+	case "o":
+		m.mode = "onboard"
+		m.onboardStatus = ""
+		m.onboardInput.Reset()
+		if m.width > 4 {
+			m.onboardInput.SetWidth(m.width - 4)
+		}
+		cmd := m.onboardInput.Focus()
 		return m, cmd
 	}
 	return m, nil
@@ -283,6 +327,32 @@ func (m Model) updateUserMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Delegate to textarea (Enter inserts newline by default).
 	var cmd tea.Cmd
 	m.userMsgInput, cmd = m.userMsgInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = "normal"
+		m.onboardStatus = ""
+		m.onboardInput.Blur()
+		return m, nil
+	case "ctrl+d":
+		guidance := m.onboardInput.Value()
+		m.onboardStatus = "Generating onboarding message..."
+		m.onboardInput.Blur()
+		p := m.poller
+		return m, func() tea.Msg {
+			busMsg, err := p.Onboard(context.Background(), guidance)
+			if err != nil {
+				return onboardResultMsg{err: err}
+			}
+			return onboardResultMsg{topic: busMsg.Topic}
+		}
+	}
+
+	var cmd tea.Cmd
+	m.onboardInput, cmd = m.onboardInput.Update(msg)
 	return m, cmd
 }
 
@@ -470,6 +540,25 @@ func (m Model) View() tea.View {
 			b.WriteString(helpStyle().Render("ctrl+d: send • esc: cancel"))
 		}
 		b.WriteString("\n")
+	case "onboard":
+		if m.onboardStatus != "" && m.onboardStatus != "Generating onboarding message..." {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.onboardStatus)))
+		} else if m.onboardStatus == "Generating onboarding message..." {
+			b.WriteString("  ")
+			b.WriteString(m.spinner.View())
+			b.WriteString(" ")
+			b.WriteString(broadcastStyle().Render("Generating onboarding message..."))
+		} else {
+			b.WriteString(headerStyle().Render("  Onboard — optional guidance for the new agent:"))
+			b.WriteString("\n")
+			b.WriteString("  ")
+			b.WriteString(m.onboardInput.View())
+		}
+		b.WriteString("\n")
+		if m.onboardStatus == "" {
+			b.WriteString(helpStyle().Render("ctrl+d: generate & publish • esc: cancel (leave empty for generic onboarding)"))
+		}
+		b.WriteString("\n")
 	default:
 		if m.broadcastStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.broadcastStatus)))
@@ -479,7 +568,7 @@ func (m Model) View() tea.View {
 			b.WriteString(userMsgStyle().Render(fmt.Sprintf("  %s", m.userMsgStatus)))
 			b.WriteString("\n")
 		}
-		b.WriteString(helpStyle().Render("p: pause/resume • r: poll now • e: expand/collapse • u: user msg • m: broadcast • t: theme • q: quit"))
+		b.WriteString(renderHelpBar(m.width))
 		b.WriteString("\n")
 	}
 
@@ -497,6 +586,44 @@ func listenForEvents(p *poller.Poller) tea.Cmd {
 		}
 		return pollerEventMsg(event)
 	}
+}
+
+// renderHelpBar builds a two-row help bar with styled key hints.
+func renderHelpBar(width int) string {
+	keyStyle := helpKeyStyle()
+	descStyle := helpStyle()
+	sep := descStyle.Render(" • ")
+
+	type hint struct {
+		key  string
+		desc string
+	}
+
+	hints := []hint{
+		{"p", "pause/resume"},
+		{"r", "poll now"},
+		{"e", "expand"},
+		{"u", "user msg"},
+		{"m", "broadcast"},
+		{"o", "onboard"},
+		{"t", "theme"},
+		{"q", "quit"},
+	}
+
+	var row1, row2 strings.Builder
+	for i, h := range hints {
+		entry := keyStyle.Render(h.key) + descStyle.Render(": "+h.desc)
+		target := &row1
+		if i >= 4 {
+			target = &row2
+		}
+		if target.Len() > 0 {
+			target.WriteString(sep)
+		}
+		target.WriteString(entry)
+	}
+
+	return row1.String() + "\n" + row2.String()
 }
 
 // tickEvery returns a command that sends a tick every 5 seconds.
