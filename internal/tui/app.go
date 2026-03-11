@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/poller"
@@ -25,6 +26,15 @@ type broadcastResultMsg struct {
 	topic string
 	err   error
 }
+
+// userMsgResultMsg is sent when a user message post completes.
+type userMsgResultMsg struct {
+	topic string
+	err   error
+}
+
+// clearUserMsgStatusMsg clears the user message status after a delay.
+type clearUserMsgStatusMsg struct{}
 
 // Model is the root bubbletea model for the dashboard.
 type Model struct {
@@ -45,9 +55,13 @@ type Model struct {
 	polling bool // true while a manual poll is in progress
 
 	// Broadcast mode.
-	mode            string // "normal" or "broadcast"
+	mode            string // "normal", "broadcast", or "usermsg"
 	broadcastInput  textinput.Model
 	broadcastStatus string
+
+	// User message mode.
+	userMsgInput  textarea.Model
+	userMsgStatus string
 }
 
 // New creates a new TUI model.
@@ -62,6 +76,12 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		spinner.WithStyle(spinnerStyle()),
 	)
 
+	ta := textarea.New()
+	ta.Placeholder = "Type your observation, note, or warning..."
+	ta.CharLimit = 1000
+	ta.SetHeight(3)
+	ta.SetWidth(80)
+
 	return Model{
 		project:        project,
 		store:          store,
@@ -69,6 +89,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		events:         make([]poller.Event, 0, 64),
 		mode:           "normal",
 		broadcastInput: ti,
+		userMsgInput:   ta,
 		spinner:        sp,
 	}
 }
@@ -89,10 +110,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
-		if m.mode == "broadcast" {
+		switch m.mode {
+		case "broadcast":
 			return m.updateBroadcast(msg)
+		case "usermsg":
+			return m.updateUserMsg(msg)
+		default:
+			return m.updateNormal(msg)
 		}
-		return m.updateNormal(msg)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -124,6 +149,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearBroadcastStatusMsg:
 		m.broadcastStatus = ""
+		m.mode = "normal"
+		return m, nil
+
+	case userMsgResultMsg:
+		if msg.err != nil {
+			m.userMsgStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.userMsgStatus = fmt.Sprintf("Posted to %s", msg.topic)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearUserMsgStatusMsg{}
+		})
+
+	case clearUserMsgStatusMsg:
+		m.userMsgStatus = ""
 		m.mode = "normal"
 		return m, nil
 
@@ -160,6 +200,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "t":
 		cycleTheme()
 		return m, nil
+	case "u":
+		m.mode = "usermsg"
+		m.userMsgStatus = ""
+		m.userMsgInput.Reset()
+		if m.width > 4 {
+			m.userMsgInput.SetWidth(m.width - 4)
+		}
+		cmd := m.userMsgInput.Focus()
+		return m, cmd
 	case "m":
 		m.mode = "broadcast"
 		m.broadcastStatus = ""
@@ -202,6 +251,38 @@ func (m Model) updateBroadcast(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateUserMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = "normal"
+		m.userMsgStatus = ""
+		m.userMsgInput.Blur()
+		return m, nil
+	case "ctrl+d":
+		value := m.userMsgInput.Value()
+		if strings.TrimSpace(value) == "" {
+			m.mode = "normal"
+			m.userMsgInput.Blur()
+			return m, nil
+		}
+		m.userMsgStatus = "Posting..."
+		m.userMsgInput.Blur()
+		p := m.poller
+		return m, func() tea.Msg {
+			err := p.PostUserMessage(context.Background(), value)
+			if err != nil {
+				return userMsgResultMsg{err: err}
+			}
+			return userMsgResultMsg{topic: p.Project().Name + "/coord"}
+		}
+	}
+
+	// Delegate to textarea (Enter inserts newline by default).
+	var cmd tea.Cmd
+	m.userMsgInput, cmd = m.userMsgInput.Update(msg)
+	return m, cmd
+}
+
 func (m Model) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView("Loading...")
@@ -228,7 +309,8 @@ func (m Model) View() tea.View {
 	b.WriteString("\n")
 
 	// Goal.
-	b.WriteString(mutedStyle().Render(fmt.Sprintf("  %s — %s", m.project.GoalType, m.project.GoalDescription)))
+	goalText := fmt.Sprintf("  %s — %s", m.project.GoalType, m.project.GoalDescription)
+	b.WriteString(mutedStyle().Width(m.width).Render(goalText))
 	b.WriteString("\n\n")
 
 	// Repos section.
@@ -264,10 +346,10 @@ func (m Model) View() tea.View {
 			shown = shown[:maxConcerns]
 		}
 		for _, c := range shown {
-			style := concernInfoStyle()
+			style := concernInfoStyle().Width(m.width - 2)
 			prefix := "INFO"
 			if c.Severity == "warning" {
-				style = concernWarningStyle()
+				style = concernWarningStyle().Width(m.width - 2)
 				prefix = "WARN"
 			}
 			b.WriteString(style.Render(fmt.Sprintf("  [%s] %s", prefix, c.Message)))
@@ -305,20 +387,8 @@ func (m Model) View() tea.View {
 				if len(lines) > 3 {
 					response = strings.Join(lines[:3], "\n") + "\n  ..."
 				}
-				// Also limit width.
-				maxWidth := m.width - 4
-				if maxWidth > 0 {
-					var truncated []string
-					for _, line := range strings.Split(response, "\n") {
-						if len(line) > maxWidth {
-							line = line[:maxWidth-3] + "..."
-						}
-						truncated = append(truncated, line)
-					}
-					response = strings.Join(truncated, "\n")
-				}
 			}
-			b.WriteString(llmResponseStyle().Render(response))
+			b.WriteString(llmResponseStyle().Width(m.width - 2).Render(response))
 			b.WriteString("\n")
 		}
 	} else {
@@ -356,9 +426,10 @@ func (m Model) View() tea.View {
 		b.WriteString("\n")
 	}
 
-	// Bottom bar: broadcast input or help.
+	// Bottom bar: input or help.
 	b.WriteString("\n")
-	if m.mode == "broadcast" {
+	switch m.mode {
+	case "broadcast":
 		if m.broadcastStatus == "Sending..." {
 			b.WriteString("  ")
 			b.WriteString(m.spinner.View())
@@ -375,12 +446,33 @@ func (m Model) View() tea.View {
 			b.WriteString(helpStyle().Render("enter: send • esc: cancel"))
 		}
 		b.WriteString("\n")
-	} else {
+	case "usermsg":
+		if m.userMsgStatus == "Posting..." {
+			b.WriteString("  ")
+			b.WriteString(m.spinner.View())
+			b.WriteString(" ")
+			b.WriteString(userMsgStyle().Render("Posting message..."))
+		} else if m.userMsgStatus != "" {
+			b.WriteString(userMsgStyle().Render(fmt.Sprintf("  %s", m.userMsgStatus)))
+		} else {
+			b.WriteString("  ")
+			b.WriteString(m.userMsgInput.View())
+		}
+		b.WriteString("\n")
+		if m.userMsgStatus == "" {
+			b.WriteString(helpStyle().Render("ctrl+d: send • esc: cancel"))
+		}
+		b.WriteString("\n")
+	default:
 		if m.broadcastStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.broadcastStatus)))
 			b.WriteString("\n")
 		}
-		b.WriteString(helpStyle().Render("p: pause/resume • r: poll now • e: expand/collapse • m: broadcast • t: theme • q: quit"))
+		if m.userMsgStatus != "" {
+			b.WriteString(userMsgStyle().Render(fmt.Sprintf("  %s", m.userMsgStatus)))
+			b.WriteString("\n")
+		}
+		b.WriteString(helpStyle().Render("p: pause/resume • r: poll now • e: expand/collapse • u: user msg • m: broadcast • t: theme • q: quit"))
 		b.WriteString("\n")
 	}
 

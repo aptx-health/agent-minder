@@ -20,7 +20,7 @@ import (
 // Event is emitted by the poller for the TUI to consume.
 type Event struct {
 	Time       time.Time
-	Type       string // "poll", "error", "paused", "resumed", "broadcast"
+	Type       string // "poll", "error", "paused", "resumed", "broadcast", "user"
 	Summary    string
 	PollResult *PollResult
 }
@@ -72,6 +72,11 @@ func New(store *db.Store, project *db.Project, provider llm.Provider, publisher 
 // Events returns the channel of events for the TUI.
 func (p *Poller) Events() <-chan Event {
 	return p.events
+}
+
+// Project returns the poller's project.
+func (p *Poller) Project() *db.Project {
+	return p.project
 }
 
 // Start begins the polling loop in a goroutine.
@@ -216,6 +221,24 @@ Keep messages actionable and concise. Use the project's coordination topic.`
 	}
 
 	return nil, fmt.Errorf("LLM did not produce a publishable message")
+}
+
+// PostUserMessage publishes a verbatim user message to the bus without LLM processing.
+// The sender is "user@<minder-identity>" so doPoll picks it up as bus activity.
+func (p *Poller) PostUserMessage(ctx context.Context, message string) error {
+	if p.publisher == nil {
+		return fmt.Errorf("bus publishing not available")
+	}
+
+	topic := p.project.Name + "/coord"
+	sender := "user@" + p.project.MinderIdentity
+
+	if err := p.publisher.Publish(topic, sender, message); err != nil {
+		return fmt.Errorf("publishing user message: %w", err)
+	}
+
+	p.emit("user", fmt.Sprintf("Posted to %s", topic), nil)
+	return nil
 }
 
 func (p *Poller) run(ctx context.Context) {

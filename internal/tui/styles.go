@@ -110,6 +110,10 @@ func broadcastStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Secondary).Italic(true)
 }
 
+func userMsgStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(currentTheme().Success)
+}
+
 func spinnerStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Secondary)
 }
