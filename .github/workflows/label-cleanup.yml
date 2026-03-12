@@ -1,0 +1,24 @@
+name: Remove in-progress on close
+
+on:
+  issues:
+    types: [closed]
+
+jobs:
+  cleanup-label:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const label = 'in-progress';
+            const labels = context.payload.issue.labels.map(l => l.name);
+            if (labels.includes(label)) {
+              await github.rest.issues.removeLabel({
+                ...context.repo,
+                issue_number: context.issue.number,
+                name: label,
+              });
+            }
