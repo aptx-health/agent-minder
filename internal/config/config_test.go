@@ -28,6 +28,7 @@ func setupTestKeyring(t *testing.T) *secrets.MapKeyring {
 func TestGetProviderAPIKey_FromConfig(t *testing.T) {
 	resetViper(t)
 	setupTestKeyring(t)
+	t.Setenv("ANTHROPIC_API_KEY", "")
 	viper.Set("providers.anthropic.api_key", "sk-ant-test123")
 
 	got := GetProviderAPIKey("anthropic")
@@ -138,6 +139,10 @@ func TestSetAndSave(t *testing.T) {
 
 	resetViper(t)
 	setupTestKeyring(t) // re-setup empty keyring after reset
+	// Clear env vars so they don't take precedence over config file values.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	viper.SetConfigFile(configPath)
 	if err := viper.ReadInConfig(); err != nil {
 		t.Fatalf("ReadInConfig: %v", err)
