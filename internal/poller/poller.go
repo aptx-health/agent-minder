@@ -503,7 +503,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		token := config.GetIntegrationToken("github")
 		if token != "" {
 			gh := ghpkg.NewClient(token)
-			sweepResults, trackedChanges = p.sweepTrackedItems(ctx, trackedItems, gh)
+			sweepResults, trackedChanges = p.sweepTrackedItems(ctx, trackedItems, gh, repos)
 			for _, sr := range sweepResults {
 				if sr.Changed {
 					result.TrackedItemChanges = append(result.TrackedItemChanges, TrackedItemChange{

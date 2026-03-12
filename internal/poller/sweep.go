@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dustinlange/agent-minder/internal/db"
+	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/llm"
 )
@@ -33,7 +34,8 @@ type ItemSweepResponse struct {
 
 // computeContentHash returns a SHA-256 hex digest of the normalized content.
 // Labels are sorted to ensure order-independence.
-func computeContentHash(state string, labels string, body string, comments []string) string {
+// relatedCommits are included so new commits referencing the item invalidate the cache.
+func computeContentHash(state string, labels string, body string, comments []string, relatedCommits []string) string {
 	h := sha256.New()
 
 	h.Write([]byte("state:"))
@@ -57,11 +59,17 @@ func computeContentHash(state string, labels string, body string, comments []str
 		h.Write([]byte("\n"))
 	}
 
+	for _, rc := range relatedCommits {
+		h.Write([]byte("commit:"))
+		h.Write([]byte(rc))
+		h.Write([]byte("\n"))
+	}
+
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func itemSweepSystemPrompt() string {
-	return `You are a concise issue/PR summarizer. Given a GitHub issue or PR with its body and recent comments, produce two brief summaries.
+	return `You are a concise issue/PR summarizer. Given a GitHub issue or PR with its body, recent comments, and related git commits, produce two brief summaries.
 
 Respond with a JSON object (no markdown fences):
 {
@@ -72,11 +80,12 @@ Respond with a JSON object (no markdown fences):
 Rules:
 - Be terse and factual
 - "objective" should capture the goal/purpose regardless of current state
-- "progress" should reflect the latest status from comments and state
-- If there are no comments, base progress on the issue body and state alone`
+- "progress" should reflect the latest status from comments, state, AND related git commits
+- Related git commits are the strongest signal of implementation progress — if commits exist, work is actively happening
+- If there are no comments or commits, base progress on the issue body and state alone`
 }
 
-func buildItemSweepPrompt(item *db.TrackedItem, content *ghpkg.ItemContent) string {
+func buildItemSweepPrompt(item *db.TrackedItem, content *ghpkg.ItemContent, relatedCommits []gitpkg.LogEntry) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## %s %s/%s#%d: %s\n\n", item.ItemType, item.Owner, item.Repo, item.Number, item.Title)
@@ -101,6 +110,13 @@ func buildItemSweepPrompt(item *db.TrackedItem, content *ghpkg.ItemContent) stri
 				comment = comment[:500] + "...[truncated]"
 			}
 			fmt.Fprintf(&b, "\n**Comment %d:**\n%s\n", i+1, comment)
+		}
+	}
+
+	if len(relatedCommits) > 0 {
+		b.WriteString("\n### Related Git Commits (newest first)\n")
+		for _, rc := range relatedCommits {
+			fmt.Fprintf(&b, "- %s: %s (%s, %s)\n", rc.Hash, rc.Subject, rc.Author, rc.Date.Format("2006-01-02"))
 		}
 	}
 
@@ -145,8 +161,9 @@ func parseItemSweep(raw string) *ItemSweepResponse {
 }
 
 // sweepTrackedItems runs the Haiku pre-sweep across all tracked items with bounded concurrency.
+// repos are used to scan git history for commits referencing each item.
 // Returns sweep results and a summary string for the tier 1 prompt.
-func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, gh *ghpkg.Client) ([]SweepResult, string) {
+func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, gh *ghpkg.Client, repos []db.Repo) ([]SweepResult, string) {
 	if len(items) == 0 {
 		return nil, ""
 	}
@@ -166,7 +183,7 @@ func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, 
 			defer wg.Done()
 			sem <- struct{}{}        // acquire
 			defer func() { <-sem }() // release
-			results[idx] = p.sweepOneItem(ctx, &items[idx], gh, haikuModel)
+			results[idx] = p.sweepOneItem(ctx, &items[idx], gh, haikuModel, repos)
 		}(i)
 	}
 	wg.Wait()
@@ -182,8 +199,8 @@ func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, 
 	return results, trackedSummary.String()
 }
 
-// sweepOneItem handles a single tracked item: fetch metadata, fetch content, hash check, optional Haiku call.
-func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghpkg.Client, haikuModel string) SweepResult {
+// sweepOneItem handles a single tracked item: fetch metadata, fetch content, git cross-ref, hash check, optional Haiku call.
+func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghpkg.Client, haikuModel string, repos []db.Repo) SweepResult {
 	result := SweepResult{Item: item, OldStatus: item.LastStatus}
 
 	// Step 1: Fetch metadata (status, title, labels).
@@ -217,13 +234,32 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 		return result
 	}
 
-	// Step 3: Compute content hash.
-	newHash := computeContentHash(item.State, item.Labels, content.Body, content.Comments)
+	// Step 2b: Scan enrolled repos for commits referencing this item (e.g., "#3").
+	pattern := fmt.Sprintf("#%d", item.Number)
+	var relatedCommits []gitpkg.LogEntry
+	var commitHashes []string
+	for _, repo := range repos {
+		entries, err := gitpkg.LogGrep(repo.Path, pattern)
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		// Cap at 10 most recent per repo.
+		if len(entries) > 10 {
+			entries = entries[:10]
+		}
+		relatedCommits = append(relatedCommits, entries...)
+		for _, e := range entries {
+			commitHashes = append(commitHashes, e.Hash+":"+e.Subject)
+		}
+	}
+
+	// Step 3: Compute content hash (includes related commits so new commits invalidate cache).
+	newHash := computeContentHash(item.State, item.Labels, content.Body, content.Comments, commitHashes)
 
 	// Step 4: Hash comparison — only run Haiku if content changed or no cached hash.
 	if newHash != item.ContentHash || item.ContentHash == "" {
 		// Run Haiku summarizer.
-		prompt := buildItemSweepPrompt(item, content)
+		prompt := buildItemSweepPrompt(item, content, relatedCommits)
 		debugf("=== SWEEP HAIKU INPUT [%s] ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", item.DisplayRef(), itemSweepSystemPrompt(), prompt)
 		resp, err := p.provider.Complete(ctx, &llm.Request{
 			Model:     haikuModel,
