@@ -27,11 +27,7 @@ func Path(project string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".agent-minder", project)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "state.md"), nil
+	return filepath.Join(home, ".agent-minder", project, "state.md"), nil
 }
 
 // Load reads and parses the state file for a project.

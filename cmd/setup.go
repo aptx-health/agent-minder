@@ -8,6 +8,7 @@ import (
 
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var setupCmd = &cobra.Command{
@@ -179,8 +180,20 @@ func readNo(reader *bufio.Reader) bool {
 	return strings.HasPrefix(strings.ToLower(line), "n")
 }
 
-// readLineSensitive reads a line, trimming whitespace. In the future this
-// could disable echo for secret input.
-func readLineSensitive(reader *bufio.Reader) string {
-	return readLine(reader)
+// readLineSensitive reads a secret without echoing to the terminal.
+// Falls back to plain readLine if stdin is not a terminal (e.g., piped input).
+func readLineSensitive(_ *bufio.Reader) string {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		// Not a terminal — fall back to reading from the reader.
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		return strings.TrimSpace(line)
+	}
+	secret, err := term.ReadPassword(fd)
+	fmt.Println() // newline after hidden input
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(secret))
 }

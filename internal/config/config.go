@@ -30,23 +30,31 @@ type Config struct {
 }
 
 // BaseDir returns the root config directory (~/.agent-minder).
-func BaseDir() string {
+func BaseDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".agent-minder"
+		return "", fmt.Errorf("resolving home directory: %w", err)
 	}
-	return filepath.Join(home, ".agent-minder")
+	return filepath.Join(home, ".agent-minder"), nil
 }
 
 // ConfigPath returns the full path to the config file.
 func ConfigPath() string {
-	return filepath.Join(BaseDir(), "config.yaml")
+	base, err := BaseDir()
+	if err != nil {
+		return "config.yaml" // last resort; Init() will log a warning
+	}
+	return filepath.Join(base, "config.yaml")
 }
 
 // Init sets up Viper to read from the config file and environment.
 // Call this once at application startup (e.g., in root command's PersistentPreRun).
 func Init() {
-	base := BaseDir()
+	base, err := BaseDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		return
+	}
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(base)
@@ -82,7 +90,11 @@ func Load() (*Config, error) {
 
 // Save writes the current Viper state to the config file with restricted permissions.
 func Save() error {
-	path := ConfigPath()
+	base, err := BaseDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(base, "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
