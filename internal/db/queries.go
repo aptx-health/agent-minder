@@ -194,7 +194,7 @@ func (s *Store) GetWorktreesForProject(projectID int64) ([]WorktreeWithRepo, err
 		FROM worktrees w
 		JOIN repos r ON r.id = w.repo_id
 		WHERE r.project_id = ?
-		ORDER BY r.short_name, w.branch
+		ORDER BY r.short_name, w.id DESC
 	`, projectID); err != nil {
 		return nil, fmt.Errorf("get worktrees for project: %w", err)
 	}

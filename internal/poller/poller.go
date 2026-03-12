@@ -520,8 +520,14 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			p.emit("worktree", fmt.Sprintf("Failed to load stored worktrees for %s: %v", repo.ShortName, err), nil)
 		}
 		if worktreesChanged(existing, dbWorktrees) {
+			added, removed := diffWorktrees(existing, dbWorktrees)
 			if err := p.store.ReplaceWorktrees(repo.ID, dbWorktrees); err == nil {
-				p.emit("worktree", fmt.Sprintf("Synced worktrees for %s (%d active)", repo.ShortName, len(dbWorktrees)), nil)
+				for _, branch := range added {
+					p.emit("worktree", fmt.Sprintf("New worktree: %s/%s", repo.ShortName, branch), nil)
+				}
+				for _, branch := range removed {
+					p.emit("worktree", fmt.Sprintf("Removed worktree: %s/%s", repo.ShortName, branch), nil)
+				}
 			}
 		}
 		// Append active branches to git summary for LLM context.
@@ -896,6 +902,37 @@ func worktreesChanged(existing []db.Worktree, incoming []db.Worktree) bool {
 		}
 	}
 	return false
+}
+
+// diffWorktrees returns branches that were added and removed between existing and incoming sets.
+func diffWorktrees(existing, incoming []db.Worktree) (added, removed []string) {
+	oldSet := make(map[string]bool, len(existing))
+	for _, w := range existing {
+		oldSet[w.Path+"\x00"+w.Branch] = true
+	}
+	newSet := make(map[string]bool, len(incoming))
+	for _, w := range incoming {
+		newSet[w.Path+"\x00"+w.Branch] = true
+	}
+	for _, w := range incoming {
+		if !oldSet[w.Path+"\x00"+w.Branch] {
+			name := w.Branch
+			if name == "" {
+				name = "(detached)"
+			}
+			added = append(added, name)
+		}
+	}
+	for _, w := range existing {
+		if !newSet[w.Path+"\x00"+w.Branch] {
+			name := w.Branch
+			if name == "" {
+				name = "(detached)"
+			}
+			removed = append(removed, name)
+		}
+	}
+	return
 }
 
 func (p *Poller) emit(typ, summary string, result *PollResult) {

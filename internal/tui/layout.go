@@ -281,19 +281,34 @@ func (m Model) renderWorktrees() string {
 		grouped[wt.RepoShortName] = append(grouped[wt.RepoShortName], branch)
 	}
 
-	const maxLines = 6
-	shown := 0
+	const maxRenderedLines = 6
+	linesUsed := 0
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+
 	for i, repo := range repoOrder {
-		if shown >= maxLines {
-			remaining := len(repoOrder) - i
-			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more repos", remaining)))
+		branches := grouped[repo]
+		line := fmt.Sprintf("  %s: %s", repo, strings.Join(branches, ", "))
+		// Estimate wrapped line count based on terminal width.
+		lineCount := (len(line) + width - 1) / width
+		if lineCount < 1 {
+			lineCount = 1
+		}
+		if linesUsed+lineCount > maxRenderedLines && linesUsed > 0 {
+			// Count remaining worktrees across skipped repos.
+			remaining := 0
+			for _, r := range repoOrder[i:] {
+				remaining += len(grouped[r])
+			}
+			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more worktrees across %d repos", remaining, len(repoOrder)-i)))
 			b.WriteString("\n")
 			break
 		}
-		branches := grouped[repo]
-		b.WriteString(textStyle().Render(fmt.Sprintf("  %s: %s", repo, strings.Join(branches, ", "))))
+		b.WriteString(textStyle().Render(line))
 		b.WriteString("\n")
-		shown++
+		linesUsed += lineCount
 	}
 
 	return b.String()

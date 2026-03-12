@@ -92,3 +92,76 @@ func TestWorktreesChanged(t *testing.T) {
 		})
 	}
 }
+
+func TestDiffWorktrees(t *testing.T) {
+	tests := []struct {
+		name        string
+		existing    []db.Worktree
+		incoming    []db.Worktree
+		wantAdded   []string
+		wantRemoved []string
+	}{
+		{
+			name:        "no changes",
+			existing:    []db.Worktree{{Path: "/a", Branch: "main"}},
+			incoming:    []db.Worktree{{Path: "/a", Branch: "main"}},
+			wantAdded:   nil,
+			wantRemoved: nil,
+		},
+		{
+			name:        "new worktree added",
+			existing:    []db.Worktree{{Path: "/a", Branch: "main"}},
+			incoming:    []db.Worktree{{Path: "/a", Branch: "main"}, {Path: "/b", Branch: "feature/auth"}},
+			wantAdded:   []string{"feature/auth"},
+			wantRemoved: nil,
+		},
+		{
+			name:        "worktree removed",
+			existing:    []db.Worktree{{Path: "/a", Branch: "main"}, {Path: "/b", Branch: "feature/auth"}},
+			incoming:    []db.Worktree{{Path: "/a", Branch: "main"}},
+			wantAdded:   nil,
+			wantRemoved: []string{"feature/auth"},
+		},
+		{
+			name:        "branch switched on same path",
+			existing:    []db.Worktree{{Path: "/a", Branch: "main"}},
+			incoming:    []db.Worktree{{Path: "/a", Branch: "develop"}},
+			wantAdded:   []string{"develop"},
+			wantRemoved: []string{"main"},
+		},
+		{
+			name:        "from empty",
+			existing:    nil,
+			incoming:    []db.Worktree{{Path: "/a", Branch: "main"}},
+			wantAdded:   []string{"main"},
+			wantRemoved: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			added, removed := diffWorktrees(tt.existing, tt.incoming)
+			if !slicesEqual(added, tt.wantAdded) {
+				t.Errorf("added = %v, want %v", added, tt.wantAdded)
+			}
+			if !slicesEqual(removed, tt.wantRemoved) {
+				t.Errorf("removed = %v, want %v", removed, tt.wantRemoved)
+			}
+		})
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

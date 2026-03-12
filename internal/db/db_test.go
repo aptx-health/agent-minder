@@ -204,7 +204,8 @@ func TestGetWorktreesForProject(t *testing.T) {
 		t.Fatalf("len = %d, want 3", len(got))
 	}
 
-	// Verify ordering: app first (alphabetical by short_name), then lib.
+	// Verify ordering: grouped by repo (alphabetical), newest first within repo (highest ID).
+	// ReplaceWorktrees inserts in order, so feature/auth (id=2) > main (id=1).
 	if got[0].RepoShortName != "app" || got[0].Branch != "feature/auth" {
 		t.Errorf("got[0] = %s/%s, want app/feature/auth", got[0].RepoShortName, got[0].Branch)
 	}
