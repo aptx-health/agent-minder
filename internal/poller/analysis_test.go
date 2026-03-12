@@ -2,6 +2,7 @@ package poller
 
 import (
 	"testing"
+	"time"
 
 	"github.com/dustinlange/agent-minder/internal/db"
 )
@@ -116,5 +117,35 @@ func TestParseAnalysisNoBusMessage(t *testing.T) {
 	}
 	if len(resp.Concerns) != 1 {
 		t.Errorf("concerns len = %d, want 1", len(resp.Concerns))
+	}
+}
+
+func TestRelativeAge(t *testing.T) {
+	tests := []struct {
+		name   string
+		offset time.Duration
+		want   string
+	}{
+		{"seconds", 30 * time.Second, "30s"},
+		{"minutes", 5 * time.Minute, "5m"},
+		{"hours", 2 * time.Hour, "2h"},
+		{"hours_and_minutes", 2*time.Hour + 30*time.Minute, "2h30m"},
+		{"days", 48 * time.Hour, "2d"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := time.Now().Add(-tt.offset).UTC().Format("2006-01-02 15:04:05")
+			got := relativeAge(ts)
+			if got != tt.want {
+				t.Errorf("relativeAge(%q) = %q, want %q", ts, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRelativeAge_InvalidTimestamp(t *testing.T) {
+	got := relativeAge("not-a-timestamp")
+	if got != "??" {
+		t.Errorf("relativeAge(invalid) = %q, want %q", got, "??")
 	}
 }

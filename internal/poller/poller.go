@@ -67,6 +67,31 @@ func debugf(format string, args ...interface{}) {
 	debugLog.Printf(format, args...)
 }
 
+// relativeAge returns a human-readable duration string (e.g., "5m", "2h") from
+// an ISO datetime string to now. Returns "??" if the timestamp cannot be parsed.
+func relativeAge(isoTime string) string {
+	t, err := time.Parse("2006-01-02 15:04:05", isoTime)
+	if err != nil {
+		return "??"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m > 0 {
+			return fmt.Sprintf("%dh%dm", h, m)
+		}
+		return fmt.Sprintf("%dh", h)
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
 // Event is emitted by the poller for the TUI to consume.
 type Event struct {
 	Time       time.Time
@@ -487,7 +512,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		if len(filtered) > 0 {
 			msgSummary.WriteString("\n### Recent Messages\n")
 			for _, m := range filtered {
-				fmt.Fprintf(&msgSummary, "- [%s] %s: %s\n", m.Topic, m.Sender, m.Message)
+				age := relativeAge(m.CreatedAt)
+				fmt.Fprintf(&msgSummary, "- (%s ago) [%s] %s: %s\n", age, m.Topic, m.Sender, m.Message)
 			}
 		}
 	}
@@ -699,6 +725,7 @@ Rules:
 - Be terse: 1-3 sentences max
 - Focus on what was communicated, by whom, and any action items or coordination signals
 - Note cross-agent patterns or requests
+- Each message includes a relative age (e.g., "5m ago", "2h ago"). Prioritize recent messages over older ones. Older messages may have been superseded by newer activity — note their age when summarizing so the analyzer can weigh recency.
 - Do NOT provide recommendations — just summarize the facts`
 }
 
@@ -736,6 +763,11 @@ Rules:
   - Do NOT raise concerns about closed/merged items — they are done.
 
 - "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
+
+Recency standards:
+- Bus messages include relative ages. Messages older than the current poll window are historical context only — do NOT treat them as current state.
+- When a newer message or git activity contradicts an older bus message, the newer evidence takes precedence (e.g., if a merge happened after a "waiting on merge" message, the blocker is resolved).
+- Do NOT raise concerns based solely on stale bus messages that may have been superseded by newer activity.
 
 Evidence standards:
 - Related git commits in tracked items are the strongest signal of active development. If an item has recent commits, it IS being worked on.
