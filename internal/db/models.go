@@ -57,6 +57,13 @@ type Worktree struct {
 	Branch string `db:"branch"`
 }
 
+// WorktreeWithRepo joins a worktree with its parent repo's short name,
+// avoiding N+1 queries when displaying worktrees for a project.
+type WorktreeWithRepo struct {
+	Worktree
+	RepoShortName string `db:"repo_short_name"`
+}
+
 // Topic represents a message bus topic.
 type Topic struct {
 	ID        int64  `db:"id"`

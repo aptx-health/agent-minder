@@ -479,7 +479,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		return nil, fmt.Errorf("get repos: %w", err)
 	}
 
-	// Gather git activity.
+	// Gather git activity and sync worktrees.
 	var gitSummary strings.Builder
 	since := time.Now().Add(-p.project.RefreshInterval() * 2) // Look back 2 intervals.
 	for _, repo := range repos {
@@ -491,6 +491,38 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		fmt.Fprintf(&gitSummary, "\n### %s (%d new commits)\n", repo.ShortName, len(entries))
 		for _, e := range entries {
 			fmt.Fprintf(&gitSummary, "- %s: %s (%s)\n", e.Hash[:7], e.Subject, e.Author)
+		}
+	}
+
+	// Sync worktrees for each repo and include active branches in git summary.
+	for _, repo := range repos {
+		wtEntries, err := gitpkg.Worktrees(repo.Path)
+		if err != nil {
+			continue
+		}
+		// Convert to db.Worktree and check for changes.
+		var dbWorktrees []db.Worktree
+		var branchNames []string
+		for _, wt := range wtEntries {
+			dbWorktrees = append(dbWorktrees, db.Worktree{
+				RepoID: repo.ID,
+				Path:   wt.Path,
+				Branch: wt.Branch,
+			})
+			if wt.Branch != "" {
+				branchNames = append(branchNames, wt.Branch)
+			}
+		}
+		// Compare with stored worktrees.
+		existing, _ := p.store.GetWorktrees(repo.ID)
+		if worktreesChanged(existing, dbWorktrees) {
+			if err := p.store.ReplaceWorktrees(repo.ID, dbWorktrees); err == nil {
+				p.emit("worktree", fmt.Sprintf("Synced worktrees for %s (%d active)", repo.ShortName, len(dbWorktrees)), nil)
+			}
+		}
+		// Append active branches to git summary for LLM context.
+		if len(branchNames) > 1 { // Only interesting if more than just main.
+			fmt.Fprintf(&gitSummary, "\n### %s active branches: %s\n", repo.ShortName, strings.Join(branchNames, ", "))
 		}
 	}
 
@@ -843,6 +875,23 @@ func (p *Poller) summarize(result *PollResult) string {
 		return "No new activity"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// worktreesChanged returns true if the set of worktrees (by path+branch) differs.
+func worktreesChanged(existing []db.Worktree, incoming []db.Worktree) bool {
+	if len(existing) != len(incoming) {
+		return true
+	}
+	set := make(map[string]bool, len(existing))
+	for _, w := range existing {
+		set[w.Path+"\x00"+w.Branch] = true
+	}
+	for _, w := range incoming {
+		if !set[w.Path+"\x00"+w.Branch] {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Poller) emit(typ, summary string, result *PollResult) {
