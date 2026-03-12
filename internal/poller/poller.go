@@ -512,6 +512,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 						OldStatus: sr.OldStatus,
 						NewStatus: sr.NewStatus,
 					})
+					// Emit per-item status change event for the TUI event log.
+					p.emit("tracked", fmt.Sprintf("%s: %s → %s", sr.Item.DisplayRef(), sr.OldStatus, sr.NewStatus), nil)
 				}
 			}
 		}
