@@ -64,6 +64,7 @@ func TestProjectCRUD(t *testing.T) {
 		LLMModel:            "claude-haiku-4-5",
 		LLMSummarizerModel:  "claude-haiku-4-5",
 		LLMAnalyzerModel:    "claude-sonnet-4-6",
+		IdlePauseSec:        14400,
 	}
 
 	if err := store.CreateProject(p); err != nil {
@@ -89,6 +90,12 @@ func TestProjectCRUD(t *testing.T) {
 	}
 	if got.LLMAnalyzerModel != "claude-sonnet-4-6" {
 		t.Errorf("LLMAnalyzerModel = %q, want %q", got.LLMAnalyzerModel, "claude-sonnet-4-6")
+	}
+	if got.IdlePauseSec != 14400 {
+		t.Errorf("IdlePauseSec = %d, want 14400", got.IdlePauseSec)
+	}
+	if got.IdlePauseDuration().Hours() != 4 {
+		t.Errorf("IdlePauseDuration = %v, want 4h", got.IdlePauseDuration())
 	}
 
 	// Update.
@@ -517,6 +524,161 @@ func TestMigrationV3ToV4(t *testing.T) {
 		t.Errorf("ContentHash = %q, want deadbeef", items[0].ContentHash)
 	}
 }
+
+func TestMigrationV4ToV5(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Create a v4 database manually.
+	conn, err := openRawV4(dbPath)
+	if err != nil {
+		t.Fatalf("create v4 db: %v", err)
+	}
+
+	// Insert v4 data.
+	_, err = conn.Exec(`INSERT INTO projects (name, goal_type, goal_description, minder_identity, llm_provider, llm_model, llm_summarizer_model, llm_analyzer_model)
+		VALUES ('migtest5', 'feature', 'test goal', 'migtest5/minder', 'anthropic', 'claude-haiku-4-5', 'claude-haiku-4-5', 'claude-sonnet-4-6')`)
+	if err != nil {
+		t.Fatalf("insert v4 project: %v", err)
+	}
+	conn.Close()
+
+	// Re-open with current migration code — should migrate to v5.
+	conn2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open after v4: %v", err)
+	}
+	defer conn2.Close()
+	store := NewStore(conn2)
+
+	// Check schema version.
+	var version int
+	store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1")
+	if version != currentVersion {
+		t.Errorf("version = %d, want %d", version, currentVersion)
+	}
+
+	// Check project got idle_pause_sec with default value.
+	proj, err := store.GetProject("migtest5")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if proj.IdlePauseSec != 14400 {
+		t.Errorf("IdlePauseSec = %d, want 14400 (default)", proj.IdlePauseSec)
+	}
+
+	// Verify it can be updated.
+	proj.IdlePauseSec = 7200
+	if err := store.UpdateProject(proj); err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+	proj, _ = store.GetProject("migtest5")
+	if proj.IdlePauseSec != 7200 {
+		t.Errorf("after update IdlePauseSec = %d, want 7200", proj.IdlePauseSec)
+	}
+}
+
+// openRawV4 creates a database with the v4 schema (no idle_pause_sec).
+func openRawV4(path string) (*sqlx.DB, error) {
+	db, err := sqlx.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(schemaV4_only); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec("INSERT INTO schema_version (version) VALUES (4)"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// schemaV4_only is the v4 schema without the v5 idle_pause_sec column.
+const schemaV4_only = `
+CREATE TABLE IF NOT EXISTS schema_version (
+	version INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS projects (
+	id                    INTEGER PRIMARY KEY,
+	name                  TEXT UNIQUE NOT NULL,
+	goal_type             TEXT,
+	goal_description      TEXT,
+	refresh_interval_sec  INTEGER DEFAULT 300,
+	message_ttl_sec       INTEGER DEFAULT 172800,
+	auto_enroll_worktrees BOOLEAN DEFAULT 1,
+	minder_identity       TEXT,
+	llm_provider          TEXT DEFAULT 'anthropic',
+	llm_model             TEXT DEFAULT 'claude-haiku-4-5',
+	llm_summarizer_model  TEXT DEFAULT 'claude-haiku-4-5',
+	llm_analyzer_model    TEXT DEFAULT 'claude-sonnet-4-6',
+	created_at            TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS repos (
+	id         INTEGER PRIMARY KEY,
+	project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	path       TEXT NOT NULL,
+	short_name TEXT NOT NULL,
+	summary    TEXT,
+	UNIQUE(project_id, path)
+);
+CREATE TABLE IF NOT EXISTS worktrees (
+	id      INTEGER PRIMARY KEY,
+	repo_id INTEGER REFERENCES repos(id) ON DELETE CASCADE,
+	path    TEXT NOT NULL,
+	branch  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS topics (
+	id         INTEGER PRIMARY KEY,
+	project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	name       TEXT NOT NULL,
+	UNIQUE(project_id, name)
+);
+CREATE TABLE IF NOT EXISTS concerns (
+	id          INTEGER PRIMARY KEY,
+	project_id  INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	severity    TEXT DEFAULT 'warning',
+	message     TEXT NOT NULL,
+	resolved    BOOLEAN DEFAULT 0,
+	created_at  TEXT DEFAULT (datetime('now')),
+	resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS polls (
+	id              INTEGER PRIMARY KEY,
+	project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	new_commits     INTEGER DEFAULT 0,
+	new_messages    INTEGER DEFAULT 0,
+	concerns_raised INTEGER DEFAULT 0,
+	llm_response    TEXT,
+	tier1_response  TEXT DEFAULT '',
+	tier2_response  TEXT DEFAULT '',
+	bus_message_sent TEXT DEFAULT '',
+	polled_at       TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS tracked_items (
+	id              INTEGER PRIMARY KEY,
+	project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	source          TEXT NOT NULL DEFAULT 'github',
+	owner           TEXT NOT NULL,
+	repo            TEXT NOT NULL,
+	number          INTEGER NOT NULL,
+	item_type       TEXT NOT NULL DEFAULT 'issue',
+	title           TEXT NOT NULL DEFAULT '',
+	state           TEXT NOT NULL DEFAULT 'open',
+	labels          TEXT NOT NULL DEFAULT '',
+	last_status     TEXT NOT NULL DEFAULT 'Open',
+	last_checked_at     TEXT DEFAULT '',
+	content_hash        TEXT DEFAULT '',
+	objective_summary   TEXT DEFAULT '',
+	progress_summary    TEXT DEFAULT '',
+	created_at          TEXT DEFAULT (datetime('now')),
+	UNIQUE(project_id, source, owner, repo, number)
+);
+`
 
 // openRawV3 creates a database with the v3 schema (no v4 columns on tracked_items).
 func openRawV3(path string) (*sqlx.DB, error) {

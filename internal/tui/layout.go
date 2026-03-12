@@ -84,7 +84,10 @@ func (m Model) renderHeader() string {
 
 	// Line 1: title + status + counts + spinner + theme.
 	status := statusRunningStyle().Render("RUNNING")
-	if m.poller.IsPaused() {
+	if m.autoPaused {
+		idleDur := formatDuration(time.Since(m.lastUserInput))
+		status = statusPausedStyle().Render(fmt.Sprintf("AUTO-PAUSED (idle %s)", idleDur))
+	} else if m.poller.IsPaused() {
 		status = statusPausedStyle().Render("PAUSED")
 	}
 	b.WriteString(titleStyle().Render(fmt.Sprintf("agent-minder: %s", m.project.Name)))

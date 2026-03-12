@@ -60,6 +60,9 @@ type removeTrackedItemResultMsg struct {
 // clearTrackStatusMsg clears the track status after a delay.
 type clearTrackStatusMsg struct{}
 
+// idleCheckMsg triggers periodic idle timeout checking.
+type idleCheckMsg time.Time
+
 // Model is the root bubbletea model for the dashboard.
 type Model struct {
 	project *db.Project
@@ -102,6 +105,10 @@ type Model struct {
 	// Track mode (add/remove tracked items).
 	trackInput  textinput.Model
 	trackStatus string
+
+	// Auto-pause on idle.
+	lastUserInput time.Time
+	autoPaused    bool
 }
 
 // safeViewportKeyMap returns a viewport KeyMap that only uses arrow keys and
@@ -169,15 +176,20 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		trackInput:     ti,
 		analysisVP:     aVP,
 		eventLogVP:     eVP,
+		lastUserInput:  time.Now(),
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		listenForEvents(m.poller),
 		tickEvery(),
 		m.spinner.Tick,
-	)
+	}
+	if m.project.IdlePauseSec > 0 {
+		cmds = append(cmds, idleCheckTick())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -189,6 +201,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		m.lastUserInput = time.Now()
+
+		// Auto-resume on any keypress if auto-paused.
+		if m.autoPaused {
+			m.autoPaused = false
+			m.poller.Resume()
+			m.events = append(m.events, poller.Event{
+				Time:    time.Now(),
+				Type:    "resumed",
+				Summary: "Resumed (user returned)",
+			})
+			m.rebuildEventLogContent()
+			// Fall through to handle the keypress normally.
+		}
+
 		switch m.mode {
 		case "broadcast":
 			return m.updateBroadcast(msg)
@@ -293,6 +320,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.trackStatus = ""
 		m.mode = "normal"
 		return m, nil
+
+	case idleCheckMsg:
+		threshold := m.project.IdlePauseDuration()
+		if threshold > 0 && !m.autoPaused && !m.poller.IsPaused() && time.Since(m.lastUserInput) >= threshold {
+			m.autoPaused = true
+			m.poller.Pause()
+			idleDur := formatDuration(threshold)
+			m.events = append(m.events, poller.Event{
+				Time:    time.Now(),
+				Type:    "paused",
+				Summary: fmt.Sprintf("Auto-paused after %s of inactivity", idleDur),
+			})
+			m.rebuildEventLogContent()
+		}
+		return m, idleCheckTick()
 
 	case tickMsg:
 		return m, tickEvery()
@@ -541,4 +583,25 @@ func tickEvery() tea.Cmd {
 		time.Sleep(5 * time.Second)
 		return tickMsg(time.Now())
 	}
+}
+
+// idleCheckTick returns a command that checks idle timeout every 60 seconds.
+func idleCheckTick() tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(60 * time.Second)
+		return idleCheckMsg(time.Now())
+	}
+}
+
+// formatDuration returns a human-readable duration string like "4h" or "30m".
+func formatDuration(d time.Duration) string {
+	if d >= time.Hour {
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m > 0 {
+			return fmt.Sprintf("%dh%dm", h, m)
+		}
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dm", int(d.Minutes()))
 }

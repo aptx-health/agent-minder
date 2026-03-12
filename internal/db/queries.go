@@ -28,10 +28,10 @@ func (s *Store) CreateProject(p *Project) error {
 	result, err := s.db.NamedExec(`
 		INSERT INTO projects (name, goal_type, goal_description, refresh_interval_sec,
 			message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model,
-			llm_summarizer_model, llm_analyzer_model)
+			llm_summarizer_model, llm_analyzer_model, idle_pause_sec)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
-			:llm_summarizer_model, :llm_analyzer_model)
+			:llm_summarizer_model, :llm_analyzer_model, :idle_pause_sec)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -84,7 +84,8 @@ func (s *Store) UpdateProject(p *Project) error {
 			llm_provider = :llm_provider,
 			llm_model = :llm_model,
 			llm_summarizer_model = :llm_summarizer_model,
-			llm_analyzer_model = :llm_analyzer_model
+			llm_analyzer_model = :llm_analyzer_model,
+			idle_pause_sec = :idle_pause_sec
 		WHERE id = :id
 	`, p)
 	return err

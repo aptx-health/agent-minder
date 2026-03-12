@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 4
+const currentVersion = 5
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	llm_model             TEXT DEFAULT 'claude-haiku-4-5',
 	llm_summarizer_model  TEXT DEFAULT 'claude-haiku-4-5',
 	llm_analyzer_model    TEXT DEFAULT 'claude-sonnet-4-6',
+	idle_pause_sec        INTEGER DEFAULT 14400,
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -151,6 +152,12 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
+	if version < 5 {
+		if err := migrateV5(db); err != nil {
+			return fmt.Errorf("apply migration v5: %w", err)
+		}
+	}
+
 	_, err = db.Exec("UPDATE schema_version SET version = ?", currentVersion)
 	return err
 }
@@ -229,6 +236,18 @@ func migrateV4(db *sqlx.DB) error {
 		if _, err := db.Exec(fmt.Sprintf(`UPDATE tracked_items SET %s = '' WHERE %s IS NULL`, col, col)); err != nil {
 			return fmt.Errorf("null-fill %s: %w", col, err)
 		}
+	}
+	return nil
+}
+
+func migrateV5(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN idle_pause_sec INTEGER DEFAULT 14400`)
+	if err != nil {
+		return fmt.Errorf("add idle_pause_sec: %w", err)
+	}
+	// Ensure no NULLs (Go int can't scan NULL).
+	if _, err := db.Exec(`UPDATE projects SET idle_pause_sec = 14400 WHERE idle_pause_sec IS NULL`); err != nil {
+		return fmt.Errorf("null-fill idle_pause_sec: %w", err)
 	}
 	return nil
 }
