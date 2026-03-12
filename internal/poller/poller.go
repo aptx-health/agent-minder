@@ -498,6 +498,16 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	for _, repo := range repos {
 		wtEntries, err := gitpkg.Worktrees(repo.Path)
 		if err != nil {
+			// Repo path may be invalid — clear stale worktrees from DB.
+			existing, _ := p.store.GetWorktrees(repo.ID)
+			if len(existing) > 0 {
+				_, removed := diffWorktrees(existing, nil)
+				if clearErr := p.store.ReplaceWorktrees(repo.ID, nil); clearErr == nil {
+					for _, branch := range removed {
+						p.emit("worktree", fmt.Sprintf("Removed worktree: %s/%s (repo unavailable)", repo.ShortName, branch), nil)
+					}
+				}
+			}
 			p.emit("worktree", fmt.Sprintf("Failed to list worktrees for %s: %v", repo.ShortName, err), nil)
 			continue
 		}
