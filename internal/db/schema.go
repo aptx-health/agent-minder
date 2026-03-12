@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 // Open opens (or creates) the agent-minder SQLite database and runs migrations,
 // with automatic WAL recovery if stale -shm/-wal files are detected.
 func Open(path string) (*sqlx.DB, error) {
-	db, err := sqliteutil.OpenWithRecovery(path, path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	db, err := sqliteutil.OpenWithRecovery(path, path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
