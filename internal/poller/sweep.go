@@ -196,6 +196,14 @@ func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, 
 		}
 	}
 
+	// Auto-prune oldest terminal items when the list is full.
+	pruned, err := p.store.PruneTrackedItems(p.project.ID, 10, 2)
+	if err != nil {
+		p.emit("error", fmt.Sprintf("pruning tracked items: %v", err), nil)
+	} else if pruned > 0 {
+		p.emit("tracked", fmt.Sprintf("Pruned %d resolved tracked items", pruned), nil)
+	}
+
 	return results, trackedSummary.String()
 }
 
