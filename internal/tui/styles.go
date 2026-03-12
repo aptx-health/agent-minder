@@ -125,3 +125,20 @@ func userMsgStyle() lipgloss.Style {
 func spinnerStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Secondary)
 }
+
+// statusDot returns a colored status indicator for tracked items.
+func statusDot(status string) string {
+	t := currentTheme()
+	switch status {
+	case "InProg":
+		return lipgloss.NewStyle().Foreground(t.Secondary).Render("\u25cf")
+	case "Blckd":
+		return lipgloss.NewStyle().Foreground(t.Warning).Render("\u25cf")
+	case "Mrgd":
+		return lipgloss.NewStyle().Foreground(t.Success).Render("\u2713")
+	case "Closd":
+		return lipgloss.NewStyle().Foreground(t.Muted).Render("\u2715")
+	default: // Open
+		return lipgloss.NewStyle().Foreground(t.Muted).Render("\u25cb")
+	}
+}

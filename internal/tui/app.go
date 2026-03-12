@@ -8,8 +8,10 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
@@ -50,10 +52,18 @@ type Model struct {
 	height  int
 
 	// State.
-	events       []poller.Event
-	lastPoll     *poller.PollResult
-	pollExpanded bool
-	err          error
+	events   []poller.Event
+	lastPoll *poller.PollResult
+	err      error
+
+	// Viewports for scrollable sections.
+	analysisVP       viewport.Model
+	eventLogVP       viewport.Model
+	analysisExpanded bool // 'e' toggles 3-line vs proportional
+	showInfo         bool // 'i' toggles repos/topics detail
+
+	// Tracked items (refreshed on poll results).
+	trackedItems []db.TrackedItem
 
 	// Spinner for async operations.
 	spinner spinner.Model
@@ -71,6 +81,18 @@ type Model struct {
 	// Onboard mode.
 	onboardInput  textarea.Model
 	onboardStatus string
+}
+
+// safeViewportKeyMap returns a viewport KeyMap that only uses arrow keys and
+// pgup/pgdn, avoiding conflicts with app-level letter keybindings.
+func safeViewportKeyMap() viewport.KeyMap {
+	return viewport.KeyMap{
+		Up:       key.NewBinding(key.WithKeys("up")),
+		Down:     key.NewBinding(key.WithKeys("down")),
+		PageUp:   key.NewBinding(key.WithKeys("pgup")),
+		PageDown: key.NewBinding(key.WithKeys("pgdown")),
+		// HalfPageUp, HalfPageDown, Left, Right left as zero-value (disabled).
+	}
 }
 
 // New creates a new TUI model.
@@ -98,6 +120,16 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	oi.SetHeight(3)
 	oi.SetWidth(80)
 
+	aVP := viewport.New()
+	aVP.KeyMap = safeViewportKeyMap()
+	aVP.SoftWrap = true
+	aVP.FillHeight = true
+
+	eVP := viewport.New()
+	eVP.KeyMap = safeViewportKeyMap()
+	eVP.SoftWrap = true
+	eVP.FillHeight = true
+
 	return Model{
 		project:        project,
 		store:          store,
@@ -108,6 +140,8 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		userMsgInput:   ta,
 		onboardInput:   oi,
 		spinner:        sp,
+		analysisVP:     aVP,
+		eventLogVP:     eVP,
 	}
 }
 
@@ -124,6 +158,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.resizeViewports()
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -152,7 +187,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if event.PollResult != nil {
 			m.lastPoll = event.PollResult
 			m.polling = false
+			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
 		}
+		m.rebuildEventLogContent()
+		m.rebuildAnalysisContent()
 		return m, listenForEvents(m.poller)
 
 	case broadcastResultMsg:
@@ -161,7 +199,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.broadcastStatus = fmt.Sprintf("Sent to %s", msg.topic)
 		}
-		// Clear status after a delay by returning to normal mode.
 		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 			return clearBroadcastStatusMsg{}
 		})
@@ -230,10 +267,17 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return nil
 		}
 	case "e":
-		m.pollExpanded = !m.pollExpanded
+		m.analysisExpanded = !m.analysisExpanded
+		m.resizeViewports()
+		return m, nil
+	case "i":
+		m.showInfo = !m.showInfo
+		m.resizeViewports()
 		return m, nil
 	case "t":
 		cycleTheme()
+		m.rebuildAnalysisContent()
+		m.rebuildEventLogContent()
 		return m, nil
 	case "u":
 		m.mode = "usermsg"
@@ -261,6 +305,10 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.onboardInput.SetWidth(m.width - 4)
 		}
 		cmd := m.onboardInput.Focus()
+		return m, cmd
+	case "up", "down", "pgup", "pgdown":
+		var cmd tea.Cmd
+		m.eventLogVP, cmd = m.eventLogVP.Update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -292,7 +340,6 @@ func (m Model) updateBroadcast(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Delegate to textarea (Enter inserts newline by default).
 	var cmd tea.Cmd
 	m.broadcastInput, cmd = m.broadcastInput.Update(msg)
 	return m, cmd
@@ -324,7 +371,6 @@ func (m Model) updateUserMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Delegate to textarea (Enter inserts newline by default).
 	var cmd tea.Cmd
 	m.userMsgInput, cmd = m.userMsgInput.Update(msg)
 	return m, cmd
@@ -356,227 +402,6 @@ func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) View() tea.View {
-	if m.width == 0 {
-		return tea.NewView("Loading...")
-	}
-
-	var b strings.Builder
-
-	// Header.
-	status := statusRunningStyle().Render("RUNNING")
-	if m.poller.IsPaused() {
-		status = statusPausedStyle().Render("PAUSED")
-	}
-	b.WriteString(titleStyle().Render(fmt.Sprintf("agent-minder: %s", m.project.Name)))
-	b.WriteString("  ")
-	b.WriteString(status)
-	if m.polling {
-		b.WriteString("  ")
-		b.WriteString(m.spinner.View())
-		b.WriteString(" ")
-		b.WriteString(mutedStyle().Render("polling..."))
-	}
-	b.WriteString("  ")
-	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", currentTheme().Name)))
-	b.WriteString("\n")
-
-	// Goal.
-	goalText := fmt.Sprintf("  %s — %s", m.project.GoalType, m.project.GoalDescription)
-	b.WriteString(mutedStyle().Width(m.width).Render(goalText))
-	b.WriteString("\n\n")
-
-	// Repos section.
-	repos, _ := m.store.GetRepos(m.project.ID)
-	b.WriteString(headerStyle().Render("Repos"))
-	b.WriteString("\n")
-	for _, r := range repos {
-		b.WriteString(textStyle().Render(fmt.Sprintf("  %s (%s)", r.ShortName, r.Path)))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
-
-	// Topics.
-	topics, _ := m.store.GetTopics(m.project.ID)
-	if len(topics) > 0 {
-		b.WriteString(headerStyle().Render("Topics"))
-		b.WriteString("\n")
-		for _, t := range topics {
-			b.WriteString(textStyle().Render(fmt.Sprintf("  %s", t.Name)))
-			b.WriteString("\n")
-		}
-		b.WriteString("\n")
-	}
-
-	// Active concerns (capped to avoid pushing controls off screen).
-	concerns, _ := m.store.ActiveConcerns(m.project.ID)
-	if len(concerns) > 0 {
-		maxConcerns := 5
-		b.WriteString(headerStyle().Render(fmt.Sprintf("Active Concerns (%d)", len(concerns))))
-		b.WriteString("\n")
-		shown := concerns
-		if len(shown) > maxConcerns {
-			shown = shown[:maxConcerns]
-		}
-		for _, c := range shown {
-			style := concernInfoStyle().Width(m.width - 2)
-			prefix := "INFO"
-			switch c.Severity {
-			case "warning":
-				style = concernWarningStyle().Width(m.width - 2)
-				prefix = "WARN"
-			case "danger":
-				style = concernDangerStyle().Width(m.width - 2)
-				prefix = "DANGER"
-			}
-			b.WriteString(style.Render(fmt.Sprintf("  [%s] %s", prefix, c.Message)))
-			b.WriteString("\n")
-		}
-		if len(concerns) > maxConcerns {
-			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more", len(concerns)-maxConcerns)))
-			b.WriteString("\n")
-		}
-		b.WriteString("\n")
-	}
-
-	// Last poll result.
-	expandHint := "e: expand"
-	if m.pollExpanded {
-		expandHint = "e: collapse"
-	}
-	b.WriteString(headerStyle().Render("Last Poll"))
-	b.WriteString("  ")
-	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
-	b.WriteString("\n")
-	if m.lastPoll != nil {
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("  %d commits, %d messages (took %s)",
-			m.lastPoll.NewCommits, m.lastPoll.NewMessages, m.lastPoll.Duration.Round(time.Millisecond))))
-		b.WriteString("\n")
-		if m.lastPoll.BusMessageSent != "" {
-			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  >> Bus: %s", m.lastPoll.BusMessageSent)))
-			b.WriteString("\n")
-		}
-		response := m.lastPoll.LLMResponse()
-		if response != "" {
-			if !m.pollExpanded {
-				// Truncate to ~3 lines.
-				lines := strings.Split(response, "\n")
-				if len(lines) > 3 {
-					response = strings.Join(lines[:3], "\n") + "\n  ..."
-				}
-			}
-			b.WriteString(llmResponseStyle().Width(m.width - 2).Render(response))
-			b.WriteString("\n")
-		}
-	} else {
-		b.WriteString(mutedStyle().Render("  Waiting for first poll..."))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
-
-	// Event log — dynamically sized to fit remaining terminal height.
-	// Count lines used so far (approximate: count newlines in buffer).
-	linesUsed := strings.Count(b.String(), "\n")
-	bottomLines := 4 // help bar + broadcast bar + padding
-	maxEvents := m.height - linesUsed - bottomLines
-	if maxEvents < 3 {
-		maxEvents = 3
-	}
-	if maxEvents > 10 {
-		maxEvents = 10
-	}
-
-	b.WriteString(headerStyle().Render("Event Log"))
-	b.WriteString("\n")
-	start := 0
-	if len(m.events) > maxEvents {
-		start = len(m.events) - maxEvents
-	}
-	for i := len(m.events) - 1; i >= start; i-- {
-		e := m.events[i]
-		ts := e.Time.Format("15:04:05")
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("  [%s] %s: %s", ts, e.Type, e.Summary)))
-		b.WriteString("\n")
-	}
-	if len(m.events) == 0 {
-		b.WriteString(mutedStyle().Render("  (no events yet)"))
-		b.WriteString("\n")
-	}
-
-	// Bottom bar: input or help.
-	b.WriteString("\n")
-	switch m.mode {
-	case "broadcast":
-		if m.broadcastStatus == "Sending..." {
-			b.WriteString("  ")
-			b.WriteString(m.spinner.View())
-			b.WriteString(" ")
-			b.WriteString(broadcastStyle().Render("Sending broadcast..."))
-		} else if m.broadcastStatus != "" {
-			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.broadcastStatus)))
-		} else {
-			b.WriteString("  ")
-			b.WriteString(m.broadcastInput.View())
-		}
-		b.WriteString("\n")
-		if m.broadcastStatus == "" {
-			b.WriteString(helpStyle().Render("ctrl+d: send • esc: cancel"))
-		}
-		b.WriteString("\n")
-	case "usermsg":
-		if m.userMsgStatus == "Posting..." {
-			b.WriteString("  ")
-			b.WriteString(m.spinner.View())
-			b.WriteString(" ")
-			b.WriteString(userMsgStyle().Render("Posting message..."))
-		} else if m.userMsgStatus != "" {
-			b.WriteString(userMsgStyle().Render(fmt.Sprintf("  %s", m.userMsgStatus)))
-		} else {
-			b.WriteString("  ")
-			b.WriteString(m.userMsgInput.View())
-		}
-		b.WriteString("\n")
-		if m.userMsgStatus == "" {
-			b.WriteString(helpStyle().Render("ctrl+d: send • esc: cancel"))
-		}
-		b.WriteString("\n")
-	case "onboard":
-		if m.onboardStatus != "" && m.onboardStatus != "Generating onboarding message..." {
-			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.onboardStatus)))
-		} else if m.onboardStatus == "Generating onboarding message..." {
-			b.WriteString("  ")
-			b.WriteString(m.spinner.View())
-			b.WriteString(" ")
-			b.WriteString(broadcastStyle().Render("Generating onboarding message..."))
-		} else {
-			b.WriteString(headerStyle().Render("  Onboard — optional guidance for the new agent:"))
-			b.WriteString("\n")
-			b.WriteString("  ")
-			b.WriteString(m.onboardInput.View())
-		}
-		b.WriteString("\n")
-		if m.onboardStatus == "" {
-			b.WriteString(helpStyle().Render("ctrl+d: generate & publish • esc: cancel (leave empty for generic onboarding)"))
-		}
-		b.WriteString("\n")
-	default:
-		if m.broadcastStatus != "" {
-			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.broadcastStatus)))
-			b.WriteString("\n")
-		}
-		if m.userMsgStatus != "" {
-			b.WriteString(userMsgStyle().Render(fmt.Sprintf("  %s", m.userMsgStatus)))
-			b.WriteString("\n")
-		}
-		b.WriteString(renderHelpBar(m.width))
-		b.WriteString("\n")
-	}
-
-	v := tea.NewView(b.String())
-	v.AltScreen = true
-	return v
-}
-
 // listenForEvents returns a command that waits for the next poller event.
 func listenForEvents(p *poller.Poller) tea.Cmd {
 	return func() tea.Msg {
@@ -586,44 +411,6 @@ func listenForEvents(p *poller.Poller) tea.Cmd {
 		}
 		return pollerEventMsg(event)
 	}
-}
-
-// renderHelpBar builds a two-row help bar with styled key hints.
-func renderHelpBar(width int) string {
-	keyStyle := helpKeyStyle()
-	descStyle := helpStyle()
-	sep := descStyle.Render(" • ")
-
-	type hint struct {
-		key  string
-		desc string
-	}
-
-	hints := []hint{
-		{"p", "pause/resume"},
-		{"r", "poll now"},
-		{"e", "expand"},
-		{"u", "user msg"},
-		{"m", "broadcast"},
-		{"o", "onboard"},
-		{"t", "theme"},
-		{"q", "quit"},
-	}
-
-	var row1, row2 strings.Builder
-	for i, h := range hints {
-		entry := keyStyle.Render(h.key) + descStyle.Render(": "+h.desc)
-		target := &row1
-		if i >= 4 {
-			target = &row2
-		}
-		if target.Len() > 0 {
-			target.WriteString(sep)
-		}
-		target.WriteString(entry)
-	}
-
-	return row1.String() + "\n" + row2.String()
 }
 
 // tickEvery returns a command that sends a tick every 5 seconds.
