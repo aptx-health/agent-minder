@@ -7,7 +7,6 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/dustinlange/agent-minder/internal/config"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 )
@@ -50,6 +49,12 @@ type ResumeData struct {
 	Timestamp     string
 }
 
+// LegacyWorktree is kept for backward compat with v1 prompt templates.
+type LegacyWorktree struct {
+	Path   string
+	Branch string
+}
+
 // RepoContext holds repo info for the init prompt.
 type RepoContext struct {
 	ShortName  string
@@ -59,7 +64,7 @@ type RepoContext struct {
 	ClaudeMD   string
 	RecentLogs []gitpkg.LogEntry
 	Branches   []gitpkg.BranchInfo
-	Worktrees  []config.Worktree
+	Worktrees  []LegacyWorktree
 }
 
 // RepoCommits holds new commits for a repo since last check.

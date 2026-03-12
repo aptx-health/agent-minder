@@ -5,9 +5,21 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dustinlange/agent-minder/internal/config"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 )
+
+// LegacyWorktree is kept for backward compat with v1 callers.
+type LegacyWorktree struct {
+	Path   string `yaml:"path"`
+	Branch string `yaml:"branch"`
+}
+
+// LegacyRepo is kept for backward compat with v1 callers.
+type LegacyRepo struct {
+	Path      string            `yaml:"path"`
+	ShortName string            `yaml:"short_name"`
+	Worktrees []LegacyWorktree  `yaml:"worktrees,omitempty"`
+}
 
 // RepoInfo holds everything discovered about a single repo directory.
 type RepoInfo struct {
@@ -18,7 +30,7 @@ type RepoInfo struct {
 	ShortName  string
 	Readme     string
 	ClaudeMD   string
-	Worktrees  []config.Worktree
+	Worktrees  []LegacyWorktree
 	RecentLogs []gitpkg.LogEntry
 	Branches   []gitpkg.BranchInfo
 }
@@ -50,7 +62,7 @@ func ScanRepo(dir string) (*RepoInfo, error) {
 	worktrees, err := gitpkg.Worktrees(absDir)
 	if err == nil {
 		for _, wt := range worktrees {
-			info.Worktrees = append(info.Worktrees, config.Worktree{
+			info.Worktrees = append(info.Worktrees, LegacyWorktree{
 				Path:   wt.Path,
 				Branch: wt.Branch,
 			})
@@ -98,11 +110,11 @@ func SuggestTopics(projectName string, repos []*RepoInfo) []string {
 	return topics
 }
 
-// BuildRepoConfigs converts scanned RepoInfo into config.Repo entries.
-func BuildRepoConfigs(repos []*RepoInfo) []config.Repo {
-	var out []config.Repo
+// BuildRepoConfigs converts scanned RepoInfo into LegacyRepo entries.
+func BuildRepoConfigs(repos []*RepoInfo) []LegacyRepo {
+	var out []LegacyRepo
 	for _, r := range repos {
-		out = append(out, config.Repo{
+		out = append(out, LegacyRepo{
 			Path:      r.Path,
 			ShortName: r.ShortName,
 			Worktrees: r.Worktrees,

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/discovery"
 	"github.com/spf13/cobra"
@@ -149,7 +150,28 @@ func runInit(cmd *cobra.Command, args []string) error {
 	autoEnroll := readLine(reader)
 	autoEnrollBool := !strings.HasPrefix(strings.ToLower(autoEnroll), "n")
 
-	// 6. Write to database.
+	// 6. Select LLM provider from configured providers.
+	llmProvider := "anthropic"
+	configured := config.ConfiguredProviders()
+	if len(configured) == 0 {
+		fmt.Println("\nNo LLM providers configured. Run 'agent-minder setup' to add one.")
+		fmt.Println("Defaulting to 'anthropic' (will use ANTHROPIC_API_KEY env var).")
+	} else if len(configured) == 1 {
+		llmProvider = configured[0]
+		fmt.Printf("\nUsing LLM provider: %s\n", llmProvider)
+	} else {
+		fmt.Println("\nSelect LLM provider:")
+		for i, p := range configured {
+			fmt.Printf("  %d. %s\n", i+1, p)
+		}
+		fmt.Print("> ")
+		choice := readLine(reader)
+		if n := parseChoice(choice, len(configured)); n >= 0 {
+			llmProvider = configured[n]
+		}
+	}
+
+	// 7. Write to database.
 	project := &db.Project{
 		Name:                projectName,
 		GoalType:            goal.Name,
@@ -158,7 +180,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		MessageTTLSec:       int(ttl.Seconds()),
 		AutoEnrollWorktrees: autoEnrollBool,
 		MinderIdentity:      projectName + "/minder",
-		LLMProvider:         "anthropic",
+		LLMProvider:         llmProvider,
 		LLMModel:            "claude-haiku-4-5",
 		LLMSummarizerModel:  "claude-haiku-4-5",
 		LLMAnalyzerModel:    "claude-sonnet-4-6",

@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dustinlange/agent-minder/internal/config"
 )
 
 // State represents the parsed minder state file.
@@ -24,7 +23,11 @@ type State struct {
 
 // Path returns the state file path for a project.
 func Path(project string) (string, error) {
-	dir, err := config.ProjectDir(project)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".agent-minder", project)
 	if err != nil {
 		return "", err
 	}
