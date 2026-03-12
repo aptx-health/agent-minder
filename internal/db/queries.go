@@ -358,7 +358,10 @@ func (s *Store) UpdateTrackedItem(item *TrackedItem) error {
 			state = :state,
 			labels = :labels,
 			last_status = :last_status,
-			last_checked_at = :last_checked_at
+			last_checked_at = :last_checked_at,
+			content_hash = :content_hash,
+			objective_summary = :objective_summary,
+			progress_summary = :progress_summary
 		WHERE id = :id
 	`, item)
 	return err

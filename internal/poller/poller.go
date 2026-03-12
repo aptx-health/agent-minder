@@ -8,6 +8,9 @@ package poller
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +22,50 @@ import (
 	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 )
+
+// debugEnabled returns true when MINDER_DEBUG is set to any non-empty value.
+func debugEnabled() bool {
+	return os.Getenv("MINDER_DEBUG") != ""
+}
+
+// debugLog is a file-backed logger for LLM prompt/response tracing.
+// Nil when MINDER_DEBUG is not set.
+var debugLog *log.Logger
+var debugLogFile *os.File
+
+// initDebugLog sets up file-based debug logging to ~/.agent-minder/debug.log.
+// Safe to call multiple times; only initializes once.
+func initDebugLog() {
+	if debugLog != nil || !debugEnabled() {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	logPath := filepath.Join(home, ".agent-minder", "debug.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return
+	}
+	debugLogFile = f
+	debugLog = log.New(f, "", log.LstdFlags)
+}
+
+// closeDebugLog closes the debug log file.
+func closeDebugLog() {
+	if debugLogFile != nil {
+		debugLogFile.Close()
+	}
+}
+
+// debugf writes a formatted message to the debug log file.
+func debugf(format string, args ...interface{}) {
+	if debugLog == nil {
+		return
+	}
+	debugLog.Printf(format, args...)
+}
 
 // Event is emitted by the poller for the TUI to consume.
 type Event struct {
@@ -93,6 +140,7 @@ func (p *Poller) Project() *db.Project {
 
 // Start begins the polling loop in a goroutine.
 func (p *Poller) Start(ctx context.Context) {
+	initDebugLog()
 	ctx, p.cancel = context.WithCancel(ctx)
 	p.stopped = make(chan struct{})
 
@@ -107,6 +155,7 @@ func (p *Poller) Stop() {
 	if p.stopped != nil {
 		<-p.stopped
 	}
+	closeDebugLog()
 }
 
 // Pause temporarily stops polling without killing the loop.
@@ -443,52 +492,41 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		}
 	}
 
-	// Check tracked items for status changes.
-	var trackedSummary strings.Builder
+	// Sweep tracked items: fetch metadata + content, hash check, Haiku summarize.
 	trackedItems, err := p.store.GetTrackedItems(p.project.ID)
 	if err != nil {
 		p.emit("error", fmt.Sprintf("loading tracked items: %v", err), nil)
 	}
+	var sweepResults []SweepResult
+	var trackedChanges string
 	if len(trackedItems) > 0 {
 		token := config.GetIntegrationToken("github")
 		if token != "" {
 			gh := ghpkg.NewClient(token)
-			for i := range trackedItems {
-				item := &trackedItems[i]
-				status, err := gh.FetchItemWithHint(ctx, item.Owner, item.Repo, item.Number, item.ItemType)
-				if err != nil {
-					p.emit("error", fmt.Sprintf("checking %s: %v", item.DisplayRef(), err), nil)
-					continue
-				}
-				newStatus := status.CompactStatus()
-				oldStatus := item.LastStatus
-
-				// Update the item regardless.
-				item.Title = status.Title
-				item.State = status.State
-				item.Labels = strings.Join(status.Labels, ",")
-				item.LastStatus = newStatus
-				item.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
-				if err := p.store.UpdateTrackedItem(item); err != nil {
-					p.emit("error", fmt.Sprintf("updating %s: %v", item.DisplayRef(), err), nil)
-				}
-
-				if oldStatus != newStatus {
-					ref := item.DisplayRef()
+			sweepResults, trackedChanges = p.sweepTrackedItems(ctx, trackedItems, gh)
+			for _, sr := range sweepResults {
+				if sr.Changed {
 					result.TrackedItemChanges = append(result.TrackedItemChanges, TrackedItemChange{
-						Ref:       ref,
-						Title:     status.Title,
-						OldStatus: oldStatus,
-						NewStatus: newStatus,
+						Ref:       sr.Item.DisplayRef(),
+						Title:     sr.Item.Title,
+						OldStatus: sr.OldStatus,
+						NewStatus: sr.NewStatus,
 					})
-					fmt.Fprintf(&trackedSummary, "- %s: %s → %s (%s)\n", ref, oldStatus, newStatus, status.Title)
 				}
 			}
 		}
 	}
+	// Check if any tracked items had content updates (Haiku ran).
+	sweepHadUpdates := false
+	for _, sr := range sweepResults {
+		if sr.HaikuRan || sr.Changed {
+			sweepHadUpdates = true
+			break
+		}
+	}
 
 	// If nothing happened, skip LLM calls.
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 {
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !sweepHadUpdates {
 		result.Duration = time.Since(start)
 		result.Tier1Summary = "No new activity."
 		return result, nil
@@ -498,7 +536,9 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	concerns, _ := p.store.ActiveConcerns(p.project.ID)
 
 	// Build raw data prompt for tier 1.
-	rawPrompt := p.buildPrompt(repos, gitSummary.String(), msgSummary.String(), trackedSummary.String(), trackedItems, concerns)
+	rawPrompt := p.buildPrompt(repos, gitSummary.String(), msgSummary.String(), trackedChanges, trackedItems, concerns)
+
+	debugf("=== TIER 1 INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", tier1SystemPrompt(), rawPrompt)
 
 	// --- Tier 1: Summarizer (Haiku) ---
 	tier1Model := p.project.LLMSummarizerModel
@@ -520,6 +560,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		return result, nil
 	}
 	result.Tier1Summary = tier1Resp.Content
+	debugf("=== TIER 1 OUTPUT ===\n%s\n", tier1Resp.Content)
 
 	// --- Tier 2: Analyzer (Sonnet) ---
 	tier2Model := p.project.LLMAnalyzerModel
@@ -528,6 +569,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	tier2Prompt := p.buildTier2Prompt(result.Tier1Summary, concerns)
+	debugf("=== TIER 2 INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", tier2SystemPrompt(p.project.Name), tier2Prompt)
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     tier2Model,
@@ -541,6 +583,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		p.recordPollResult(result)
 		return result, nil
 	}
+
+	debugf("=== TIER 2 OUTPUT ===\n%s\n", tier2Resp.Content)
 
 	// Parse tier 2 structured response.
 	analysis := parseAnalysis(tier2Resp.Content)
@@ -585,6 +629,7 @@ Rules:
 - Be terse: 2-4 sentences max
 - Focus on what changed and who did it
 - Note any cross-repo patterns or dependencies
+- Incorporate tracked item summaries (Objective/Progress) when present to provide richer context
 - Do NOT provide recommendations — just summarize the facts`
 }
 
@@ -609,6 +654,8 @@ Rules:
 - "concerns": Return the FULL list of currently valid concerns. You are given the existing active concerns with timestamps — use them as your starting point. Remove concerns that are resolved or no longer relevant. Add new concerns as needed. Update severity or wording if the situation has changed. If there are no concerns, return an empty array.
   - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
 - "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
+
+Consider tracked item context (objectives and progress summaries) when assessing overall project health and coordination needs.
 
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
 }
@@ -641,11 +688,17 @@ func (p *Poller) buildPrompt(repos []db.Repo, gitActivity, msgActivity, trackedC
 		b.WriteString("\n")
 	}
 
-	// Include tracked items status.
+	// Include tracked items status with summaries.
 	if len(trackedItems) > 0 {
 		b.WriteString("## Tracked Issues/PRs\n")
 		for _, item := range trackedItems {
 			fmt.Fprintf(&b, "- [%s] %s: %s\n", item.LastStatus, item.DisplayRef(), item.Title)
+			if item.ObjectiveSummary != "" {
+				fmt.Fprintf(&b, "  Objective: %s\n", item.ObjectiveSummary)
+			}
+			if item.ProgressSummary != "" {
+				fmt.Fprintf(&b, "  Progress: %s\n", item.ProgressSummary)
+			}
 		}
 		if trackedChanges != "" {
 			b.WriteString("\n### Status Changes This Cycle\n")
