@@ -281,10 +281,19 @@ func (m Model) renderWorktrees() string {
 		grouped[wt.RepoShortName] = append(grouped[wt.RepoShortName], branch)
 	}
 
-	for _, repo := range repoOrder {
+	const maxLines = 6
+	shown := 0
+	for i, repo := range repoOrder {
+		if shown >= maxLines {
+			remaining := len(repoOrder) - i
+			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more repos", remaining)))
+			b.WriteString("\n")
+			break
+		}
 		branches := grouped[repo]
 		b.WriteString(textStyle().Render(fmt.Sprintf("  %s: %s", repo, strings.Join(branches, ", "))))
 		b.WriteString("\n")
+		shown++
 	}
 
 	return b.String()
