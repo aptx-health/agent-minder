@@ -199,6 +199,35 @@ func Worktrees(dir string) ([]WorktreeEntry, error) {
 	return worktrees, nil
 }
 
+// LogGrep returns recent log entries whose subject matches a pattern (e.g., "#42").
+// Searches the last 200 commits to keep it bounded.
+func LogGrep(dir string, pattern string) ([]LogEntry, error) {
+	format := "%h|%s|%an|%aI"
+	out, err := run(dir, "log", "-200", fmt.Sprintf("--format=%s", format), "--grep="+pattern, "--fixed-strings")
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+
+	var entries []LogEntry
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		date, _ := time.Parse(time.RFC3339, parts[3])
+		entries = append(entries, LogEntry{
+			Hash:    parts[0],
+			Subject: parts[1],
+			Author:  parts[2],
+			Date:    date,
+		})
+	}
+	return entries, nil
+}
+
 // Diff returns the diff between two refs (e.g., "main...feature/auth").
 func Diff(dir, spec string) (string, error) {
 	return run(dir, "diff", spec)

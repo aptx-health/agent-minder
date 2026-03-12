@@ -368,16 +368,28 @@ func TestTrackedItemsCRUD(t *testing.T) {
 		t.Errorf("DisplayRef = %q", items[0].DisplayRef())
 	}
 
-	// Update.
+	// Update with new v4 fields.
 	items[0].State = "closed"
 	items[0].LastStatus = "Closd"
 	items[0].LastCheckedAt = "2026-03-12T00:00:00Z"
+	items[0].ContentHash = "abc123"
+	items[0].ObjectiveSummary = "Fix a critical bug"
+	items[0].ProgressSummary = "PR merged, awaiting deploy"
 	if err := store.UpdateTrackedItem(&items[0]); err != nil {
 		t.Fatalf("UpdateTrackedItem: %v", err)
 	}
 	items, _ = store.GetTrackedItems(p.ID)
 	if items[0].LastStatus != "Closd" {
 		t.Errorf("after update LastStatus = %q, want Closd", items[0].LastStatus)
+	}
+	if items[0].ContentHash != "abc123" {
+		t.Errorf("after update ContentHash = %q, want abc123", items[0].ContentHash)
+	}
+	if items[0].ObjectiveSummary != "Fix a critical bug" {
+		t.Errorf("after update ObjectiveSummary = %q", items[0].ObjectiveSummary)
+	}
+	if items[0].ProgressSummary != "PR merged, awaiting deploy" {
+		t.Errorf("after update ProgressSummary = %q", items[0].ProgressSummary)
 	}
 
 	// Duplicate insert should fail.
@@ -437,6 +449,174 @@ func TestTrackedItemCascadeDelete(t *testing.T) {
 		t.Error("tracked items should be deleted with project")
 	}
 }
+
+func TestMigrationV3ToV4(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Create a v3 database manually.
+	conn, err := openRawV3(dbPath)
+	if err != nil {
+		t.Fatalf("create v3 db: %v", err)
+	}
+
+	// Insert v3 data with a tracked item.
+	_, err = conn.Exec(`INSERT INTO projects (name, goal_type, goal_description, minder_identity, llm_provider, llm_model, llm_summarizer_model, llm_analyzer_model)
+		VALUES ('migtest4', 'feature', 'test goal', 'migtest4/minder', 'anthropic', 'claude-haiku-4-5', 'claude-haiku-4-5', 'claude-sonnet-4-6')`)
+	if err != nil {
+		t.Fatalf("insert v3 project: %v", err)
+	}
+	_, err = conn.Exec(`INSERT INTO tracked_items (project_id, source, owner, repo, number, item_type, title, state, labels, last_status)
+		VALUES (1, 'github', 'octocat', 'hello', 42, 'issue', 'Test', 'open', 'bug', 'Open')`)
+	if err != nil {
+		t.Fatalf("insert v3 tracked item: %v", err)
+	}
+	conn.Close()
+
+	// Re-open with current migration code — should migrate to v4.
+	conn2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open after v3: %v", err)
+	}
+	defer conn2.Close()
+	store := NewStore(conn2)
+
+	// Check schema version.
+	var version int
+	store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1")
+	if version != currentVersion {
+		t.Errorf("version = %d, want %d", version, currentVersion)
+	}
+
+	// Check tracked item has new columns with defaults.
+	items, err := store.GetTrackedItems(1)
+	if err != nil {
+		t.Fatalf("GetTrackedItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 tracked item, got %d", len(items))
+	}
+	if items[0].ContentHash != "" {
+		t.Errorf("ContentHash = %q, want empty default", items[0].ContentHash)
+	}
+	if items[0].ObjectiveSummary != "" {
+		t.Errorf("ObjectiveSummary = %q, want empty default", items[0].ObjectiveSummary)
+	}
+	if items[0].ProgressSummary != "" {
+		t.Errorf("ProgressSummary = %q, want empty default", items[0].ProgressSummary)
+	}
+
+	// Verify new columns can be updated.
+	items[0].ContentHash = "deadbeef"
+	items[0].ObjectiveSummary = "Fix auth"
+	items[0].ProgressSummary = "In review"
+	if err := store.UpdateTrackedItem(&items[0]); err != nil {
+		t.Fatalf("UpdateTrackedItem after migration: %v", err)
+	}
+	items, _ = store.GetTrackedItems(1)
+	if items[0].ContentHash != "deadbeef" {
+		t.Errorf("ContentHash = %q, want deadbeef", items[0].ContentHash)
+	}
+}
+
+// openRawV3 creates a database with the v3 schema (no v4 columns on tracked_items).
+func openRawV3(path string) (*sqlx.DB, error) {
+	db, err := sqlx.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(schemaV3_only); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec("INSERT INTO schema_version (version) VALUES (3)"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// schemaV3_only is the v3 schema without v4 columns on tracked_items.
+const schemaV3_only = `
+CREATE TABLE IF NOT EXISTS schema_version (
+	version INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS projects (
+	id                    INTEGER PRIMARY KEY,
+	name                  TEXT UNIQUE NOT NULL,
+	goal_type             TEXT,
+	goal_description      TEXT,
+	refresh_interval_sec  INTEGER DEFAULT 300,
+	message_ttl_sec       INTEGER DEFAULT 172800,
+	auto_enroll_worktrees BOOLEAN DEFAULT 1,
+	minder_identity       TEXT,
+	llm_provider          TEXT DEFAULT 'anthropic',
+	llm_model             TEXT DEFAULT 'claude-haiku-4-5',
+	llm_summarizer_model  TEXT DEFAULT 'claude-haiku-4-5',
+	llm_analyzer_model    TEXT DEFAULT 'claude-sonnet-4-6',
+	created_at            TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS repos (
+	id         INTEGER PRIMARY KEY,
+	project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	path       TEXT NOT NULL,
+	short_name TEXT NOT NULL,
+	summary    TEXT,
+	UNIQUE(project_id, path)
+);
+CREATE TABLE IF NOT EXISTS worktrees (
+	id      INTEGER PRIMARY KEY,
+	repo_id INTEGER REFERENCES repos(id) ON DELETE CASCADE,
+	path    TEXT NOT NULL,
+	branch  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS topics (
+	id         INTEGER PRIMARY KEY,
+	project_id INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	name       TEXT NOT NULL,
+	UNIQUE(project_id, name)
+);
+CREATE TABLE IF NOT EXISTS concerns (
+	id          INTEGER PRIMARY KEY,
+	project_id  INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	severity    TEXT DEFAULT 'warning',
+	message     TEXT NOT NULL,
+	resolved    BOOLEAN DEFAULT 0,
+	created_at  TEXT DEFAULT (datetime('now')),
+	resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS polls (
+	id              INTEGER PRIMARY KEY,
+	project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	new_commits     INTEGER DEFAULT 0,
+	new_messages    INTEGER DEFAULT 0,
+	concerns_raised INTEGER DEFAULT 0,
+	llm_response    TEXT,
+	tier1_response  TEXT DEFAULT '',
+	tier2_response  TEXT DEFAULT '',
+	bus_message_sent TEXT DEFAULT '',
+	polled_at       TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS tracked_items (
+	id              INTEGER PRIMARY KEY,
+	project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	source          TEXT NOT NULL DEFAULT 'github',
+	owner           TEXT NOT NULL,
+	repo            TEXT NOT NULL,
+	number          INTEGER NOT NULL,
+	item_type       TEXT NOT NULL DEFAULT 'issue',
+	title           TEXT NOT NULL DEFAULT '',
+	state           TEXT NOT NULL DEFAULT 'open',
+	labels          TEXT NOT NULL DEFAULT '',
+	last_status     TEXT NOT NULL DEFAULT 'Open',
+	last_checked_at TEXT DEFAULT '',
+	created_at      TEXT DEFAULT (datetime('now')),
+	UNIQUE(project_id, source, owner, repo, number)
+);
+`
 
 // schemaV1_only is the original v1 schema without v2 columns, for migration testing.
 const schemaV1_only = `

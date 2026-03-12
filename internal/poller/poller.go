@@ -8,6 +8,9 @@ package poller
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +22,50 @@ import (
 	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 )
+
+// debugEnabled returns true when MINDER_DEBUG is set to any non-empty value.
+func debugEnabled() bool {
+	return os.Getenv("MINDER_DEBUG") != ""
+}
+
+// debugLog is a file-backed logger for LLM prompt/response tracing.
+// Nil when MINDER_DEBUG is not set.
+var debugLog *log.Logger
+var debugLogFile *os.File
+
+// initDebugLog sets up file-based debug logging to ~/.agent-minder/debug.log.
+// Safe to call multiple times; only initializes once.
+func initDebugLog() {
+	if debugLog != nil || !debugEnabled() {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	logPath := filepath.Join(home, ".agent-minder", "debug.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return
+	}
+	debugLogFile = f
+	debugLog = log.New(f, "", log.LstdFlags)
+}
+
+// closeDebugLog closes the debug log file.
+func closeDebugLog() {
+	if debugLogFile != nil {
+		debugLogFile.Close()
+	}
+}
+
+// debugf writes a formatted message to the debug log file.
+func debugf(format string, args ...interface{}) {
+	if debugLog == nil {
+		return
+	}
+	debugLog.Printf(format, args...)
+}
 
 // Event is emitted by the poller for the TUI to consume.
 type Event struct {
@@ -93,6 +140,7 @@ func (p *Poller) Project() *db.Project {
 
 // Start begins the polling loop in a goroutine.
 func (p *Poller) Start(ctx context.Context) {
+	initDebugLog()
 	ctx, p.cancel = context.WithCancel(ctx)
 	p.stopped = make(chan struct{})
 
@@ -107,6 +155,7 @@ func (p *Poller) Stop() {
 	if p.stopped != nil {
 		<-p.stopped
 	}
+	closeDebugLog()
 }
 
 // Pause temporarily stops polling without killing the loop.
@@ -443,52 +492,41 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		}
 	}
 
-	// Check tracked items for status changes.
-	var trackedSummary strings.Builder
+	// Sweep tracked items: fetch metadata + content, hash check, Haiku summarize.
 	trackedItems, err := p.store.GetTrackedItems(p.project.ID)
 	if err != nil {
 		p.emit("error", fmt.Sprintf("loading tracked items: %v", err), nil)
 	}
+	var sweepResults []SweepResult
+	var trackedChanges string
 	if len(trackedItems) > 0 {
 		token := config.GetIntegrationToken("github")
 		if token != "" {
 			gh := ghpkg.NewClient(token)
-			for i := range trackedItems {
-				item := &trackedItems[i]
-				status, err := gh.FetchItemWithHint(ctx, item.Owner, item.Repo, item.Number, item.ItemType)
-				if err != nil {
-					p.emit("error", fmt.Sprintf("checking %s: %v", item.DisplayRef(), err), nil)
-					continue
-				}
-				newStatus := status.CompactStatus()
-				oldStatus := item.LastStatus
-
-				// Update the item regardless.
-				item.Title = status.Title
-				item.State = status.State
-				item.Labels = strings.Join(status.Labels, ",")
-				item.LastStatus = newStatus
-				item.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
-				if err := p.store.UpdateTrackedItem(item); err != nil {
-					p.emit("error", fmt.Sprintf("updating %s: %v", item.DisplayRef(), err), nil)
-				}
-
-				if oldStatus != newStatus {
-					ref := item.DisplayRef()
+			sweepResults, trackedChanges = p.sweepTrackedItems(ctx, trackedItems, gh, repos)
+			for _, sr := range sweepResults {
+				if sr.Changed {
 					result.TrackedItemChanges = append(result.TrackedItemChanges, TrackedItemChange{
-						Ref:       ref,
-						Title:     status.Title,
-						OldStatus: oldStatus,
-						NewStatus: newStatus,
+						Ref:       sr.Item.DisplayRef(),
+						Title:     sr.Item.Title,
+						OldStatus: sr.OldStatus,
+						NewStatus: sr.NewStatus,
 					})
-					fmt.Fprintf(&trackedSummary, "- %s: %s → %s (%s)\n", ref, oldStatus, newStatus, status.Title)
 				}
 			}
 		}
 	}
+	// Check if any tracked items had content updates (Haiku ran).
+	sweepHadUpdates := false
+	for _, sr := range sweepResults {
+		if sr.HaikuRan || sr.Changed {
+			sweepHadUpdates = true
+			break
+		}
+	}
 
 	// If nothing happened, skip LLM calls.
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 {
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !sweepHadUpdates {
 		result.Duration = time.Since(start)
 		result.Tier1Summary = "No new activity."
 		return result, nil
@@ -497,37 +535,90 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	// Get active concerns for context.
 	concerns, _ := p.store.ActiveConcerns(p.project.ID)
 
-	// Build raw data prompt for tier 1.
-	rawPrompt := p.buildPrompt(repos, gitSummary.String(), msgSummary.String(), trackedSummary.String(), trackedItems, concerns)
-
-	// --- Tier 1: Summarizer (Haiku) ---
+	// --- Tier 1: Parallel Haiku summarizers (git + bus) ---
 	tier1Model := p.project.LLMSummarizerModel
 	if tier1Model == "" {
 		tier1Model = p.project.LLMModel
 	}
 
-	tier1Resp, err := p.provider.Complete(ctx, &llm.Request{
-		Model:     tier1Model,
-		System:    tier1SystemPrompt(),
-		Messages:  []llm.Message{{Role: "user", Content: rawPrompt}},
-		MaxTokens: 512,
-	})
-	if err != nil {
-		result.Duration = time.Since(start)
-		result.Tier1Summary = fmt.Sprintf("Tier 1 LLM error: %v", err)
-		// Still record what we have.
-		p.recordPollResult(result)
-		return result, nil
-	}
-	result.Tier1Summary = tier1Resp.Content
+	var gitTier1, busTier1 string
+	var gitErr, busErr error
+	var tier1WG sync.WaitGroup
 
-	// --- Tier 2: Analyzer (Sonnet) ---
+	// Git summarizer agent.
+	if result.NewCommits > 0 {
+		tier1WG.Add(1)
+		go func() {
+			defer tier1WG.Done()
+			prompt := buildGitSummaryPrompt(p.project, repos, gitSummary.String())
+			debugf("=== GIT SUMMARIZER INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", gitSummarizerSystemPrompt(), prompt)
+			resp, err := p.provider.Complete(ctx, &llm.Request{
+				Model:     tier1Model,
+				System:    gitSummarizerSystemPrompt(),
+				Messages:  []llm.Message{{Role: "user", Content: prompt}},
+				MaxTokens: 256,
+			})
+			if err != nil {
+				gitErr = err
+				return
+			}
+			gitTier1 = resp.Content
+			debugf("=== GIT SUMMARIZER OUTPUT ===\n%s\n", resp.Content)
+		}()
+	}
+
+	// Bus summarizer agent.
+	if result.NewMessages > 0 {
+		tier1WG.Add(1)
+		go func() {
+			defer tier1WG.Done()
+			prompt := buildBusSummaryPrompt(p.project, msgSummary.String())
+			debugf("=== BUS SUMMARIZER INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", busSummarizerSystemPrompt(), prompt)
+			resp, err := p.provider.Complete(ctx, &llm.Request{
+				Model:     tier1Model,
+				System:    busSummarizerSystemPrompt(),
+				Messages:  []llm.Message{{Role: "user", Content: prompt}},
+				MaxTokens: 256,
+			})
+			if err != nil {
+				busErr = err
+				return
+			}
+			busTier1 = resp.Content
+			debugf("=== BUS SUMMARIZER OUTPUT ===\n%s\n", resp.Content)
+		}()
+	}
+
+	tier1WG.Wait()
+
+	// Combine tier 1 results for the record.
+	var tier1Parts []string
+	if gitErr != nil {
+		tier1Parts = append(tier1Parts, fmt.Sprintf("Git summarizer error: %v", gitErr))
+	} else if gitTier1 != "" {
+		tier1Parts = append(tier1Parts, gitTier1)
+	}
+	if busErr != nil {
+		tier1Parts = append(tier1Parts, fmt.Sprintf("Bus summarizer error: %v", busErr))
+	} else if busTier1 != "" {
+		tier1Parts = append(tier1Parts, busTier1)
+	}
+	if trackedChanges != "" {
+		tier1Parts = append(tier1Parts, "Tracked item status changes: "+trackedChanges)
+	}
+	if len(tier1Parts) == 0 {
+		tier1Parts = append(tier1Parts, "Activity detected but no summaries produced.")
+	}
+	result.Tier1Summary = strings.Join(tier1Parts, "\n\n")
+
+	// --- Tier 2: Analyzer (Opus) ---
 	tier2Model := p.project.LLMAnalyzerModel
 	if tier2Model == "" {
-		tier2Model = "claude-sonnet-4-6"
+		tier2Model = "claude-opus-4-6"
 	}
 
-	tier2Prompt := p.buildTier2Prompt(result.Tier1Summary, concerns)
+	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, concerns, trackedItems)
+	debugf("=== TIER 2 INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", tier2SystemPrompt(p.project.Name), tier2Prompt)
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     tier2Model,
@@ -541,6 +632,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		p.recordPollResult(result)
 		return result, nil
 	}
+
+	debugf("=== TIER 2 OUTPUT ===\n%s\n", tier2Resp.Content)
 
 	// Parse tier 2 structured response.
 	analysis := parseAnalysis(tier2Resp.Content)
@@ -556,8 +649,6 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	// Reconcile concerns: the analyzer returns the full desired list.
-	// Resolve any existing concerns not present in the new list,
-	// and add any new ones.
 	result.Concerns = reconcileConcerns(p.store, p.project.ID, concerns, analysis.Concerns)
 
 	result.Duration = time.Since(start)
@@ -578,25 +669,55 @@ func (p *Poller) recordPollResult(result *PollResult) {
 	})
 }
 
-func tier1SystemPrompt() string {
-	return `You are a concise technical summarizer. Given raw git commits and message bus activity for a software project, produce a brief summary of what happened.
+// --- Tier 1 Haiku Agent Prompts (focused, parallel) ---
+
+func gitSummarizerSystemPrompt() string {
+	return `You are a concise git activity summarizer. Given recent commits across one or more repos for a software project, produce a brief factual summary.
 
 Rules:
-- Be terse: 2-4 sentences max
-- Focus on what changed and who did it
-- Note any cross-repo patterns or dependencies
+- Be terse: 1-3 sentences max
+- Focus on what changed, who did it, and which repos
+- Note cross-repo patterns or dependencies if visible
 - Do NOT provide recommendations — just summarize the facts`
 }
 
-// Tier 2 System Prompt
+func buildGitSummaryPrompt(project *db.Project, repos []db.Repo, gitActivity string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Project:** %s\n", project.Name)
+	fmt.Fprintf(&b, "**Repos:** %d\n\n", len(repos))
+	b.WriteString("## Git Commits Since Last Poll\n")
+	b.WriteString(gitActivity)
+	return b.String()
+}
+
+func busSummarizerSystemPrompt() string {
+	return `You are a concise message bus summarizer. Given recent inter-agent messages for a software project, produce a brief factual summary.
+
+Rules:
+- Be terse: 1-3 sentences max
+- Focus on what was communicated, by whom, and any action items or coordination signals
+- Note cross-agent patterns or requests
+- Do NOT provide recommendations — just summarize the facts`
+}
+
+func buildBusSummaryPrompt(project *db.Project, msgActivity string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Project:** %s\n\n", project.Name)
+	b.WriteString("## Message Bus Activity\n")
+	b.WriteString(msgActivity)
+	return b.String()
+}
+
+// --- Tier 2 System Prompt (Opus analyzer) ---
+
 func tier2SystemPrompt(projectName string) string {
-	return fmt.Sprintf(`You are an AI project analyzer for %q. You receive a summary of recent activity and must produce a structured analysis.
+	return fmt.Sprintf(`You are an AI project analyzer for %q. You receive focused summaries of recent git activity and bus messages (from separate summarizer agents), plus full tracked issue/PR context from sweep agents. Produce a structured analysis.
 
 Respond with a JSON object (no markdown fences):
 {
   "analysis": "Your 2-4 sentence analysis with actionable insights",
   "concerns": [
-    {"severity": "info|warning|danger", "message": "description of concern"}
+    {"severity": "info|warning|danger", "message": "concise description of concern"}
   ],
   "bus_message": {
     "topic": "%s/coord",
@@ -605,70 +726,55 @@ Respond with a JSON object (no markdown fences):
 }
 
 Rules:
-- "analysis": Always provide a clear, actionable status update
+- "analysis": Provide a clear, actionable status update. Synthesize across git, bus, and tracked item context.
+
 - "concerns": Return the FULL list of currently valid concerns. You are given the existing active concerns with timestamps — use them as your starting point. Remove concerns that are resolved or no longer relevant. Add new concerns as needed. Update severity or wording if the situation has changed. If there are no concerns, return an empty array.
   - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
+  - Keep each concern to 1-2 sentences. Be specific, not exhaustive.
+  - Do NOT raise concerns about closed/merged items — they are done.
+
 - "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
+
+Evidence standards:
+- Related git commits in tracked items are the strongest signal of active development. If an item has recent commits, it IS being worked on.
+- Only claim something is "actively being worked on" if there is direct evidence: recent commits, PR activity, or explicit comments. Detailed specs alone do not mean work has started.
+- Base all claims on the data provided. Do not infer activity that isn't evidenced.
 
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
 }
 
-func (p *Poller) buildPrompt(repos []db.Repo, gitActivity, msgActivity, trackedChanges string, trackedItems []db.TrackedItem, concerns []db.Concern) string {
-	var b strings.Builder
-
-	fmt.Fprintf(&b, "## Current State\n\n")
-	fmt.Fprintf(&b, "**Project:** %s\n", p.project.Name)
-	fmt.Fprintf(&b, "**Goal:** %s — %s\n", p.project.GoalType, p.project.GoalDescription)
-	fmt.Fprintf(&b, "**Repos:** %d\n\n", len(repos))
-
-	if len(concerns) > 0 {
-		b.WriteString("## Active Concerns\n")
-		for _, c := range concerns {
-			fmt.Fprintf(&b, "- [%s] %s\n", c.Severity, c.Message)
-		}
-		b.WriteString("\n")
-	}
-
-	if gitActivity != "" {
-		b.WriteString("## Git Activity Since Last Poll\n")
-		b.WriteString(gitActivity)
-		b.WriteString("\n")
-	}
-
-	if msgActivity != "" {
-		b.WriteString("## Message Bus Activity\n")
-		b.WriteString(msgActivity)
-		b.WriteString("\n")
-	}
-
-	// Include tracked items status.
-	if len(trackedItems) > 0 {
-		b.WriteString("## Tracked Issues/PRs\n")
-		for _, item := range trackedItems {
-			fmt.Fprintf(&b, "- [%s] %s: %s\n", item.LastStatus, item.DisplayRef(), item.Title)
-		}
-		if trackedChanges != "" {
-			b.WriteString("\n### Status Changes This Cycle\n")
-			b.WriteString(trackedChanges)
-		}
-		b.WriteString("\n")
-	}
-
-	if gitActivity == "" && msgActivity == "" && len(trackedItems) == 0 {
-		b.WriteString("No new activity since last poll.\n")
-	}
-
-	return b.String()
-}
-
-func (p *Poller) buildTier2Prompt(tier1Summary string, concerns []db.Concern) string {
+func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges string, concerns []db.Concern, trackedItems []db.TrackedItem) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Project Context\n")
 	fmt.Fprintf(&b, "Project: %s\n", p.project.Name)
 	fmt.Fprintf(&b, "Goal: %s — %s\n\n", p.project.GoalType, p.project.GoalDescription)
 
-	fmt.Fprintf(&b, "## Tier 1 Summary\n%s\n\n", tier1Summary)
+	// Separate sections from each tier 1 agent.
+	if gitSummary != "" {
+		fmt.Fprintf(&b, "## Git Activity Summary\n%s\n\n", gitSummary)
+	}
+	if busSummary != "" {
+		fmt.Fprintf(&b, "## Bus Activity Summary\n%s\n\n", busSummary)
+	}
+	if trackedChanges != "" {
+		fmt.Fprintf(&b, "## Tracked Item Status Changes\n%s\n\n", trackedChanges)
+	}
+
+	// Tracked items with full sweep summaries — direct from sweep agents, not compressed.
+	if len(trackedItems) > 0 {
+		b.WriteString("## Tracked Issues/PRs\n")
+		for _, item := range trackedItems {
+			fmt.Fprintf(&b, "- [%s] %s: %s\n", item.LastStatus, item.DisplayRef(), item.Title)
+			if item.ObjectiveSummary != "" {
+				fmt.Fprintf(&b, "  Objective: %s\n", item.ObjectiveSummary)
+			}
+			if item.ProgressSummary != "" {
+				fmt.Fprintf(&b, "  Progress: %s\n", item.ProgressSummary)
+			}
+		}
+		b.WriteString("\n")
+	}
 
 	b.WriteString("## Active Concerns\n")
 	if len(concerns) > 0 {
@@ -677,7 +783,7 @@ func (p *Poller) buildTier2Prompt(tier1Summary string, concerns []db.Concern) st
 			fmt.Fprintf(&b, "- [%s] (since %s) %s\n", c.Severity, c.CreatedAt, c.Message)
 		}
 	} else {
-		b.WriteString("No active concerns. Add any if warranted by the activity summary.\n")
+		b.WriteString("No active concerns. Add any if warranted by the activity.\n")
 	}
 	b.WriteString("\n")
 
