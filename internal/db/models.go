@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -79,6 +80,28 @@ type Poll struct {
 	Tier2Response  string `db:"tier2_response"`
 	BusMessageSent string `db:"bus_message_sent"`
 	PolledAt       string `db:"polled_at"`
+}
+
+// TrackedItem represents a GitHub issue or PR being tracked for a project.
+type TrackedItem struct {
+	ID            int64  `db:"id"`
+	ProjectID     int64  `db:"project_id"`
+	Source        string `db:"source"`         // "github"
+	Owner         string `db:"owner"`          // repo owner
+	Repo          string `db:"repo"`           // repo name
+	Number        int    `db:"number"`         // issue/PR number
+	ItemType      string `db:"item_type"`      // "issue" or "pull_request"
+	Title         string `db:"title"`          // latest title
+	State         string `db:"state"`          // "open", "closed", "merged"
+	Labels        string `db:"labels"`         // comma-separated
+	LastStatus    string `db:"last_status"`    // compact status for TUI: "Open", "InProg", "Closd", "Mrgd", "Blckd"
+	LastCheckedAt string `db:"last_checked_at"`
+	CreatedAt     string `db:"created_at"`
+}
+
+// DisplayRef returns a compact reference like "owner/repo#123".
+func (t *TrackedItem) DisplayRef() string {
+	return fmt.Sprintf("%s/%s#%d", t.Owner, t.Repo, t.Number)
 }
 
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.

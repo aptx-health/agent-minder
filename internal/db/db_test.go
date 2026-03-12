@@ -285,8 +285,8 @@ func TestMigrationV1ToV2(t *testing.T) {
 	// Check schema version.
 	var version int
 	store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1")
-	if version != 2 {
-		t.Errorf("version = %d, want 2", version)
+	if version != currentVersion {
+		t.Errorf("version = %d, want %d", version, currentVersion)
 	}
 
 	// Check project got new columns.
@@ -330,6 +330,112 @@ func openRawV1(path string) (*sqlx.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+func TestTrackedItemsCRUD(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "titest", MinderIdentity: "titest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	item := &TrackedItem{
+		ProjectID:  p.ID,
+		Source:     "github",
+		Owner:      "octocat",
+		Repo:       "hello-world",
+		Number:     42,
+		ItemType:   "issue",
+		Title:      "Fix the thing",
+		State:      "open",
+		LastStatus: "Open",
+	}
+	if err := store.AddTrackedItem(item); err != nil {
+		t.Fatalf("AddTrackedItem: %v", err)
+	}
+	if item.ID == 0 {
+		t.Fatal("expected non-zero ID")
+	}
+
+	// Get items.
+	items, err := store.GetTrackedItems(p.ID)
+	if err != nil {
+		t.Fatalf("GetTrackedItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("GetTrackedItems len = %d, want 1", len(items))
+	}
+	if items[0].DisplayRef() != "octocat/hello-world#42" {
+		t.Errorf("DisplayRef = %q", items[0].DisplayRef())
+	}
+
+	// Update.
+	items[0].State = "closed"
+	items[0].LastStatus = "Closd"
+	items[0].LastCheckedAt = "2026-03-12T00:00:00Z"
+	if err := store.UpdateTrackedItem(&items[0]); err != nil {
+		t.Fatalf("UpdateTrackedItem: %v", err)
+	}
+	items, _ = store.GetTrackedItems(p.ID)
+	if items[0].LastStatus != "Closd" {
+		t.Errorf("after update LastStatus = %q, want Closd", items[0].LastStatus)
+	}
+
+	// Duplicate insert should fail.
+	dup := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "octocat", Repo: "hello-world", Number: 42}
+	if err := store.AddTrackedItem(dup); err == nil {
+		t.Error("expected duplicate insert to fail")
+	}
+
+	// Remove.
+	if err := store.RemoveTrackedItem(p.ID, "octocat", "hello-world", 42); err != nil {
+		t.Fatalf("RemoveTrackedItem: %v", err)
+	}
+	items, _ = store.GetTrackedItems(p.ID)
+	if len(items) != 0 {
+		t.Errorf("after remove len = %d, want 0", len(items))
+	}
+
+	// Remove non-existent should fail.
+	if err := store.RemoveTrackedItem(p.ID, "x", "y", 1); err == nil {
+		t.Error("expected remove of non-existent item to fail")
+	}
+}
+
+func TestTrackedItemsCap(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "captest", MinderIdentity: "captest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Add 10 items.
+	for i := 1; i <= 10; i++ {
+		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
+	}
+
+	// 11th should fail.
+	item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 11, LastStatus: "Open"}
+	if err := store.AddTrackedItem(item); err == nil {
+		t.Error("expected 11th item to be rejected")
+	}
+}
+
+func TestTrackedItemCascadeDelete(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "cascade", MinderIdentity: "cascade/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "o", Repo: "r", Number: 1, LastStatus: "Open"})
+
+	// Delete project should cascade.
+	store.DeleteProject(p.ID)
+	items, _ := store.GetTrackedItems(p.ID)
+	if len(items) != 0 {
+		t.Error("tracked items should be deleted with project")
+	}
 }
 
 // schemaV1_only is the original v1 schema without v2 columns, for migration testing.

@@ -12,8 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
+	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 )
@@ -26,15 +28,24 @@ type Event struct {
 	PollResult *PollResult
 }
 
+// TrackedItemChange records a status change for a tracked item.
+type TrackedItemChange struct {
+	Ref       string // "owner/repo#number"
+	Title     string
+	OldStatus string
+	NewStatus string
+}
+
 // PollResult holds the outcome of a single poll cycle.
 type PollResult struct {
-	NewCommits     int
-	NewMessages    int
-	Tier1Summary   string
-	Tier2Analysis  string
-	BusMessageSent string
-	Concerns       []string
-	Duration       time.Duration
+	NewCommits          int
+	NewMessages         int
+	TrackedItemChanges  []TrackedItemChange
+	Tier1Summary        string
+	Tier2Analysis       string
+	BusMessageSent      string
+	Concerns            []string
+	Duration            time.Duration
 }
 
 // LLMResponse returns the best available response for display.
@@ -432,8 +443,46 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		}
 	}
 
+	// Check tracked items for status changes.
+	var trackedSummary strings.Builder
+	trackedItems, _ := p.store.GetTrackedItems(p.project.ID)
+	if len(trackedItems) > 0 {
+		token := config.GetIntegrationToken("github")
+		if token != "" {
+			gh := ghpkg.NewClient(token)
+			for i := range trackedItems {
+				item := &trackedItems[i]
+				status, err := gh.FetchItem(ctx, item.Owner, item.Repo, item.Number)
+				if err != nil {
+					continue
+				}
+				newStatus := status.CompactStatus()
+				oldStatus := item.LastStatus
+
+				// Update the item regardless.
+				item.Title = status.Title
+				item.State = status.State
+				item.Labels = strings.Join(status.Labels, ",")
+				item.LastStatus = newStatus
+				item.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+				p.store.UpdateTrackedItem(item)
+
+				if oldStatus != newStatus {
+					ref := item.DisplayRef()
+					result.TrackedItemChanges = append(result.TrackedItemChanges, TrackedItemChange{
+						Ref:       ref,
+						Title:     status.Title,
+						OldStatus: oldStatus,
+						NewStatus: newStatus,
+					})
+					fmt.Fprintf(&trackedSummary, "- %s: %s → %s (%s)\n", ref, oldStatus, newStatus, status.Title)
+				}
+			}
+		}
+	}
+
 	// If nothing happened, skip LLM calls.
-	if result.NewCommits == 0 && result.NewMessages == 0 {
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 {
 		result.Duration = time.Since(start)
 		result.Tier1Summary = "No new activity."
 		return result, nil
@@ -443,7 +492,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	concerns, _ := p.store.ActiveConcerns(p.project.ID)
 
 	// Build raw data prompt for tier 1.
-	rawPrompt := p.buildPrompt(repos, gitSummary.String(), msgSummary.String(), concerns)
+	rawPrompt := p.buildPrompt(repos, gitSummary.String(), msgSummary.String(), trackedSummary.String(), trackedItems, concerns)
 
 	// --- Tier 1: Summarizer (Haiku) ---
 	tier1Model := p.project.LLMSummarizerModel
@@ -558,7 +607,7 @@ Rules:
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
 }
 
-func (p *Poller) buildPrompt(repos []db.Repo, gitActivity, msgActivity string, concerns []db.Concern) string {
+func (p *Poller) buildPrompt(repos []db.Repo, gitActivity, msgActivity, trackedChanges string, trackedItems []db.TrackedItem, concerns []db.Concern) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Current State\n\n")
@@ -586,7 +635,20 @@ func (p *Poller) buildPrompt(repos []db.Repo, gitActivity, msgActivity string, c
 		b.WriteString("\n")
 	}
 
-	if gitActivity == "" && msgActivity == "" {
+	// Include tracked items status.
+	if len(trackedItems) > 0 {
+		b.WriteString("## Tracked Issues/PRs\n")
+		for _, item := range trackedItems {
+			fmt.Fprintf(&b, "- [%s] %s: %s\n", item.LastStatus, item.DisplayRef(), item.Title)
+		}
+		if trackedChanges != "" {
+			b.WriteString("\n### Status Changes This Cycle\n")
+			b.WriteString(trackedChanges)
+		}
+		b.WriteString("\n")
+	}
+
+	if gitActivity == "" && msgActivity == "" && len(trackedItems) == 0 {
 		b.WriteString("No new activity since last poll.\n")
 	}
 
@@ -624,6 +686,9 @@ func (p *Poller) summarize(result *PollResult) string {
 	}
 	if result.NewMessages > 0 {
 		parts = append(parts, fmt.Sprintf("%d new messages", result.NewMessages))
+	}
+	if len(result.TrackedItemChanges) > 0 {
+		parts = append(parts, fmt.Sprintf("%d tracked item changes", len(result.TrackedItemChanges)))
 	}
 	if result.BusMessageSent != "" {
 		parts = append(parts, "bus message sent")

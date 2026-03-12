@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 2
+const currentVersion = 3
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -76,6 +76,23 @@ CREATE TABLE IF NOT EXISTS polls (
 	bus_message_sent TEXT DEFAULT '',
 	polled_at       TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS tracked_items (
+	id              INTEGER PRIMARY KEY,
+	project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+	source          TEXT NOT NULL DEFAULT 'github',
+	owner           TEXT NOT NULL,
+	repo            TEXT NOT NULL,
+	number          INTEGER NOT NULL,
+	item_type       TEXT NOT NULL DEFAULT 'issue',
+	title           TEXT NOT NULL DEFAULT '',
+	state           TEXT NOT NULL DEFAULT 'open',
+	labels          TEXT NOT NULL DEFAULT '',
+	last_status     TEXT NOT NULL DEFAULT 'Open',
+	last_checked_at TEXT DEFAULT '',
+	created_at      TEXT DEFAULT (datetime('now')),
+	UNIQUE(project_id, source, owner, repo, number)
+);
 `
 
 // Open opens (or creates) the agent-minder SQLite database and runs migrations,
@@ -119,6 +136,12 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
+	if version < 3 {
+		if err := migrateV3(db); err != nil {
+			return fmt.Errorf("apply migration v3: %w", err)
+		}
+	}
+
 	_, err = db.Exec("UPDATE schema_version SET version = ?", currentVersion)
 	return err
 }
@@ -152,6 +175,31 @@ func migrateV2(db *sqlx.DB) error {
 	}
 	if _, err := db.Exec(`UPDATE polls SET bus_message_sent = '' WHERE bus_message_sent IS NULL`); err != nil {
 		return fmt.Errorf("null-fill bus_message_sent: %w", err)
+	}
+	return nil
+}
+
+func migrateV3(db *sqlx.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS tracked_items (
+			id              INTEGER PRIMARY KEY,
+			project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+			source          TEXT NOT NULL DEFAULT 'github',
+			owner           TEXT NOT NULL,
+			repo            TEXT NOT NULL,
+			number          INTEGER NOT NULL,
+			item_type       TEXT NOT NULL DEFAULT 'issue',
+			title           TEXT NOT NULL DEFAULT '',
+			state           TEXT NOT NULL DEFAULT 'open',
+			labels          TEXT NOT NULL DEFAULT '',
+			last_status     TEXT NOT NULL DEFAULT 'Open',
+			last_checked_at TEXT DEFAULT '',
+			created_at      TEXT DEFAULT (datetime('now')),
+			UNIQUE(project_id, source, owner, repo, number)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create tracked_items table: %w", err)
 	}
 	return nil
 }
