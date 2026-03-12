@@ -611,10 +611,10 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 	result.Tier1Summary = strings.Join(tier1Parts, "\n\n")
 
-	// --- Tier 2: Analyzer (Sonnet) ---
+	// --- Tier 2: Analyzer (Opus) ---
 	tier2Model := p.project.LLMAnalyzerModel
 	if tier2Model == "" {
-		tier2Model = "claude-sonnet-4-6"
+		tier2Model = "claude-opus-4-6"
 	}
 
 	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, concerns, trackedItems)
@@ -708,7 +708,7 @@ func buildBusSummaryPrompt(project *db.Project, msgActivity string) string {
 	return b.String()
 }
 
-// --- Tier 2 System Prompt (Sonnet analyzer) ---
+// --- Tier 2 System Prompt (Opus analyzer) ---
 
 func tier2SystemPrompt(projectName string) string {
 	return fmt.Sprintf(`You are an AI project analyzer for %q. You receive focused summaries of recent git activity and bus messages (from separate summarizer agents), plus full tracked issue/PR context from sweep agents. Produce a structured analysis.
@@ -717,7 +717,7 @@ Respond with a JSON object (no markdown fences):
 {
   "analysis": "Your 2-4 sentence analysis with actionable insights",
   "concerns": [
-    {"severity": "info|warning|danger", "message": "description of concern"}
+    {"severity": "info|warning|danger", "message": "concise description of concern"}
   ],
   "bus_message": {
     "topic": "%s/coord",
@@ -726,10 +726,19 @@ Respond with a JSON object (no markdown fences):
 }
 
 Rules:
-- "analysis": Always provide a clear, actionable status update. Synthesize across git, bus, and tracked item context.
+- "analysis": Provide a clear, actionable status update. Synthesize across git, bus, and tracked item context.
+
 - "concerns": Return the FULL list of currently valid concerns. You are given the existing active concerns with timestamps — use them as your starting point. Remove concerns that are resolved or no longer relevant. Add new concerns as needed. Update severity or wording if the situation has changed. If there are no concerns, return an empty array.
   - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
+  - Keep each concern to 1-2 sentences. Be specific, not exhaustive.
+  - Do NOT raise concerns about closed/merged items — they are done.
+
 - "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
+
+Evidence standards:
+- Related git commits in tracked items are the strongest signal of active development. If an item has recent commits, it IS being worked on.
+- Only claim something is "actively being worked on" if there is direct evidence: recent commits, PR activity, or explicit comments. Detailed specs alone do not mean work has started.
+- Base all claims on the data provided. Do not infer activity that isn't evidenced.
 
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
 }
