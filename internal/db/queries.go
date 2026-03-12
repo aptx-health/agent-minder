@@ -294,6 +294,76 @@ func (s *Store) RecentPolls(projectID int64, limit int) ([]Poll, error) {
 	return polls, nil
 }
 
+// --- Tracked Items ---
+
+// AddTrackedItem inserts a tracked item. Returns error if the cap (10) is reached.
+// Uses atomic count-and-insert to prevent race conditions.
+func (s *Store) AddTrackedItem(item *TrackedItem) error {
+	result, err := s.db.Exec(`
+		INSERT INTO tracked_items (project_id, source, owner, repo, number, item_type, title, state, labels, last_status, last_checked_at)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE (SELECT COUNT(*) FROM tracked_items WHERE project_id = ?) < 10
+	`, item.ProjectID, item.Source, item.Owner, item.Repo, item.Number,
+		item.ItemType, item.Title, item.State, item.Labels, item.LastStatus, item.LastCheckedAt,
+		item.ProjectID)
+	if err != nil {
+		return fmt.Errorf("insert tracked item: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("tracked item limit reached (max 10 per project)")
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("last insert id: %w", err)
+	}
+	item.ID = id
+	return nil
+}
+
+// GetTrackedItems returns all tracked items for a project.
+func (s *Store) GetTrackedItems(projectID int64) ([]TrackedItem, error) {
+	var items []TrackedItem
+	if err := s.db.Select(&items, `
+		SELECT * FROM tracked_items WHERE project_id = ? ORDER BY owner, repo, number
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("get tracked items: %w", err)
+	}
+	return items, nil
+}
+
+// RemoveTrackedItem deletes a tracked item by project, owner, repo, and number.
+func (s *Store) RemoveTrackedItem(projectID int64, owner, repo string, number int) error {
+	result, err := s.db.Exec(`
+		DELETE FROM tracked_items WHERE project_id = ? AND owner = ? AND repo = ? AND number = ?
+	`, projectID, owner, repo, number)
+	if err != nil {
+		return fmt.Errorf("delete tracked item: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("tracked item %s/%s#%d not found", owner, repo, number)
+	}
+	return nil
+}
+
+// UpdateTrackedItem updates a tracked item's mutable fields after a status check.
+func (s *Store) UpdateTrackedItem(item *TrackedItem) error {
+	_, err := s.db.NamedExec(`
+		UPDATE tracked_items SET
+			title = :title,
+			state = :state,
+			labels = :labels,
+			last_status = :last_status,
+			last_checked_at = :last_checked_at
+		WHERE id = :id
+	`, item)
+	return err
+}
+
 // LastPoll returns the most recent poll for a project, or nil if none.
 func (s *Store) LastPoll(projectID int64) (*Poll, error) {
 	polls, err := s.RecentPolls(projectID, 1)
