@@ -11,8 +11,10 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	"github.com/dustinlange/agent-minder/internal/db"
+	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
 
@@ -42,6 +44,21 @@ type onboardResultMsg struct {
 
 // clearUserMsgStatusMsg clears the user message status after a delay.
 type clearUserMsgStatusMsg struct{}
+
+// addTrackedItemResultMsg is sent when a tracked item add completes.
+type addTrackedItemResultMsg struct {
+	item *db.TrackedItem
+	err  error
+}
+
+// removeTrackedItemResultMsg is sent when a tracked item remove completes.
+type removeTrackedItemResultMsg struct {
+	ref string
+	err error
+}
+
+// clearTrackStatusMsg clears the track status after a delay.
+type clearTrackStatusMsg struct{}
 
 // Model is the root bubbletea model for the dashboard.
 type Model struct {
@@ -81,6 +98,10 @@ type Model struct {
 	// Onboard mode.
 	onboardInput  textarea.Model
 	onboardStatus string
+
+	// Track mode (add/remove tracked items).
+	trackInput  textinput.Model
+	trackStatus string
 }
 
 // safeViewportKeyMap returns a viewport KeyMap that only uses arrow keys and
@@ -120,6 +141,11 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	oi.SetHeight(3)
 	oi.SetWidth(80)
 
+	ti := textinput.New()
+	ti.Placeholder = "#42 or owner/repo#42"
+	ti.CharLimit = 100
+	ti.SetWidth(40)
+
 	aVP := viewport.New()
 	aVP.KeyMap = safeViewportKeyMap()
 	aVP.SoftWrap = true
@@ -140,6 +166,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		userMsgInput:   ta,
 		onboardInput:   oi,
 		spinner:        sp,
+		trackInput:     ti,
 		analysisVP:     aVP,
 		eventLogVP:     eVP,
 	}
@@ -169,6 +196,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateUserMsg(msg)
 		case "onboard":
 			return m.updateOnboard(msg)
+		case "track", "untrack":
+			return m.updateTrack(msg)
 		default:
 			return m.updateNormal(msg)
 		}
@@ -238,6 +267,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = "normal"
 		return m, nil
 
+	case addTrackedItemResultMsg:
+		if msg.err != nil {
+			m.trackStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.trackStatus = fmt.Sprintf("Now tracking %s: %s [%s]", msg.item.DisplayRef(), msg.item.Title, msg.item.LastStatus)
+			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearTrackStatusMsg{}
+		})
+
+	case removeTrackedItemResultMsg:
+		if msg.err != nil {
+			m.trackStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.trackStatus = fmt.Sprintf("Untracked %s", msg.ref)
+			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearTrackStatusMsg{}
+		})
+
+	case clearTrackStatusMsg:
+		m.trackStatus = ""
+		m.mode = "normal"
+		return m, nil
+
 	case tickMsg:
 		return m, tickEvery()
 	}
@@ -271,6 +327,20 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	case "i":
+		m.mode = "track"
+		m.trackStatus = ""
+		m.trackInput.Reset()
+		m.trackInput.Placeholder = "#42 or owner/repo#42"
+		cmd := m.trackInput.Focus()
+		return m, cmd
+	case "I":
+		m.mode = "untrack"
+		m.trackStatus = ""
+		m.trackInput.Reset()
+		m.trackInput.Placeholder = "#42 or owner/repo#42"
+		cmd := m.trackInput.Focus()
+		return m, cmd
+	case "d":
 		m.showInfo = !m.showInfo
 		m.resizeViewports()
 		return m, nil
@@ -399,6 +469,58 @@ func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.onboardInput, cmd = m.onboardInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = "normal"
+		m.trackStatus = ""
+		m.trackInput.Blur()
+		return m, nil
+	case "enter":
+		value := m.trackInput.Value()
+		if strings.TrimSpace(value) == "" {
+			m.mode = "normal"
+			m.trackInput.Blur()
+			return m, nil
+		}
+
+		defaultOwner, defaultRepo := m.poller.DefaultOwnerRepo()
+		ref, err := ghpkg.ParseItemRef(value, defaultOwner, defaultRepo)
+		if err != nil {
+			m.trackStatus = fmt.Sprintf("Error: %v", err)
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearTrackStatusMsg{}
+			})
+		}
+
+		m.trackInput.Blur()
+		mode := m.mode
+		p := m.poller
+
+		if mode == "untrack" {
+			m.trackStatus = fmt.Sprintf("Removing %s/%s#%d...", ref.Owner, ref.Repo, ref.Number)
+			return m, func() tea.Msg {
+				err := p.RemoveTrackedItemByRef(ref)
+				return removeTrackedItemResultMsg{
+					ref: fmt.Sprintf("%s/%s#%d", ref.Owner, ref.Repo, ref.Number),
+					err: err,
+				}
+			}
+		}
+
+		// Track mode: resolve via GitHub API.
+		m.trackStatus = fmt.Sprintf("Resolving %s/%s#%d...", ref.Owner, ref.Repo, ref.Number)
+		return m, func() tea.Msg {
+			item, err := p.AddTrackedItemByRef(context.Background(), ref)
+			return addTrackedItemResultMsg{item: item, err: err}
+		}
+	}
+
+	var cmd tea.Cmd
+	m.trackInput, cmd = m.trackInput.Update(msg)
 	return m, cmd
 }
 

@@ -127,18 +127,19 @@ func spinnerStyle() lipgloss.Style {
 }
 
 // statusDot returns a colored status indicator for tracked items.
+// Colors: Open=cyan, InProgress=amber, Closed=green, Blocked=red, Merged=green.
 func statusDot(status string) string {
 	t := currentTheme()
 	switch status {
 	case "InProg":
-		return lipgloss.NewStyle().Foreground(t.Secondary).Render("\u25cf")
-	case "Blckd":
 		return lipgloss.NewStyle().Foreground(t.Warning).Render("\u25cf")
+	case "Blckd":
+		return lipgloss.NewStyle().Foreground(t.Error).Render("\u25cf")
 	case "Mrgd":
 		return lipgloss.NewStyle().Foreground(t.Success).Render("\u2713")
 	case "Closd":
-		return lipgloss.NewStyle().Foreground(t.Muted).Render("\u2715")
+		return lipgloss.NewStyle().Foreground(t.Success).Render("\u2715")
 	default: // Open
-		return lipgloss.NewStyle().Foreground(t.Muted).Render("\u25cb")
+		return lipgloss.NewStyle().Foreground(t.Secondary).Render("\u25cb")
 	}
 }

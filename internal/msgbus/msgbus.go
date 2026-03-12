@@ -50,7 +50,7 @@ func DefaultDBPath() string {
 // Open connects to the agent-msg SQLite database (read-only) with automatic
 // WAL recovery if stale -shm/-wal files are detected.
 func Open(dbPath string) (*Client, error) {
-	db, err := sqliteutil.OpenWithRecovery(dbPath, dbPath+"?mode=ro&_journal_mode=WAL")
+	db, err := sqliteutil.OpenWithRecovery(dbPath, dbPath+"?mode=ro&_journal_mode=WAL&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("opening agent-msg DB: %w", err)
 	}
@@ -208,7 +208,7 @@ type Publisher struct {
 // NewPublisher opens the agent-msg database in read-write mode for publishing messages,
 // with automatic WAL recovery if stale -shm/-wal files are detected.
 func NewPublisher(dbPath string) (*Publisher, error) {
-	db, err := sqliteutil.OpenWithRecovery(dbPath, dbPath+"?_journal_mode=WAL")
+	db, err := sqliteutil.OpenWithRecovery(dbPath, dbPath+"?_journal_mode=WAL&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("opening agent-msg DB for writing: %w", err)
 	}

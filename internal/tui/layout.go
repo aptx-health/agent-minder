@@ -200,7 +200,8 @@ func (m Model) renderConcerns() string {
 	return b.String()
 }
 
-// renderTrackedStrip returns a compact one-line tracked items display.
+// renderTrackedStrip returns a compact tracked items display.
+// Shows status tag and dot per item, wrapping to multiple lines for >5 items.
 func (m Model) renderTrackedStrip() string {
 	if len(m.trackedItems) == 0 {
 		return ""
@@ -208,15 +209,35 @@ func (m Model) renderTrackedStrip() string {
 
 	var b strings.Builder
 	b.WriteString(headerStyle().Render(fmt.Sprintf("Tracked (%d)", len(m.trackedItems))))
-	b.WriteString("  ")
+	b.WriteString("\n")
+
+	lineWidth := 2 // indent
+	var line strings.Builder
+	line.WriteString("  ")
 
 	for i, item := range m.trackedItems {
-		if i > 0 {
-			b.WriteString("  ")
-		}
+		entry := fmt.Sprintf("#%d[%s]", item.Number, item.LastStatus)
 		dot := statusDot(item.LastStatus)
-		b.WriteString(fmt.Sprintf("#%d %s", item.Number, dot))
+		entryLen := len(entry) + 2 // +2 for dot + space
+
+		// Wrap to next line if needed (allow ~5 items per line).
+		if i > 0 && lineWidth+entryLen+2 > m.width-2 {
+			b.WriteString(line.String())
+			b.WriteString("\n")
+			line.Reset()
+			line.WriteString("  ")
+			lineWidth = 2
+		}
+
+		if lineWidth > 2 {
+			line.WriteString("  ")
+			lineWidth += 2
+		}
+		line.WriteString(dot)
+		line.WriteString(mutedStyle().Render(entry))
+		lineWidth += entryLen
 	}
+	b.WriteString(line.String())
 	b.WriteString("\n")
 
 	return b.String()
@@ -300,8 +321,9 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 		fixed += 1 // blank line after concerns
 	}
 
-	if len(m.trackedItems) > 0 {
-		fixed += 1 // tracked strip line
+	trackedContent := m.renderTrackedStrip()
+	if trackedContent != "" {
+		fixed += strings.Count(trackedContent, "\n")
 		fixed += 1 // blank line after tracked
 	}
 
@@ -392,6 +414,40 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render("ctrl+d: generate & publish \u2022 esc: cancel (leave empty for generic onboarding)"))
 		}
 		b.WriteString("\n")
+	case "track":
+		if m.trackStatus != "" && !strings.HasPrefix(m.trackStatus, "Error:") {
+			b.WriteString("  ")
+			b.WriteString(m.spinner.View())
+			b.WriteString(" ")
+			b.WriteString(mutedStyle().Render(m.trackStatus))
+		} else if m.trackStatus != "" {
+			b.WriteString(errorStyle().Render(fmt.Sprintf("  %s", m.trackStatus)))
+		} else {
+			b.WriteString(headerStyle().Render("  Track item: "))
+			b.WriteString(m.trackInput.View())
+		}
+		b.WriteString("\n")
+		if m.trackStatus == "" {
+			b.WriteString(helpStyle().Render("enter: add \u2022 esc: cancel"))
+		}
+		b.WriteString("\n")
+	case "untrack":
+		if m.trackStatus != "" && !strings.HasPrefix(m.trackStatus, "Error:") {
+			b.WriteString("  ")
+			b.WriteString(m.spinner.View())
+			b.WriteString(" ")
+			b.WriteString(mutedStyle().Render(m.trackStatus))
+		} else if m.trackStatus != "" {
+			b.WriteString(errorStyle().Render(fmt.Sprintf("  %s", m.trackStatus)))
+		} else {
+			b.WriteString(headerStyle().Render("  Untrack item: "))
+			b.WriteString(m.trackInput.View())
+		}
+		b.WriteString("\n")
+		if m.trackStatus == "" {
+			b.WriteString(helpStyle().Render("enter: remove \u2022 esc: cancel"))
+		}
+		b.WriteString("\n")
 	default:
 		if m.broadcastStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.broadcastStatus)))
@@ -423,10 +479,12 @@ func renderHelpBar(width int) string {
 		{"p", "pause/resume"},
 		{"r", "poll now"},
 		{"e", "expand"},
+		{"i", "track"},
+		{"I", "untrack"},
 		{"u", "user msg"},
 		{"m", "broadcast"},
 		{"o", "onboard"},
-		{"i", "info"},
+		{"d", "details"},
 		{"t", "theme"},
 		{"q", "quit"},
 	}
@@ -435,7 +493,7 @@ func renderHelpBar(width int) string {
 	for idx, h := range hints {
 		entry := keyStyle.Render(h.key) + descStyle.Render(": "+h.desc)
 		target := &row1
-		if idx >= 5 {
+		if idx >= 6 {
 			target = &row2
 		}
 		if target.Len() > 0 {
