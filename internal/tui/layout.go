@@ -40,6 +40,15 @@ func (m Model) View() tea.View {
 		b.WriteString("\n")
 	}
 
+	// Worktree display.
+	if m.showWorktrees {
+		wt := m.renderWorktrees()
+		if wt != "" {
+			b.WriteString(wt)
+			b.WriteString("\n")
+		}
+	}
+
 	// Analysis section.
 	expandHint := "e: expand"
 	if m.analysisExpanded {
@@ -246,6 +255,65 @@ func (m Model) renderTrackedStrip() string {
 	return b.String()
 }
 
+// renderWorktrees returns a compact worktree display grouped by repo.
+func (m Model) renderWorktrees() string {
+	if len(m.worktrees) == 0 {
+		return headerStyle().Render("Worktrees") + "  " + mutedStyle().Render("[w: hide]") + "\n" + mutedStyle().Render("  (none)") + "\n"
+	}
+
+	var b strings.Builder
+	b.WriteString(headerStyle().Render(fmt.Sprintf("Worktrees (%d)", len(m.worktrees))))
+	b.WriteString("  ")
+	b.WriteString(mutedStyle().Render("[w: hide]"))
+	b.WriteString("\n")
+
+	// Group by repo short name.
+	grouped := make(map[string][]string)
+	var repoOrder []string
+	for _, wt := range m.worktrees {
+		if _, seen := grouped[wt.RepoShortName]; !seen {
+			repoOrder = append(repoOrder, wt.RepoShortName)
+		}
+		branch := wt.Branch
+		if branch == "" {
+			branch = "(detached)"
+		}
+		grouped[wt.RepoShortName] = append(grouped[wt.RepoShortName], branch)
+	}
+
+	const maxRenderedLines = 6
+	linesUsed := 0
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+
+	for i, repo := range repoOrder {
+		branches := grouped[repo]
+		line := fmt.Sprintf("  %s: %s", repo, strings.Join(branches, ", "))
+		// Estimate wrapped line count based on terminal width.
+		lineCount := (len(line) + width - 1) / width
+		if lineCount < 1 {
+			lineCount = 1
+		}
+		if linesUsed+lineCount > maxRenderedLines && linesUsed > 0 {
+			// Count remaining worktrees across skipped repos.
+			remaining := 0
+			for _, r := range repoOrder[i:] {
+				remaining += len(grouped[r])
+			}
+			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more worktrees across %d repos", remaining, len(repoOrder)-i)))
+			b.WriteString("\n")
+			break
+		}
+		b.WriteString(textStyle().Render(line))
+		b.WriteString("\n")
+		linesUsed += lineCount
+	}
+
+	return b.String()
+}
+
 // rebuildEventLogContent sets the event log viewport content with single-line entries.
 func (m *Model) rebuildEventLogContent() {
 	lines := make([]string, 0, len(m.events))
@@ -328,6 +396,14 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 	if trackedContent != "" {
 		fixed += strings.Count(trackedContent, "\n")
 		fixed += 1 // blank line after tracked
+	}
+
+	if m.showWorktrees {
+		wtContent := m.renderWorktrees()
+		if wtContent != "" {
+			fixed += strings.Count(wtContent, "\n")
+			fixed += 1 // blank line after worktrees
+		}
 	}
 
 	fixed += 1 // analysis header
@@ -482,6 +558,7 @@ func renderHelpBar(width int) string {
 		{"p", "pause/resume"},
 		{"r", "poll now"},
 		{"e", "expand"},
+		{"w", "worktrees"},
 		{"i", "track"},
 		{"I", "untrack"},
 		{"u", "user msg"},
@@ -496,7 +573,7 @@ func renderHelpBar(width int) string {
 	for idx, h := range hints {
 		entry := keyStyle.Render(h.key) + descStyle.Render(": "+h.desc)
 		target := &row1
-		if idx >= 6 {
+		if idx >= 7 {
 			target = &row2
 		}
 		if target.Len() > 0 {

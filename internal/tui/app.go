@@ -85,6 +85,10 @@ type Model struct {
 	// Tracked items (refreshed on poll results).
 	trackedItems []db.TrackedItem
 
+	// Worktree display (refreshed on poll results).
+	showWorktrees bool
+	worktrees     []db.WorktreeWithRepo
+
 	// Spinner for async operations.
 	spinner spinner.Model
 	polling bool // true while a manual poll is in progress
@@ -244,6 +248,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastPoll = event.PollResult
 			m.polling = false
 			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
 		}
 		m.rebuildEventLogContent()
 		m.rebuildAnalysisContent()
@@ -382,6 +387,13 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.trackInput.Placeholder = "#42 or owner/repo#42"
 		cmd := m.trackInput.Focus()
 		return m, cmd
+	case "w":
+		m.showWorktrees = !m.showWorktrees
+		if m.showWorktrees && len(m.worktrees) == 0 {
+			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
+		}
+		m.resizeViewports()
+		return m, nil
 	case "d":
 		m.showInfo = !m.showInfo
 		m.resizeViewports()

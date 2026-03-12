@@ -185,6 +185,22 @@ func (s *Store) ReplaceWorktrees(repoID int64, wts []Worktree) error {
 	return tx.Commit()
 }
 
+// GetWorktreesForProject returns all worktrees across all repos for a project,
+// joined with the repo short name.
+func (s *Store) GetWorktreesForProject(projectID int64) ([]WorktreeWithRepo, error) {
+	var wts []WorktreeWithRepo
+	if err := s.db.Select(&wts, `
+		SELECT w.id, w.repo_id, w.path, w.branch, r.short_name AS repo_short_name
+		FROM worktrees w
+		JOIN repos r ON r.id = w.repo_id
+		WHERE r.project_id = ?
+		ORDER BY r.short_name, w.id DESC
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("get worktrees for project: %w", err)
+	}
+	return wts, nil
+}
+
 // --- Topics ---
 
 // AddTopic inserts a topic for a project.
