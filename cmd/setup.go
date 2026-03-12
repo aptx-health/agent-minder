@@ -7,9 +7,12 @@ import (
 	"strings"
 
 	"github.com/dustinlange/agent-minder/internal/config"
+	"github.com/dustinlange/agent-minder/internal/secrets"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
+
+var showProviders bool
 
 var setupCmd = &cobra.Command{
 	Use:   "setup",
@@ -19,14 +22,24 @@ var setupCmd = &cobra.Command{
 }
 
 func init() {
+	setupCmd.Flags().BoolVar(&showProviders, "show-providers", false, "Show configured providers and their credential sources")
 	rootCmd.AddCommand(setupCmd)
 }
 
 func runSetup(cmd *cobra.Command, args []string) error {
+	if showProviders {
+		return runShowProviders()
+	}
+
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println("agent-minder setup")
 	fmt.Println(strings.Repeat("─", 40))
+
+	// Migrate plaintext credentials to keychain if available.
+	if config.KeychainAvailable() {
+		migrateCredentials(reader)
+	}
 
 	// Show current state.
 	providers := config.ConfiguredProviders()
@@ -36,11 +49,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		fmt.Println("\nCurrent configuration:")
 		for _, p := range providers {
 			key := config.GetProviderAPIKey(p)
-			fmt.Printf("  Provider: %s  [%s]\n", p, maskKey(key))
+			src := config.TokenSource("provider", p)
+			fmt.Printf("  Provider: %s  [%s] (%s)\n", p, maskKey(key), src)
 		}
 		for _, i := range integrations {
 			token := config.GetIntegrationToken(i)
-			fmt.Printf("  Integration: %s  [%s]\n", i, maskKey(token))
+			src := config.TokenSource("integration", i)
+			fmt.Printf("  Integration: %s  [%s] (%s)\n", i, maskKey(token), src)
 		}
 		fmt.Println()
 	}
@@ -69,16 +84,109 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	// Summary.
 	fmt.Println("\nConfigured:")
 	for _, p := range config.ConfiguredProviders() {
-		fmt.Printf("  ✓ Provider: %s\n", p)
+		src := config.TokenSource("provider", p)
+		fmt.Printf("  ✓ Provider: %s (%s)\n", p, src)
 	}
 	for _, i := range config.ConfiguredIntegrations() {
-		fmt.Printf("  ✓ Integration: %s\n", i)
+		src := config.TokenSource("integration", i)
+		fmt.Printf("  ✓ Integration: %s (%s)\n", i, src)
 	}
 	if len(config.ConfiguredProviders()) == 0 {
 		fmt.Println("  (no providers — set ANTHROPIC_API_KEY env var or re-run setup)")
 	}
 
 	return nil
+}
+
+// runShowProviders prints a table of configured credentials and their sources.
+func runShowProviders() error {
+	fmt.Printf("%-12s %-10s %s\n", "Name", "Source", "Status")
+	fmt.Println(strings.Repeat("─", 40))
+
+	for _, p := range []string{"anthropic", "openai"} {
+		src := config.TokenSource("provider", p)
+		if src == "" {
+			fmt.Printf("%-12s %-10s %s\n", p, "-", "not configured")
+		} else {
+			status := "configured"
+			if src == "config" {
+				status = "configured (plaintext)"
+			}
+			fmt.Printf("%-12s %-10s %s\n", p, src, status)
+		}
+	}
+	for _, i := range []string{"github"} {
+		src := config.TokenSource("integration", i)
+		if src == "" {
+			fmt.Printf("%-12s %-10s %s\n", i, "-", "not configured")
+		} else {
+			status := "configured"
+			if src == "config" {
+				status = "configured (plaintext)"
+			}
+			fmt.Printf("%-12s %-10s %s\n", i, src, status)
+		}
+	}
+	return nil
+}
+
+// migrateCredentials prompts to move plaintext config file credentials to keychain.
+func migrateCredentials(reader *bufio.Reader) {
+	type entry struct {
+		keyType string
+		name    string
+		label   string
+	}
+	entries := []entry{
+		{"provider", "anthropic", "Anthropic API key"},
+		{"provider", "openai", "OpenAI API key"},
+		{"integration", "github", "GitHub token"},
+	}
+
+	migrated := false
+	for _, e := range entries {
+		var inConfig bool
+		switch e.keyType {
+		case "provider":
+			inConfig = config.ProviderKeyInConfig(e.name)
+		case "integration":
+			inConfig = config.IntegrationTokenInConfig(e.name)
+		}
+		if !inConfig {
+			continue
+		}
+
+		// Skip if already in keychain.
+		switch e.keyType {
+		case "provider":
+			if config.ProviderKeyInKeychain(e.name) {
+				continue
+			}
+		case "integration":
+			if config.IntegrationTokenInKeychain(e.name) {
+				continue
+			}
+		}
+
+		fmt.Printf("Migrate %s to secure keychain? [Y/n]: ", e.label)
+		if readNo(reader) {
+			continue
+		}
+
+		if err := config.MigrateToKeychain(e.keyType, e.name); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: migration failed: %v\n", err)
+			continue
+		}
+		fmt.Printf("  ✓ %s migrated to keychain\n", e.label)
+		migrated = true
+	}
+
+	if migrated {
+		if err := config.Save(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: saving config after migration: %v\n", err)
+		}
+		fmt.Println()
+	}
 }
 
 func setupProvider(reader *bufio.Reader, name, label, helpURL string) {
@@ -104,7 +212,21 @@ func setupProvider(reader *bufio.Reader, name, label, helpURL string) {
 		fmt.Println("  Skipped.")
 		return
 	}
-	config.SetProviderAPIKey(name, key)
+
+	if secrets.Available() {
+		if err := config.SetProviderAPIKeySecure(name, key); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: keychain write failed: %v — falling back to config file\n", err)
+			config.SetProviderAPIKey(name, key)
+			fmt.Printf("  ✓ %s configured (config file)\n", label)
+		} else {
+			// Clear from config file if previously stored there.
+			config.RemoveProviderAPIKeyFromConfig(name)
+			fmt.Printf("  ✓ %s configured (keychain)\n", label)
+		}
+	} else {
+		config.SetProviderAPIKey(name, key)
+		fmt.Printf("  ✓ %s configured (config file)\n", label)
+	}
 
 	// Optional base URL (useful for OpenAI-compatible providers).
 	if name == "openai" {
@@ -119,8 +241,6 @@ func setupProvider(reader *bufio.Reader, name, label, helpURL string) {
 			config.SetProviderBaseURL(name, url)
 		}
 	}
-
-	fmt.Printf("  ✓ %s configured\n", label)
 }
 
 func setupGitHub(reader *bufio.Reader) {
@@ -156,8 +276,20 @@ func setupGitHub(reader *bufio.Reader) {
 		fmt.Println("  Skipped.")
 		return
 	}
-	config.SetIntegrationToken("github", token)
-	fmt.Printf("  ✓ GitHub configured\n")
+
+	if secrets.Available() {
+		if err := config.SetIntegrationTokenSecure("github", token); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: keychain write failed: %v — falling back to config file\n", err)
+			config.SetIntegrationToken("github", token)
+			fmt.Printf("  ✓ GitHub configured (config file)\n")
+		} else {
+			config.RemoveIntegrationTokenFromConfig("github")
+			fmt.Printf("  ✓ GitHub configured (keychain)\n")
+		}
+	} else {
+		config.SetIntegrationToken("github", token)
+		fmt.Printf("  ✓ GitHub configured (config file)\n")
+	}
 }
 
 // maskKey shows first 4 and last 4 chars of a key, masking the rest.
