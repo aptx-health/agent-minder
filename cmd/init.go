@@ -150,7 +150,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 	autoEnroll := readLine(reader)
 	autoEnrollBool := !strings.HasPrefix(strings.ToLower(autoEnroll), "n")
 
-	// 6. Select LLM provider from configured providers.
+	// 6. Idle auto-pause.
+	idlePauseMin := promptMinutes(reader, "Auto-pause after idle (minutes, 0=disabled)", 240, 0, 1440)
+	idlePauseSec := int(idlePauseMin.Seconds())
+
+	// 7. Select LLM provider from configured providers.
 	llmProvider := "anthropic"
 	configured := config.ConfiguredProviders()
 	if len(configured) == 0 {
@@ -171,7 +175,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 7. Write to database.
+	// 8. Write to database.
 	project := &db.Project{
 		Name:                projectName,
 		GoalType:            goal.Name,
@@ -179,6 +183,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		RefreshIntervalSec:  int(interval.Seconds()),
 		MessageTTLSec:       int(ttl.Seconds()),
 		AutoEnrollWorktrees: autoEnrollBool,
+		IdlePauseSec:        idlePauseSec,
 		MinderIdentity:      projectName + "/minder",
 		LLMProvider:         llmProvider,
 		LLMModel:            "claude-haiku-4-5",

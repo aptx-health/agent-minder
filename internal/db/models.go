@@ -20,6 +20,7 @@ type Project struct {
 	LLMModel             string `db:"llm_model"`
 	LLMSummarizerModel   string `db:"llm_summarizer_model"`
 	LLMAnalyzerModel     string `db:"llm_analyzer_model"`
+	IdlePauseSec         int    `db:"idle_pause_sec"`
 	CreatedAt            string `db:"created_at"`
 }
 
@@ -31,6 +32,12 @@ func (p *Project) RefreshInterval() time.Duration {
 // MessageTTL returns the message TTL as a time.Duration.
 func (p *Project) MessageTTL() time.Duration {
 	return time.Duration(p.MessageTTLSec) * time.Second
+}
+
+// IdlePauseDuration returns the idle pause threshold as a time.Duration.
+// Returns 0 if idle auto-pause is disabled.
+func (p *Project) IdlePauseDuration() time.Duration {
+	return time.Duration(p.IdlePauseSec) * time.Second
 }
 
 // Repo represents a monitored git repository.
