@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dustinlange/agent-minder/internal/config"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 )
@@ -28,7 +27,7 @@ func TestRenderInit(t *testing.T) {
 					{Name: "main", IsCurrent: true},
 					{Name: "feature/auth"},
 				},
-				Worktrees: []config.Worktree{
+				Worktrees: []LegacyWorktree{
 					{Path: "/tmp/ripit-app", Branch: "main"},
 				},
 			},

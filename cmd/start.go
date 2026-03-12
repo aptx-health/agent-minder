@@ -6,6 +6,7 @@ import (
 	"log"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
@@ -43,8 +44,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("project %q not found — run 'agent-minder init' first", projectName)
 	}
 
-	// Create LLM provider.
-	provider, err := llm.NewProvider(project.LLMProvider)
+	// Create LLM provider, using config-sourced API key if available.
+	var providerOpts []llm.Option
+	if apiKey := config.GetProviderAPIKey(project.LLMProvider); apiKey != "" {
+		providerOpts = append(providerOpts, llm.WithAPIKey(apiKey))
+	}
+	if baseURL := config.GetProviderBaseURL(project.LLMProvider); baseURL != "" {
+		providerOpts = append(providerOpts, llm.WithBaseURL(baseURL))
+	}
+	provider, err := llm.NewProvider(project.LLMProvider, providerOpts...)
 	if err != nil {
 		return fmt.Errorf("creating LLM provider: %w", err)
 	}
