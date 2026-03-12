@@ -29,6 +29,32 @@ func TestCompactStatus(t *testing.T) {
 	}
 }
 
+func TestItemContentStruct(t *testing.T) {
+	content := &ItemContent{
+		Body:     "This is the issue body",
+		Comments: []string{"First comment", "Second comment"},
+	}
+
+	if content.Body != "This is the issue body" {
+		t.Errorf("Body = %q", content.Body)
+	}
+	if len(content.Comments) != 2 {
+		t.Errorf("Comments len = %d, want 2", len(content.Comments))
+	}
+	if content.Comments[0] != "First comment" {
+		t.Errorf("Comments[0] = %q", content.Comments[0])
+	}
+
+	// Empty content.
+	empty := &ItemContent{}
+	if empty.Body != "" {
+		t.Error("expected empty body")
+	}
+	if len(empty.Comments) != 0 {
+		t.Error("expected no comments")
+	}
+}
+
 func TestHasLabel(t *testing.T) {
 	labels := []string{"bug", "In Progress", "v2"}
 

@@ -96,6 +96,52 @@ func (c *Client) FetchItemWithHint(ctx context.Context, owner, repo string, numb
 	}, nil
 }
 
+// ItemContent holds the body and recent comments for a GitHub issue or PR.
+type ItemContent struct {
+	Body     string
+	Comments []string
+}
+
+// FetchItemContent fetches the body and last 10 comments for an issue or PR.
+// Uses the Issues API which works for both issues and PRs.
+func (c *Client) FetchItemContent(ctx context.Context, owner, repo string, number int, itemType string) (*ItemContent, error) {
+	// Get the issue/PR body.
+	issue, _, err := c.gh.Issues.Get(ctx, owner, repo, number)
+	if err != nil {
+		return nil, fmt.Errorf("fetch body %s/%s#%d: %w", owner, repo, number, err)
+	}
+
+	content := &ItemContent{
+		Body: issue.GetBody(),
+	}
+
+	// Get last 10 comments (newest first, then reverse to chronological).
+	opts := &github.IssueListCommentsOptions{
+		Sort:      github.String("created"),
+		Direction: github.String("desc"),
+		ListOptions: github.ListOptions{
+			PerPage: 10,
+		},
+	}
+	comments, _, err := c.gh.Issues.ListComments(ctx, owner, repo, number, opts)
+	if err != nil {
+		// Non-fatal: return what we have.
+		return content, nil
+	}
+
+	// Reverse to chronological order.
+	for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
+		comments[i], comments[j] = comments[j], comments[i]
+	}
+
+	content.Comments = make([]string, 0, len(comments))
+	for _, c := range comments {
+		content.Comments = append(content.Comments, c.GetBody())
+	}
+
+	return content, nil
+}
+
 func extractLabels(labels []*github.Label) []string {
 	out := make([]string, 0, len(labels))
 	for _, l := range labels {

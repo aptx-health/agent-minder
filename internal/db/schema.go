@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 3
+const currentVersion = 4
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -89,8 +89,11 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 	state           TEXT NOT NULL DEFAULT 'open',
 	labels          TEXT NOT NULL DEFAULT '',
 	last_status     TEXT NOT NULL DEFAULT 'Open',
-	last_checked_at TEXT DEFAULT '',
-	created_at      TEXT DEFAULT (datetime('now')),
+	last_checked_at     TEXT DEFAULT '',
+	content_hash        TEXT DEFAULT '',
+	objective_summary   TEXT DEFAULT '',
+	progress_summary    TEXT DEFAULT '',
+	created_at          TEXT DEFAULT (datetime('now')),
 	UNIQUE(project_id, source, owner, repo, number)
 );
 `
@@ -139,6 +142,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 3 {
 		if err := migrateV3(db); err != nil {
 			return fmt.Errorf("apply migration v3: %w", err)
+		}
+	}
+
+	if version < 4 {
+		if err := migrateV4(db); err != nil {
+			return fmt.Errorf("apply migration v4: %w", err)
 		}
 	}
 
@@ -200,6 +209,26 @@ func migrateV3(db *sqlx.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create tracked_items table: %w", err)
+	}
+	return nil
+}
+
+func migrateV4(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE tracked_items ADD COLUMN content_hash TEXT DEFAULT ''`,
+		`ALTER TABLE tracked_items ADD COLUMN objective_summary TEXT DEFAULT ''`,
+		`ALTER TABLE tracked_items ADD COLUMN progress_summary TEXT DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	// Ensure no NULLs in new text columns.
+	for _, col := range []string{"content_hash", "objective_summary", "progress_summary"} {
+		if _, err := db.Exec(fmt.Sprintf(`UPDATE tracked_items SET %s = '' WHERE %s IS NULL`, col, col)); err != nil {
+			return fmt.Errorf("null-fill %s: %w", col, err)
+		}
 	}
 	return nil
 }
