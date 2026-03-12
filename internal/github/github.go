@@ -49,40 +49,51 @@ func NewClient(token string) *Client {
 // FetchItem fetches the current status of an issue or PR.
 // It first tries as a PR (to detect merged state), then falls back to issue.
 func (c *Client) FetchItem(ctx context.Context, owner, repo string, number int) (*ItemStatus, error) {
-	// Try as pull request first.
-	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, number)
-	if err == nil {
-		status := &ItemStatus{
-			Number:   number,
-			Title:    pr.GetTitle(),
-			ItemType: "pull_request",
-			Labels:   extractLabels(pr.Labels),
+	return c.FetchItemWithHint(ctx, owner, repo, number, "")
+}
+
+// FetchItemWithHint fetches status, using itemType hint to skip unnecessary API calls.
+// If hint is "issue", skips the PR attempt. If hint is "pull_request", only tries PR.
+// If hint is empty, tries PR first then falls back to issue.
+func (c *Client) FetchItemWithHint(ctx context.Context, owner, repo string, number int, itemType string) (*ItemStatus, error) {
+	if itemType != "issue" {
+		// Try as pull request.
+		pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, number)
+		if err == nil {
+			status := &ItemStatus{
+				Number:   number,
+				Title:    pr.GetTitle(),
+				ItemType: "pull_request",
+				Labels:   extractLabels(pr.Labels),
+			}
+			if pr.GetMerged() {
+				status.State = "merged"
+			} else if pr.GetState() == "closed" {
+				status.State = "closed"
+			} else {
+				status.State = "open"
+			}
+			return status, nil
 		}
-		if pr.GetMerged() {
-			status.State = "merged"
-		} else if pr.GetState() == "closed" {
-			status.State = "closed"
-		} else {
-			status.State = "open"
+		// If hint was specifically pull_request and it failed, return the error.
+		if itemType == "pull_request" {
+			return nil, fmt.Errorf("fetch PR %s/%s#%d: %w", owner, repo, number, err)
 		}
-		return status, nil
 	}
 
-	// Fall back to issue.
+	// Fetch as issue.
 	issue, _, err := c.gh.Issues.Get(ctx, owner, repo, number)
 	if err != nil {
 		return nil, fmt.Errorf("fetch %s/%s#%d: %w", owner, repo, number, err)
 	}
 
-	status := &ItemStatus{
+	return &ItemStatus{
 		Number:   number,
 		Title:    issue.GetTitle(),
 		State:    issue.GetState(),
 		ItemType: "issue",
-		Labels:   extractIssueLabels(issue.Labels),
-	}
-	// GitHub returns "open" or "closed" for issues.
-	return status, nil
+		Labels:   extractLabels(issue.Labels),
+	}, nil
 }
 
 func extractLabels(labels []*github.Label) []string {
@@ -93,10 +104,6 @@ func extractLabels(labels []*github.Label) []string {
 		}
 	}
 	return out
-}
-
-func extractIssueLabels(labels []*github.Label) []string {
-	return extractLabels(labels)
 }
 
 func hasLabel(labels []string, name string) bool {

@@ -102,7 +102,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Tracked items.
-	trackedItems, _ := store.GetTrackedItems(project.ID)
+	trackedItems, err := store.GetTrackedItems(project.ID)
+	if err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: loading tracked items: %v\n", err)
+	}
 	if len(trackedItems) > 0 {
 		fmt.Printf("Tracked Items (%d):\n", len(trackedItems))
 		for _, item := range trackedItems {

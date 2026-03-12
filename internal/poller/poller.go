@@ -445,15 +445,19 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 
 	// Check tracked items for status changes.
 	var trackedSummary strings.Builder
-	trackedItems, _ := p.store.GetTrackedItems(p.project.ID)
+	trackedItems, err := p.store.GetTrackedItems(p.project.ID)
+	if err != nil {
+		p.emit("error", fmt.Sprintf("loading tracked items: %v", err), nil)
+	}
 	if len(trackedItems) > 0 {
 		token := config.GetIntegrationToken("github")
 		if token != "" {
 			gh := ghpkg.NewClient(token)
 			for i := range trackedItems {
 				item := &trackedItems[i]
-				status, err := gh.FetchItem(ctx, item.Owner, item.Repo, item.Number)
+				status, err := gh.FetchItemWithHint(ctx, item.Owner, item.Repo, item.Number, item.ItemType)
 				if err != nil {
+					p.emit("error", fmt.Sprintf("checking %s: %v", item.DisplayRef(), err), nil)
 					continue
 				}
 				newStatus := status.CompactStatus()
@@ -465,7 +469,9 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 				item.Labels = strings.Join(status.Labels, ",")
 				item.LastStatus = newStatus
 				item.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
-				p.store.UpdateTrackedItem(item)
+				if err := p.store.UpdateTrackedItem(item); err != nil {
+					p.emit("error", fmt.Sprintf("updating %s: %v", item.DisplayRef(), err), nil)
+				}
 
 				if oldStatus != newStatus {
 					ref := item.DisplayRef()

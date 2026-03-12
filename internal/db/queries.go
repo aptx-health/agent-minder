@@ -297,21 +297,24 @@ func (s *Store) RecentPolls(projectID int64, limit int) ([]Poll, error) {
 // --- Tracked Items ---
 
 // AddTrackedItem inserts a tracked item. Returns error if the cap (10) is reached.
+// Uses atomic count-and-insert to prevent race conditions.
 func (s *Store) AddTrackedItem(item *TrackedItem) error {
-	var count int
-	if err := s.db.Get(&count, "SELECT COUNT(*) FROM tracked_items WHERE project_id = ?", item.ProjectID); err != nil {
-		return fmt.Errorf("count tracked items: %w", err)
-	}
-	if count >= 10 {
-		return fmt.Errorf("tracked item limit reached (max 10 per project)")
-	}
-
-	result, err := s.db.NamedExec(`
-		INSERT INTO tracked_items (project_id, source, owner, repo, number, item_type, title, state, labels, last_status)
-		VALUES (:project_id, :source, :owner, :repo, :number, :item_type, :title, :state, :labels, :last_status)
-	`, item)
+	result, err := s.db.Exec(`
+		INSERT INTO tracked_items (project_id, source, owner, repo, number, item_type, title, state, labels, last_status, last_checked_at)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE (SELECT COUNT(*) FROM tracked_items WHERE project_id = ?) < 10
+	`, item.ProjectID, item.Source, item.Owner, item.Repo, item.Number,
+		item.ItemType, item.Title, item.State, item.Labels, item.LastStatus, item.LastCheckedAt,
+		item.ProjectID)
 	if err != nil {
 		return fmt.Errorf("insert tracked item: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("tracked item limit reached (max 10 per project)")
 	}
 	id, err := result.LastInsertId()
 	if err != nil {

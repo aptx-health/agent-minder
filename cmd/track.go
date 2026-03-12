@@ -87,11 +87,11 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	var errors []string
+	var errs []string
 	for _, number := range numbers {
 		status, err := gh.FetchItem(ctx, owner, repo, number)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("#%d: %v", number, err))
+			errs = append(errs, fmt.Sprintf("#%d: %v", number, err))
 			continue
 		}
 
@@ -111,9 +111,9 @@ func runTrack(cmd *cobra.Command, args []string) error {
 
 		if err := store.AddTrackedItem(item); err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
-				errors = append(errors, fmt.Sprintf("#%d: already tracked", number))
+				errs = append(errs, fmt.Sprintf("#%d: already tracked", number))
 			} else {
-				errors = append(errors, fmt.Sprintf("#%d: %v", number, err))
+				errs = append(errs, fmt.Sprintf("#%d: %v", number, err))
 			}
 			continue
 		}
@@ -121,9 +121,9 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Tracking %s/%s#%d [%s] %s\n", owner, repo, number, status.CompactStatus(), status.Title)
 	}
 
-	if len(errors) > 0 {
+	if len(errs) > 0 {
 		fmt.Println("\nErrors:")
-		for _, e := range errors {
+		for _, e := range errs {
 			fmt.Printf("  %s\n", e)
 		}
 	}
