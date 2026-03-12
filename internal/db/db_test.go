@@ -177,6 +177,56 @@ func TestRepoAndWorktrees(t *testing.T) {
 	}
 }
 
+func TestGetWorktreesForProject(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "wtp", MinderIdentity: "wtp/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	r1 := &Repo{ProjectID: p.ID, Path: "/tmp/app", ShortName: "app"}
+	store.AddRepo(r1)
+	r2 := &Repo{ProjectID: p.ID, Path: "/tmp/lib", ShortName: "lib"}
+	store.AddRepo(r2)
+
+	store.ReplaceWorktrees(r1.ID, []Worktree{
+		{Path: "/tmp/app", Branch: "main"},
+		{Path: "/tmp/app-feat", Branch: "feature/auth"},
+	})
+	store.ReplaceWorktrees(r2.ID, []Worktree{
+		{Path: "/tmp/lib", Branch: "main"},
+	})
+
+	got, err := store.GetWorktreesForProject(p.ID)
+	if err != nil {
+		t.Fatalf("GetWorktreesForProject: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+
+	// Verify ordering: app first (alphabetical by short_name), then lib.
+	if got[0].RepoShortName != "app" || got[0].Branch != "feature/auth" {
+		t.Errorf("got[0] = %s/%s, want app/feature/auth", got[0].RepoShortName, got[0].Branch)
+	}
+	if got[1].RepoShortName != "app" || got[1].Branch != "main" {
+		t.Errorf("got[1] = %s/%s, want app/main", got[1].RepoShortName, got[1].Branch)
+	}
+	if got[2].RepoShortName != "lib" || got[2].Branch != "main" {
+		t.Errorf("got[2] = %s/%s, want lib/main", got[2].RepoShortName, got[2].Branch)
+	}
+
+	// Empty project should return empty slice.
+	p2 := &Project{Name: "empty", MinderIdentity: "e/m", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p2)
+	got2, err := store.GetWorktreesForProject(p2.ID)
+	if err != nil {
+		t.Fatalf("empty project: %v", err)
+	}
+	if len(got2) != 0 {
+		t.Errorf("empty project len = %d, want 0", len(got2))
+	}
+}
+
 func TestTopics(t *testing.T) {
 	store := openTestDB(t)
 

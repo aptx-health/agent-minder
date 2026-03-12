@@ -498,6 +498,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	for _, repo := range repos {
 		wtEntries, err := gitpkg.Worktrees(repo.Path)
 		if err != nil {
+			p.emit("worktree", fmt.Sprintf("Failed to list worktrees for %s: %v", repo.ShortName, err), nil)
 			continue
 		}
 		// Convert to db.Worktree and check for changes.
@@ -514,7 +515,10 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			}
 		}
 		// Compare with stored worktrees.
-		existing, _ := p.store.GetWorktrees(repo.ID)
+		existing, err := p.store.GetWorktrees(repo.ID)
+		if err != nil {
+			p.emit("worktree", fmt.Sprintf("Failed to load stored worktrees for %s: %v", repo.ShortName, err), nil)
+		}
 		if worktreesChanged(existing, dbWorktrees) {
 			if err := p.store.ReplaceWorktrees(repo.ID, dbWorktrees); err == nil {
 				p.emit("worktree", fmt.Sprintf("Synced worktrees for %s (%d active)", repo.ShortName, len(dbWorktrees)), nil)
