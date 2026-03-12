@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -675,3 +676,108 @@ CREATE TABLE IF NOT EXISTS polls (
 	polled_at       TEXT DEFAULT (datetime('now'))
 );
 `
+
+func TestPruneTrackedItems(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "prunetest", MinderIdentity: "prunetest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Add 10 items: 5 open, 5 closed with staggered timestamps.
+	for i := 1; i <= 5; i++ {
+		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
+	}
+	for i := 6; i <= 10; i++ {
+		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Closd", LastCheckedAt: fmt.Sprintf("2026-01-%02dT00:00:00Z", i)}
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
+	}
+
+	// At exactly 10, prune should still trigger (>= maxTotal).
+	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
+	if err != nil {
+		t.Fatalf("PruneTrackedItems: %v", err)
+	}
+	// Should prune enough to get below 10, keeping 2 terminal items.
+	// 5 terminal - 2 keep = 3 removable, excess = 10-10+1 = 1, so prune 1.
+	if pruned != 1 {
+		t.Errorf("pruned = %d, want 1", pruned)
+	}
+
+	items, _ := store.GetTrackedItems(p.ID)
+	if len(items) != 9 {
+		t.Errorf("after prune len = %d, want 9", len(items))
+	}
+
+	// Oldest terminal (#6, checked Jan 6) should be gone.
+	for _, item := range items {
+		if item.Number == 6 {
+			t.Errorf("item #6 should have been pruned")
+		}
+	}
+}
+
+func TestPruneTrackedItems_UnderThreshold(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "pruneskip", MinderIdentity: "pruneskip/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	for i := 1; i <= 5; i++ {
+		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Closd"}
+		store.AddTrackedItem(item)
+	}
+
+	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
+	if err != nil {
+		t.Fatalf("PruneTrackedItems: %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("pruned = %d, want 0 (under threshold)", pruned)
+	}
+}
+
+func TestPruneTrackedItems_AllOpen(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "pruneopen", MinderIdentity: "pruneopen/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	for i := 1; i <= 10; i++ {
+		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}
+		store.AddTrackedItem(item)
+	}
+
+	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
+	if err != nil {
+		t.Fatalf("PruneTrackedItems: %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("pruned = %d, want 0 (no terminal items)", pruned)
+	}
+}
+
+func TestPruneTrackedItems_RespectsKeepTerminal(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "prunekeep", MinderIdentity: "prunekeep/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// 8 open + 2 terminal = 10 total. keepTerminal=2 means 0 removable.
+	for i := 1; i <= 8; i++ {
+		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}
+		store.AddTrackedItem(item)
+	}
+	for i := 9; i <= 10; i++ {
+		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Mrgd"}
+		store.AddTrackedItem(item)
+	}
+
+	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
+	if err != nil {
+		t.Fatalf("PruneTrackedItems: %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("pruned = %d, want 0 (only 2 terminal, keepTerminal=2)", pruned)
+	}
+}

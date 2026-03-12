@@ -367,6 +367,48 @@ func (s *Store) UpdateTrackedItem(item *TrackedItem) error {
 	return err
 }
 
+// PruneTrackedItems removes the oldest terminal (closed/merged/not-planned) tracked items
+// when the total count for a project exceeds maxTotal. It keeps at least keepTerminal
+// terminal items for historical context. Returns the number of items pruned.
+func (s *Store) PruneTrackedItems(projectID int64, maxTotal, keepTerminal int) (int, error) {
+	var total int
+	if err := s.db.Get(&total, `SELECT COUNT(*) FROM tracked_items WHERE project_id = ?`, projectID); err != nil {
+		return 0, fmt.Errorf("count tracked items: %w", err)
+	}
+	if total < maxTotal {
+		return 0, nil
+	}
+
+	// Find terminal items ordered oldest first.
+	var terminal []TrackedItem
+	if err := s.db.Select(&terminal, `
+		SELECT * FROM tracked_items
+		WHERE project_id = ? AND last_status IN ('Closd', 'Mrgd', 'NotPl')
+		ORDER BY last_checked_at ASC, created_at ASC
+	`, projectID); err != nil {
+		return 0, fmt.Errorf("select terminal items: %w", err)
+	}
+
+	// How many can we remove? We need to get below maxTotal but keep at least keepTerminal.
+	removable := len(terminal) - keepTerminal
+	if removable <= 0 {
+		return 0, nil
+	}
+	excess := total - maxTotal + 1 // prune enough to get back under the cap
+	if excess > removable {
+		excess = removable
+	}
+
+	pruned := 0
+	for i := 0; i < excess; i++ {
+		if _, err := s.db.Exec(`DELETE FROM tracked_items WHERE id = ?`, terminal[i].ID); err != nil {
+			return pruned, fmt.Errorf("delete tracked item %d: %w", terminal[i].ID, err)
+		}
+		pruned++
+	}
+	return pruned, nil
+}
+
 // LastPoll returns the most recent poll for a project, or nil if none.
 func (s *Store) LastPoll(projectID int64) (*Poll, error) {
 	polls, err := s.RecentPolls(projectID, 1)
