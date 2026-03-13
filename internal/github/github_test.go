@@ -24,6 +24,11 @@ func TestCompactStatus(t *testing.T) {
 		{"in progress", ItemStatus{State: "open", Labels: []string{"in progress"}}, "InProg"},
 		{"in-progress", ItemStatus{State: "open", Labels: []string{"bug", "in-progress"}}, "InProg"},
 		{"wip", ItemStatus{State: "open", Labels: []string{"WIP"}}, "InProg"},
+		{"draft PR", ItemStatus{State: "open", Draft: true}, "Draft"},
+		{"approved PR", ItemStatus{State: "open", ReviewState: "approved"}, "Appvd"},
+		{"changes requested PR", ItemStatus{State: "open", ReviewState: "changes_requested"}, "ChReq"},
+		{"blocked beats draft", ItemStatus{State: "open", Labels: []string{"blocked"}, Draft: true}, "Blckd"},
+		{"draft beats approved", ItemStatus{State: "open", Draft: true, ReviewState: "approved"}, "Draft"},
 		{"merged takes priority", ItemStatus{State: "merged", Labels: []string{"blocked"}}, "Mrgd"},
 		{"closed takes priority over labels", ItemStatus{State: "closed", Labels: []string{"in progress"}}, "Closd"},
 	}

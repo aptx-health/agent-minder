@@ -429,6 +429,8 @@ func (s *Store) UpdateTrackedItem(item *TrackedItem) error {
 			title = :title,
 			state = :state,
 			labels = :labels,
+			is_draft = :is_draft,
+			review_state = :review_state,
 			last_status = :last_status,
 			last_checked_at = :last_checked_at,
 			content_hash = :content_hash,

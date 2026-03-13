@@ -108,7 +108,9 @@ type TrackedItem struct {
 	Title         string `db:"title"`          // latest title
 	State         string `db:"state"`          // "open", "closed", "merged"
 	Labels        string `db:"labels"`         // comma-separated
-	LastStatus       string `db:"last_status"`        // compact status for TUI: "Open", "InProg", "Closd", "Mrgd", "Blckd"
+	IsDraft      bool   `db:"is_draft"`       // PR only: true if draft
+	ReviewState  string `db:"review_state"`   // PR only: "approved", "changes_requested", "pending", ""
+	LastStatus       string `db:"last_status"`        // compact status for TUI: "Open", "InProg", "Closd", "Mrgd", "Blckd", "Draft", "Appvd", "ChReq"
 	LastCheckedAt    string `db:"last_checked_at"`
 	ContentHash      string `db:"content_hash"`       // SHA-256 of body+comments+state+labels
 	ObjectiveSummary string `db:"objective_summary"`  // Haiku-generated objective summary

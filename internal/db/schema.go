@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 5
+const currentVersion = 6
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 	title           TEXT NOT NULL DEFAULT '',
 	state           TEXT NOT NULL DEFAULT 'open',
 	labels          TEXT NOT NULL DEFAULT '',
+	is_draft        BOOLEAN NOT NULL DEFAULT 0,
+	review_state    TEXT NOT NULL DEFAULT '',
 	last_status     TEXT NOT NULL DEFAULT 'Open',
 	last_checked_at     TEXT DEFAULT '',
 	content_hash        TEXT DEFAULT '',
@@ -155,6 +157,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 5 {
 		if err := migrateV5(db); err != nil {
 			return fmt.Errorf("apply migration v5: %w", err)
+		}
+	}
+
+	if version < 6 {
+		if err := migrateV6(db); err != nil {
+			return fmt.Errorf("apply migration v6: %w", err)
 		}
 	}
 
@@ -248,6 +256,19 @@ func migrateV5(db *sqlx.DB) error {
 	// Ensure no NULLs (Go int can't scan NULL).
 	if _, err := db.Exec(`UPDATE projects SET idle_pause_sec = 14400 WHERE idle_pause_sec IS NULL`); err != nil {
 		return fmt.Errorf("null-fill idle_pause_sec: %w", err)
+	}
+	return nil
+}
+
+func migrateV6(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE tracked_items ADD COLUMN is_draft BOOLEAN NOT NULL DEFAULT 0`,
+		`ALTER TABLE tracked_items ADD COLUMN review_state TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
 	}
 	return nil
 }

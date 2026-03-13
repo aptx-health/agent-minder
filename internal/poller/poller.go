@@ -832,6 +832,7 @@ Rules:
   - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
   - Keep each concern to 1-2 sentences. Be specific, not exhaustive.
   - Do NOT raise concerns about closed/merged items — they are done.
+  - For PRs: Use draft/review state to assess lifecycle. A draft PR is work-in-progress. "changes_requested" means the author needs to address feedback. "approved" means ready to merge. "pending" means awaiting review.
 
 - "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
 
@@ -870,7 +871,19 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges string,
 	if len(trackedItems) > 0 {
 		b.WriteString("## Tracked Issues/PRs\n")
 		for _, item := range trackedItems {
-			fmt.Fprintf(&b, "- [%s] %s: %s\n", item.LastStatus, item.DisplayRef(), item.Title)
+			typeTag := "issue"
+			if item.ItemType == "pull_request" {
+				typeTag = "PR"
+			}
+			fmt.Fprintf(&b, "- [%s] [%s] %s: %s\n", item.LastStatus, typeTag, item.DisplayRef(), item.Title)
+			if item.ItemType == "pull_request" && item.State == "open" {
+				if item.IsDraft {
+					b.WriteString("  Draft: yes\n")
+				}
+				if item.ReviewState != "" {
+					fmt.Fprintf(&b, "  Review: %s\n", item.ReviewState)
+				}
+			}
 			if item.ObjectiveSummary != "" {
 				fmt.Fprintf(&b, "  Objective: %s\n", item.ObjectiveSummary)
 			}

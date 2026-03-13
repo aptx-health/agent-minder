@@ -35,12 +35,21 @@ type ItemSweepResponse struct {
 // computeContentHash returns a SHA-256 hex digest of the normalized content.
 // Labels are sorted to ensure order-independence.
 // relatedCommits are included so new commits referencing the item invalidate the cache.
-func computeContentHash(state string, labels string, body string, comments []string, relatedCommits []string) string {
+func computeContentHash(state string, labels string, body string, comments []string, relatedCommits []string, isDraft bool, reviewState string) string {
 	h := sha256.New()
 
 	h.Write([]byte("state:"))
 	h.Write([]byte(state))
 	h.Write([]byte("\n"))
+
+	if isDraft {
+		h.Write([]byte("draft:true\n"))
+	}
+	if reviewState != "" {
+		h.Write([]byte("review:"))
+		h.Write([]byte(reviewState))
+		h.Write([]byte("\n"))
+	}
 
 	// Sort labels for order-independence.
 	labelList := strings.Split(labels, ",")
@@ -90,6 +99,14 @@ func buildItemSweepPrompt(item *db.TrackedItem, content *ghpkg.ItemContent, rela
 
 	fmt.Fprintf(&b, "## %s %s/%s#%d: %s\n\n", item.ItemType, item.Owner, item.Repo, item.Number, item.Title)
 	fmt.Fprintf(&b, "**State:** %s\n", item.State)
+	if item.ItemType == "pull_request" {
+		if item.IsDraft {
+			b.WriteString("**Draft:** yes\n")
+		}
+		if item.ReviewState != "" {
+			fmt.Fprintf(&b, "**Review:** %s\n", item.ReviewState)
+		}
+	}
 	if item.Labels != "" {
 		fmt.Fprintf(&b, "**Labels:** %s\n", item.Labels)
 	}
@@ -223,10 +240,19 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 	item.Title = status.Title
 	item.State = status.State
 	item.Labels = strings.Join(status.Labels, ",")
-	item.LastStatus = status.CompactStatus()
+	item.IsDraft = status.Draft
 	item.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
 	item.ItemType = status.ItemType
 
+	// Step 1b: Fetch review state for PRs (one extra API call).
+	if status.ItemType == "pull_request" && status.State == "open" {
+		item.ReviewState = gh.FetchPRReviewState(ctx, item.Owner, item.Repo, item.Number)
+		status.ReviewState = item.ReviewState
+	} else {
+		item.ReviewState = ""
+	}
+
+	item.LastStatus = status.CompactStatus()
 	result.NewStatus = item.LastStatus
 	result.Changed = result.OldStatus != result.NewStatus
 
@@ -262,7 +288,7 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 	}
 
 	// Step 3: Compute content hash (includes related commits so new commits invalidate cache).
-	newHash := computeContentHash(item.State, item.Labels, content.Body, content.Comments, commitHashes)
+	newHash := computeContentHash(item.State, item.Labels, content.Body, content.Comments, commitHashes, item.IsDraft, item.ReviewState)
 
 	// Step 4: Hash comparison — only run Haiku if content changed or no cached hash.
 	if newHash != item.ContentHash || item.ContentHash == "" {

@@ -11,8 +11,8 @@ import (
 )
 
 func TestComputeContentHash_Deterministic(t *testing.T) {
-	h1 := computeContentHash("open", "bug,enhancement", "fix the thing", []string{"comment 1", "comment 2"}, nil)
-	h2 := computeContentHash("open", "bug,enhancement", "fix the thing", []string{"comment 1", "comment 2"}, nil)
+	h1 := computeContentHash("open", "bug,enhancement", "fix the thing", []string{"comment 1", "comment 2"}, nil, false, "")
+	h2 := computeContentHash("open", "bug,enhancement", "fix the thing", []string{"comment 1", "comment 2"}, nil, false, "")
 	if h1 != h2 {
 		t.Error("same input should produce same hash")
 	}
@@ -22,39 +22,49 @@ func TestComputeContentHash_Deterministic(t *testing.T) {
 }
 
 func TestComputeContentHash_LabelOrderIndependent(t *testing.T) {
-	h1 := computeContentHash("open", "bug,enhancement", "body", nil, nil)
-	h2 := computeContentHash("open", "enhancement,bug", "body", nil, nil)
+	h1 := computeContentHash("open", "bug,enhancement", "body", nil, nil, false, "")
+	h2 := computeContentHash("open", "enhancement,bug", "body", nil, nil, false, "")
 	if h1 != h2 {
 		t.Error("label order should not affect hash")
 	}
 }
 
 func TestComputeContentHash_FieldChangeInvalidates(t *testing.T) {
-	base := computeContentHash("open", "bug", "body", []string{"c1"}, nil)
+	base := computeContentHash("open", "bug", "body", []string{"c1"}, nil, false, "")
 
 	// Change state.
-	if computeContentHash("closed", "bug", "body", []string{"c1"}, nil) == base {
+	if computeContentHash("closed", "bug", "body", []string{"c1"}, nil, false, "") == base {
 		t.Error("state change should invalidate hash")
 	}
 
 	// Change labels.
-	if computeContentHash("open", "bug,wip", "body", []string{"c1"}, nil) == base {
+	if computeContentHash("open", "bug,wip", "body", []string{"c1"}, nil, false, "") == base {
 		t.Error("label change should invalidate hash")
 	}
 
 	// Change body.
-	if computeContentHash("open", "bug", "different body", []string{"c1"}, nil) == base {
+	if computeContentHash("open", "bug", "different body", []string{"c1"}, nil, false, "") == base {
 		t.Error("body change should invalidate hash")
 	}
 
 	// Change comments.
-	if computeContentHash("open", "bug", "body", []string{"c1", "c2"}, nil) == base {
+	if computeContentHash("open", "bug", "body", []string{"c1", "c2"}, nil, false, "") == base {
 		t.Error("comment change should invalidate hash")
 	}
 
 	// Change related commits.
-	if computeContentHash("open", "bug", "body", []string{"c1"}, []string{"abc123:fix thing"}) == base {
+	if computeContentHash("open", "bug", "body", []string{"c1"}, []string{"abc123:fix thing"}, false, "") == base {
 		t.Error("commit change should invalidate hash")
+	}
+
+	// Change draft status.
+	if computeContentHash("open", "bug", "body", []string{"c1"}, nil, true, "") == base {
+		t.Error("draft change should invalidate hash")
+	}
+
+	// Change review state.
+	if computeContentHash("open", "bug", "body", []string{"c1"}, nil, false, "approved") == base {
+		t.Error("review state change should invalidate hash")
 	}
 }
 
@@ -171,6 +181,36 @@ func TestBuildItemSweepPrompt_WithRelatedCommits(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Add content hashing (#42)") {
 		t.Error("prompt should contain commit subject")
+	}
+}
+
+func TestBuildItemSweepPrompt_PRMetadata(t *testing.T) {
+	item := &db.TrackedItem{
+		Owner:       "octocat",
+		Repo:        "hello-world",
+		Number:      10,
+		ItemType:    "pull_request",
+		Title:       "Add feature",
+		State:       "open",
+		IsDraft:     true,
+		ReviewState: "changes_requested",
+	}
+	content := &ghpkg.ItemContent{Body: "New feature"}
+
+	prompt := buildItemSweepPrompt(item, content, nil)
+
+	if !strings.Contains(prompt, "Draft:** yes") {
+		t.Error("prompt should contain draft status for draft PR")
+	}
+	if !strings.Contains(prompt, "Review:** changes_requested") {
+		t.Error("prompt should contain review state for PR")
+	}
+
+	// Non-PR should not have draft/review.
+	item.ItemType = "issue"
+	prompt = buildItemSweepPrompt(item, content, nil)
+	if strings.Contains(prompt, "Draft:") {
+		t.Error("issue prompt should not contain draft status")
 	}
 }
 
