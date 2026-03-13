@@ -209,6 +209,7 @@ func (p *Poller) IsPaused() bool {
 
 // PollNow triggers an immediate poll cycle.
 func (p *Poller) PollNow(ctx context.Context) {
+	p.emit("polling", "Polling...", nil)
 	result, err := p.doPoll(ctx)
 	if err != nil {
 		p.emit("error", err.Error(), nil)

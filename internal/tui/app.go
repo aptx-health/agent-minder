@@ -222,6 +222,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		userMsgInput:   ta,
 		onboardInput:   oi,
 		spinner:    sp,
+		polling:    true, // initial poll starts immediately
 		analysisVP: aVP,
 		eventLogVP:     eVP,
 		lastUserInput:  time.Now(),
@@ -290,6 +291,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.events) > 50 {
 			m.events = m.events[len(m.events)-50:]
 		}
+		if event.Type == "polling" {
+			m.polling = true
+		}
 		if event.PollResult != nil {
 			m.lastPoll = event.PollResult
 			m.polling = false
@@ -298,6 +302,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rebuildEventLogContent()
 		m.rebuildAnalysisContent()
+		m.resizeViewports()
 		return m, listenForEvents(m.poller)
 
 	case broadcastResultMsg:
@@ -481,7 +486,6 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "r":
-		m.polling = true
 		p := m.poller
 		return m, func() tea.Msg {
 			p.PollNow(context.Background())
