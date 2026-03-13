@@ -241,6 +241,8 @@ func (m Model) renderTrackedStrip() string {
 		entry := fmt.Sprintf("#%d[%s]", item.Number, item.LastStatus)
 		dot := statusDot(item.LastStatus)
 		entryLen := len(entry) + 2 // +2 for dot + space
+		// Build GitHub URL for OSC 8 hyperlink.
+		ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
 
 		// Wrap to next line if needed (allow ~5 items per line).
 		if i > 0 && lineWidth+entryLen+2 > m.width-2 {
@@ -256,7 +258,9 @@ func (m Model) renderTrackedStrip() string {
 			lineWidth += 2
 		}
 		line.WriteString(dot)
+		line.WriteString(fmt.Sprintf("\033]8;;%s\033\\", ghURL))
 		line.WriteString(mutedStyle().Render(entry))
+		line.WriteString("\033]8;;\033\\")
 		lineWidth += entryLen
 	}
 	b.WriteString(line.String())
