@@ -49,9 +49,12 @@ func (m Model) View() tea.View {
 		}
 	}
 
-	// Main content area: filter mode replaces analysis+event log.
+	// Main content area: filter/track-preview modes replace analysis+event log.
 	if m.mode == "filter" {
 		b.WriteString(m.renderFilterView())
+		b.WriteString("\n")
+	} else if (m.mode == "track" || m.mode == "untrack") && m.trackStep == trackStepPreview {
+		b.WriteString(m.renderTrackPreview())
 		b.WriteString("\n")
 	} else {
 		// Analysis section.
@@ -320,6 +323,42 @@ func (m Model) renderWorktrees() string {
 	return b.String()
 }
 
+// renderTrackPreview renders the track/untrack preview in the main content area.
+func (m Model) renderTrackPreview() string {
+	var b strings.Builder
+
+	action := "Track"
+	if m.mode == "untrack" {
+		action = "Untrack"
+	}
+	b.WriteString(headerStyle().Render(fmt.Sprintf("%s Issues", action)))
+	b.WriteString("\n\n")
+
+	if len(m.trackPreviewItems) == 0 {
+		b.WriteString(mutedStyle().Render("  No items to " + strings.ToLower(action) + "."))
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	b.WriteString(textStyle().Render(fmt.Sprintf("  %d items to %s:", len(m.trackPreviewItems), strings.ToLower(action))))
+	b.WriteString("\n\n")
+
+	for _, item := range m.trackPreviewItems {
+		dot := statusDot(item.status)
+		title := item.title
+		if len(title) > 60 {
+			title = title[:57] + "..."
+		}
+		b.WriteString(fmt.Sprintf("  %s %s/%s#%d %s",
+			dot,
+			item.ref.Owner, item.ref.Repo, item.ref.Number,
+			mutedStyle().Render(title)))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 // rebuildEventLogContent sets the event log viewport content with single-line entries.
 func (m *Model) rebuildEventLogContent() {
 	lines := make([]string, 0, len(m.events))
@@ -459,6 +498,9 @@ func (m Model) bottomBarHeight() int {
 		}
 		return 7 // blank + header + textarea(3) + help + empty
 	case "track", "untrack":
+		if m.trackStep == trackStepPreview {
+			return 3 // blank + help + empty
+		}
 		if m.trackStatus != "" || m.trackError {
 			return 3 // blank + status + empty
 		}
@@ -533,7 +575,15 @@ func (m Model) renderBottomBar() string {
 		}
 		b.WriteString("\n")
 	case "track", "untrack":
-		if m.trackStatus != "" && !m.trackError {
+		if m.trackStep == trackStepPreview {
+			// Preview step: help bar only (preview renders in main content area).
+			action := "track"
+			if m.mode == "untrack" {
+				action = "untrack"
+			}
+			b.WriteString(helpStyle().Render(fmt.Sprintf("enter: %s all • esc: back", action)))
+			b.WriteString("\n\n")
+		} else if m.trackStatus != "" && !m.trackError {
 			b.WriteString("  ")
 			b.WriteString(m.spinner.View())
 			b.WriteString(" ")

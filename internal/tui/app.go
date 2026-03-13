@@ -66,6 +66,28 @@ type trackFormRow struct {
 	original               string // untrack: original numbers for diffing
 }
 
+// trackStep represents the current step in the track/untrack flow.
+type trackStep int
+
+const (
+	trackStepInput    trackStep = iota // entering issue numbers
+	trackStepFetching                  // fetching item details from GitHub
+	trackStepPreview                   // showing items for confirmation
+)
+
+// trackPreviewItem holds resolved item info for the confirmation preview.
+type trackPreviewItem struct {
+	ref    *ghpkg.ItemRef
+	title  string
+	status string // compact status for dot rendering
+}
+
+// trackFetchResultMsg is sent when async item detail fetch completes.
+type trackFetchResultMsg struct {
+	items []trackPreviewItem
+	err   error
+}
+
 // clearTrackStatusMsg clears the track status after a delay.
 type clearTrackStatusMsg struct{}
 
@@ -116,10 +138,12 @@ type Model struct {
 	onboardStatus string
 
 	// Track mode (add/remove tracked items).
-	trackRows   []trackFormRow
-	trackFocus  int
-	trackStatus string
-	trackError  bool
+	trackRows         []trackFormRow
+	trackFocus        int
+	trackStatus       string
+	trackError        bool
+	trackStep         trackStep
+	trackPreviewItems []trackPreviewItem
 
 	// Filter mode (bulk add tracked items).
 	filterState  *filterState
@@ -340,10 +364,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return clearTrackStatusMsg{}
 		})
 
+	case trackFetchResultMsg:
+		if msg.err != nil {
+			m.trackError = true
+			m.trackStatus = fmt.Sprintf("Error fetching items: %v", msg.err)
+			m.trackStep = trackStepInput
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearTrackStatusMsg{}
+			})
+		}
+		m.trackPreviewItems = msg.items
+		m.trackStep = trackStepPreview
+		m.trackStatus = ""
+		m.resizeViewports()
+		return m, nil
+
 	case clearTrackStatusMsg:
 		m.trackStatus = ""
 		m.trackError = false
 		m.trackRows = nil
+		m.trackStep = trackStepInput
+		m.trackPreviewItems = nil
 		m.mode = "normal"
 		m.resizeViewports()
 		return m, nil
@@ -440,6 +481,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = "track"
 		m.trackStatus = ""
 		m.trackError = false
+		m.trackStep = trackStepInput
+		m.trackPreviewItems = nil
 		m.trackRows = buildTrackRows(ghRepos, nil)
 		m.trackFocus = 0
 		cmd := m.trackRows[0].input.Focus()
@@ -475,6 +518,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = "untrack"
 		m.trackStatus = ""
 		m.trackError = false
+		m.trackStep = trackStepInput
+		m.trackPreviewItems = nil
 		m.trackRows = buildTrackRows(ghRepos, m.trackedItems)
 		m.trackFocus = 0
 		cmd := m.trackRows[0].input.Focus()
@@ -626,11 +671,47 @@ func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Preview step: confirm or go back.
+	if m.trackStep == trackStepPreview {
+		switch msg.String() {
+		case "esc":
+			m.trackStep = trackStepInput
+			m.trackPreviewItems = nil
+			// Re-focus the input.
+			if len(m.trackRows) > 0 {
+				cmd := m.trackRows[m.trackFocus].input.Focus()
+				m.resizeViewports()
+				return m, cmd
+			}
+			m.resizeViewports()
+			return m, nil
+		case "enter":
+			return m.executeTrackAction()
+		}
+		return m, nil
+	}
+
+	// Fetching step: only allow esc.
+	if m.trackStep == trackStepFetching {
+		if msg.String() == "esc" {
+			m.mode = "normal"
+			m.trackStatus = ""
+			m.trackRows = nil
+			m.trackStep = trackStepInput
+			m.trackPreviewItems = nil
+			m.resizeViewports()
+		}
+		return m, nil
+	}
+
+	// Input step.
 	switch msg.String() {
 	case "esc":
 		m.mode = "normal"
 		m.trackStatus = ""
 		m.trackRows = nil
+		m.trackStep = trackStepInput
+		m.trackPreviewItems = nil
 		m.resizeViewports()
 		return m, nil
 	case "up", "shift+tab":
@@ -709,14 +790,13 @@ func dedupeRefs(refs []*ghpkg.ItemRef) []*ghpkg.ItemRef {
 	return out
 }
 
-// submitTrackForm collects input from all rows and fires the async bulk command.
+// submitTrackForm collects input, resolves item details, and shows a preview for confirmation.
 func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 	for i := range m.trackRows {
 		m.trackRows[i].input.Blur()
 	}
 
 	mode := m.mode
-	p := m.poller
 
 	if mode == "track" {
 		// Collect refs from non-empty rows.
@@ -741,22 +821,26 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 			m.resizeViewports()
 			return m, nil
 		}
-		m.trackStatus = fmt.Sprintf("Tracking %d items...", len(refs))
-		asyncCmd := func() tea.Msg {
-			var added, failed int
-			var errs []string
+
+		// Fetch item details from GitHub for preview.
+		m.trackStep = trackStepFetching
+		m.trackStatus = fmt.Sprintf("Fetching %d items...", len(refs))
+		p := m.poller
+		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+			var items []trackPreviewItem
 			for _, ref := range refs {
-				_, err := p.AddTrackedItemByRef(context.Background(), ref)
+				status, err := p.FetchItemStatus(context.Background(), ref)
 				if err != nil {
-					failed++
-					errs = append(errs, fmt.Sprintf("%s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err))
-				} else {
-					added++
+					return trackFetchResultMsg{err: fmt.Errorf("%s/%s#%d: %w", ref.Owner, ref.Repo, ref.Number, err)}
 				}
+				items = append(items, trackPreviewItem{
+					ref:    ref,
+					title:  status.Title,
+					status: status.CompactStatus(),
+				})
 			}
-			return bulkTrackResultMsg{added: added, failed: failed, errors: errs}
-		}
-		return m, tea.Batch(m.spinner.Tick, asyncCmd)
+			return trackFetchResultMsg{items: items}
+		})
 	}
 
 	// Untrack mode: diff original vs current to find removed numbers.
@@ -788,8 +872,84 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	}
-	m.trackStatus = fmt.Sprintf("Untracking %d items...", len(refs))
-	asyncCmd := func() tea.Msg {
+
+	// For untrack, look up titles from existing tracked items (no API call needed).
+	titleMap := make(map[string]db.TrackedItem, len(m.trackedItems))
+	for _, ti := range m.trackedItems {
+		key := fmt.Sprintf("%s/%s#%d", ti.Owner, ti.Repo, ti.Number)
+		titleMap[key] = ti
+	}
+	var items []trackPreviewItem
+	for _, ref := range refs {
+		key := fmt.Sprintf("%s/%s#%d", ref.Owner, ref.Repo, ref.Number)
+		title := fmt.Sprintf("#%d", ref.Number)
+		status := "Open"
+		if ti, ok := titleMap[key]; ok {
+			if ti.Title != "" {
+				title = ti.Title
+			}
+			if ti.LastStatus != "" {
+				status = ti.LastStatus
+			}
+		}
+		items = append(items, trackPreviewItem{
+			ref:    ref,
+			title:  title,
+			status: status,
+		})
+	}
+	m.trackPreviewItems = items
+	m.trackStep = trackStepPreview
+	m.resizeViewports()
+	return m, nil
+}
+
+// executeTrackAction runs the actual add/remove after the user confirms the preview.
+func (m Model) executeTrackAction() (tea.Model, tea.Cmd) {
+	items := m.trackPreviewItems
+	if len(items) == 0 {
+		m.mode = "normal"
+		m.trackRows = nil
+		m.trackStep = trackStepInput
+		m.trackPreviewItems = nil
+		m.resizeViewports()
+		return m, nil
+	}
+
+	p := m.poller
+	mode := m.mode
+
+	if mode == "track" {
+		m.trackStep = trackStepFetching
+		m.trackStatus = fmt.Sprintf("Tracking %d items...", len(items))
+		refs := make([]*ghpkg.ItemRef, len(items))
+		for i, item := range items {
+			refs[i] = item.ref
+		}
+		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+			var added, failed int
+			var errs []string
+			for _, ref := range refs {
+				_, err := p.AddTrackedItemByRef(context.Background(), ref)
+				if err != nil {
+					failed++
+					errs = append(errs, fmt.Sprintf("%s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err))
+				} else {
+					added++
+				}
+			}
+			return bulkTrackResultMsg{added: added, failed: failed, errors: errs}
+		})
+	}
+
+	// Untrack mode.
+	m.trackStep = trackStepFetching
+	m.trackStatus = fmt.Sprintf("Untracking %d items...", len(items))
+	refs := make([]*ghpkg.ItemRef, len(items))
+	for i, item := range items {
+		refs[i] = item.ref
+	}
+	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
 		var removed, failed int
 		var errs []string
 		for _, ref := range refs {
@@ -802,8 +962,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 			}
 		}
 		return bulkUntrackResultMsg{removed: removed, failed: failed, errors: errs}
-	}
-	return m, tea.Batch(m.spinner.Tick, asyncCmd)
+	})
 }
 
 // listenForEvents returns a command that waits for the next poller event.

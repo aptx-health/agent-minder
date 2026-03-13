@@ -135,6 +135,21 @@ func parseGitHubRemote(url string) (owner, repo string) {
 	return "", ""
 }
 
+// FetchItemStatus fetches the status of a GitHub item without adding it to tracking.
+func (p *Poller) FetchItemStatus(ctx context.Context, ref *ghpkg.ItemRef) (*ghpkg.ItemStatus, error) {
+	token := config.GetIntegrationToken("github")
+	if token == "" {
+		return nil, fmt.Errorf("no GitHub token configured")
+	}
+
+	gh := ghpkg.NewClient(token)
+	status, err := gh.FetchItem(ctx, ref.Owner, ref.Repo, ref.Number)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s/%s#%d: %w", ref.Owner, ref.Repo, ref.Number, err)
+	}
+	return status, nil
+}
+
 // AddTrackedItemByRef resolves a GitHub item reference and adds it as a tracked item.
 // Returns the added item on success.
 func (p *Poller) AddTrackedItemByRef(ctx context.Context, ref *ghpkg.ItemRef) (*db.TrackedItem, error) {
