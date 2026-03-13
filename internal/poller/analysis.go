@@ -93,26 +93,15 @@ func validSeverity(s string) string {
 func reconcileConcerns(store *db.Store, projectID int64, existing []db.Concern, desired []AnalysisConcern) []string {
 	var result []string
 
-	// Track which existing concerns are "kept" by the analyzer.
-	kept := make(map[int64]bool)
+	// Resolve all existing concerns — the analyzer returns the full desired
+	// list each cycle, so we replace rather than diff.
+	for _, e := range existing {
+		store.ResolveConcern(e.ID)
+	}
 
+	// Insert the analyzer's current concerns fresh.
 	for _, d := range desired {
 		severity := validSeverity(d.Severity)
-
-		// Check if this matches an existing concern (reuse keyword overlap).
-		matchID := matchExistingConcern(d.Message, existing)
-		if matchID > 0 {
-			kept[matchID] = true
-			// Update severity if it changed.
-			for _, e := range existing {
-				if e.ID == matchID && e.Severity != severity {
-					store.UpdateConcernSeverity(matchID, severity)
-				}
-			}
-			continue
-		}
-
-		// New concern — add it.
 		store.AddConcern(&db.Concern{
 			ProjectID: projectID,
 			Severity:  severity,
@@ -121,47 +110,6 @@ func reconcileConcerns(store *db.Store, projectID int64, existing []db.Concern, 
 		result = append(result, fmt.Sprintf("[%s] %s", severity, d.Message))
 	}
 
-	// Resolve any existing concerns the analyzer dropped.
-	for _, e := range existing {
-		if !kept[e.ID] {
-			store.ResolveConcern(e.ID)
-		}
-	}
-
 	return result
 }
 
-// matchExistingConcern finds the best-matching existing concern using keyword
-// overlap (50%+ of significant words). Returns the matched concern ID or 0.
-func matchExistingConcern(newMsg string, active []db.Concern) int64 {
-	newWords := significantWords(newMsg)
-	if len(newWords) == 0 {
-		return 0
-	}
-	for _, existing := range active {
-		existingWords := significantWords(existing.Message)
-		overlap := 0
-		for w := range newWords {
-			if existingWords[w] {
-				overlap++
-			}
-		}
-		if float64(overlap)/float64(len(newWords)) >= 0.5 {
-			return existing.ID
-		}
-	}
-	return 0
-}
-
-// significantWords extracts lowercase words of 4+ characters from text.
-func significantWords(text string) map[string]bool {
-	words := make(map[string]bool)
-	for _, w := range strings.Fields(strings.ToLower(text)) {
-		// Strip common punctuation.
-		w = strings.Trim(w, ".,;:!?\"'()-[]{}/*")
-		if len(w) >= 4 {
-			words[w] = true
-		}
-	}
-	return words
-}

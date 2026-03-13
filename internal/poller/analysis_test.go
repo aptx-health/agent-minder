@@ -3,8 +3,6 @@ package poller
 import (
 	"testing"
 	"time"
-
-	"github.com/dustinlange/agent-minder/internal/db"
 )
 
 func TestParseAnalysisRawJSON(t *testing.T) {
@@ -54,38 +52,6 @@ func TestParseAnalysisEmpty(t *testing.T) {
 	}
 }
 
-func TestMatchExistingConcernExactMatch(t *testing.T) {
-	active := []db.Concern{
-		{ID: 1, Message: "Schema drift: 'priority' column added to agent-msg messages table"},
-	}
-	if matchExistingConcern("Schema drift: 'priority' column added to agent-msg messages table", active) == 0 {
-		t.Error("exact match should find existing concern")
-	}
-}
-
-func TestMatchExistingConcernReworded(t *testing.T) {
-	active := []db.Concern{
-		{ID: 2, Message: "Schema drift: 'priority' column added to agent-msg messages table. All consumers must update."},
-	}
-	if matchExistingConcern("Schema drift detected: 'priority' column added to messages table. Consumers should update queries.", active) == 0 {
-		t.Error("reworded concern should match existing")
-	}
-}
-
-func TestMatchExistingConcernDifferent(t *testing.T) {
-	active := []db.Concern{
-		{ID: 3, Message: "Schema drift: 'priority' column added to agent-msg messages table"},
-	}
-	if matchExistingConcern("Stale branch detected: feature/auth has not been updated in 14 days", active) != 0 {
-		t.Error("unrelated concern should not match")
-	}
-}
-
-func TestMatchExistingConcernEmptyActive(t *testing.T) {
-	if matchExistingConcern("Some new concern", nil) != 0 {
-		t.Error("should not match against empty active list")
-	}
-}
 
 func TestValidSeverity(t *testing.T) {
 	tests := []struct {
