@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // View renders the TUI dashboard with height-budgeted sections.
@@ -371,7 +372,19 @@ func (m *Model) rebuildEventLogContent() {
 		if maxW < 20 {
 			maxW = 20
 		}
-		line := fmt.Sprintf("  [%s] %s: %s", ts, e.Type, truncateLine(summary, maxW))
+		summary = truncateLine(summary, maxW)
+		var style lipgloss.Style
+		switch e.Type {
+		case "user":
+			style = userMsgStyle()
+		case "broadcast":
+			style = broadcastStyle()
+		case "error":
+			style = errorStyle()
+		default:
+			style = mutedStyle()
+		}
+		line := fmt.Sprintf("  %s %s", mutedStyle().Render(fmt.Sprintf("[%s]", ts)), style.Render(fmt.Sprintf("%s: %s", e.Type, summary)))
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
