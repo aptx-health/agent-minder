@@ -475,6 +475,9 @@ func (s *Store) PruneTrackedItems(projectID int64, maxTotal, keepTerminal int) (
 
 	pruned := 0
 	for i := 0; i < excess; i++ {
+		if err := s.ArchiveTrackedItem(&terminal[i]); err != nil {
+			return pruned, fmt.Errorf("archive tracked item %d: %w", terminal[i].ID, err)
+		}
 		if _, err := s.db.Exec(`DELETE FROM tracked_items WHERE id = ?`, terminal[i].ID); err != nil {
 			return pruned, fmt.Errorf("delete tracked item %d: %w", terminal[i].ID, err)
 		}
@@ -505,6 +508,88 @@ func (s *Store) CountTerminalTrackedItems(projectID int64) (int, error) {
 		WHERE project_id = ? AND last_status IN ('Closd', 'Mrgd', 'NotPl')
 	`, projectID)
 	return count, err
+}
+
+// --- Completed Items ---
+
+// ArchiveTrackedItem copies a terminal tracked item to the completed_items table.
+// Only archives items that have a non-empty progress summary (i.e., real work was done).
+// Builds a combined summary from the objective and progress summaries.
+func (s *Store) ArchiveTrackedItem(item *TrackedItem) error {
+	if item.ProgressSummary == "" {
+		return nil // skip items with no progress signal
+	}
+
+	summary := item.ProgressSummary
+	if item.ObjectiveSummary != "" {
+		summary = item.ObjectiveSummary + " — " + item.ProgressSummary
+	}
+
+	_, err := s.db.Exec(`
+		INSERT INTO completed_items (project_id, source, owner, repo, number, item_type, title, final_status, summary)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, item.ProjectID, item.Source, item.Owner, item.Repo, item.Number,
+		item.ItemType, item.Title, item.LastStatus, summary)
+	if err != nil {
+		return fmt.Errorf("archive tracked item %s/%s#%d: %w", item.Owner, item.Repo, item.Number, err)
+	}
+	return nil
+}
+
+// ArchiveTerminalTrackedItems archives all terminal tracked items (that have progress summaries)
+// and then deletes them. Returns the number removed.
+func (s *Store) ArchiveTerminalTrackedItems(projectID int64) (int, error) {
+	// Fetch terminal items first.
+	var terminal []TrackedItem
+	if err := s.db.Select(&terminal, `
+		SELECT * FROM tracked_items
+		WHERE project_id = ? AND last_status IN ('Closd', 'Mrgd', 'NotPl')
+	`, projectID); err != nil {
+		return 0, fmt.Errorf("select terminal items: %w", err)
+	}
+
+	for i := range terminal {
+		if err := s.ArchiveTrackedItem(&terminal[i]); err != nil {
+			return 0, err
+		}
+	}
+
+	result, err := s.db.Exec(`
+		DELETE FROM tracked_items
+		WHERE project_id = ? AND last_status IN ('Closd', 'Mrgd', 'NotPl')
+	`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("remove terminal tracked items: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+// RecentCompletedItems returns completed items for a project within maxAge.
+func (s *Store) RecentCompletedItems(projectID int64, maxAge int) ([]CompletedItem, error) {
+	var items []CompletedItem
+	if err := s.db.Select(&items, `
+		SELECT * FROM completed_items
+		WHERE project_id = ? AND completed_at > datetime('now', ? || ' seconds')
+		ORDER BY completed_at DESC
+	`, projectID, fmt.Sprintf("-%d", maxAge)); err != nil {
+		return nil, fmt.Errorf("recent completed items: %w", err)
+	}
+	return items, nil
+}
+
+// PruneCompletedItems removes completed items older than maxAgeSec.
+// Returns the number of items pruned.
+func (s *Store) PruneCompletedItems(projectID int64, maxAgeSec int) (int, error) {
+	result, err := s.db.Exec(`
+		DELETE FROM completed_items
+		WHERE project_id = ? AND completed_at <= datetime('now', ? || ' seconds')
+	`, projectID, fmt.Sprintf("-%d", maxAgeSec))
+	if err != nil {
+		return 0, fmt.Errorf("prune completed items: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
 }
 
 // LastPoll returns the most recent poll for a project, or nil if none.
