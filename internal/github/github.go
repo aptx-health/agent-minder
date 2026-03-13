@@ -11,11 +11,13 @@ import (
 
 // ItemStatus holds the fetched status of a GitHub issue or PR.
 type ItemStatus struct {
-	Number   int
-	Title    string
-	State    string // "open", "closed", "merged"
-	Labels   []string
-	ItemType string // "issue" or "pull_request"
+	Number      int
+	Title       string
+	State       string // "open", "closed", "merged"
+	Labels      []string
+	ItemType    string // "issue" or "pull_request"
+	Draft       bool   // PR only: true if draft PR
+	ReviewState string // PR only: "approved", "changes_requested", "pending", or ""
 }
 
 // CompactStatus returns a short TUI-friendly status tag.
@@ -27,6 +29,12 @@ func (s *ItemStatus) CompactStatus() string {
 		return "Closd"
 	case hasLabel(s.Labels, "blocked"):
 		return "Blckd"
+	case s.Draft:
+		return "Draft"
+	case s.ReviewState == "approved":
+		return "Appvd"
+	case s.ReviewState == "changes_requested":
+		return "ChReq"
 	case hasLabel(s.Labels, "in progress"), hasLabel(s.Labels, "in-progress"), hasLabel(s.Labels, "wip"):
 		return "InProg"
 	default:
@@ -65,6 +73,7 @@ func (c *Client) FetchItemWithHint(ctx context.Context, owner, repo string, numb
 				Title:    pr.GetTitle(),
 				ItemType: "pull_request",
 				Labels:   extractLabels(pr.Labels),
+				Draft:    pr.GetDraft(),
 			}
 			if pr.GetMerged() {
 				status.State = "merged"
@@ -94,6 +103,50 @@ func (c *Client) FetchItemWithHint(ctx context.Context, owner, repo string, numb
 		ItemType: "issue",
 		Labels:   extractLabels(issue.Labels),
 	}, nil
+}
+
+// FetchPRReviewState returns the aggregate review state for a pull request.
+// It examines the most recent review from each reviewer and returns:
+// "approved" if at least one approval and no outstanding changes_requested,
+// "changes_requested" if any reviewer has requested changes,
+// "pending" if there are no decisive reviews yet, or "" on error.
+func (c *Client) FetchPRReviewState(ctx context.Context, owner, repo string, number int) string {
+	reviews, _, err := c.gh.PullRequests.ListReviews(ctx, owner, repo, number, &github.ListOptions{PerPage: 30})
+	if err != nil || len(reviews) == 0 {
+		return ""
+	}
+
+	// Keep only the latest review per user.
+	latest := make(map[int64]*github.PullRequestReview)
+	for _, r := range reviews {
+		uid := r.GetUser().GetID()
+		state := r.GetState()
+		// Skip COMMENTED and DISMISSED — they don't represent a decision.
+		if state == "COMMENTED" || state == "DISMISSED" || state == "PENDING" {
+			continue
+		}
+		if existing, ok := latest[uid]; !ok || r.GetSubmittedAt().After(existing.GetSubmittedAt().Time) {
+			latest[uid] = r
+		}
+	}
+
+	if len(latest) == 0 {
+		return "pending"
+	}
+
+	hasApproval := false
+	for _, r := range latest {
+		switch r.GetState() {
+		case "CHANGES_REQUESTED":
+			return "changes_requested"
+		case "APPROVED":
+			hasApproval = true
+		}
+	}
+	if hasApproval {
+		return "approved"
+	}
+	return "pending"
 }
 
 // ItemContent holds the body and recent comments for a GitHub issue or PR.
