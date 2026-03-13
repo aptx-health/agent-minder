@@ -52,6 +52,26 @@ func (p *Poller) SearchGitHubIssues(ctx context.Context, owner, repo string, fil
 	return gh.SearchIssues(ctx, owner, repo, filterType, filterValue)
 }
 
+// FetchFilterChoices returns available choices for a filter type from GitHub.
+func (p *Poller) FetchFilterChoices(ctx context.Context, owner, repo string, filterType ghpkg.FilterType) ([]ghpkg.RepoChoice, error) {
+	token := config.GetIntegrationToken("github")
+	if token == "" {
+		return nil, fmt.Errorf("no GitHub token configured")
+	}
+	gh := ghpkg.NewClient(token)
+
+	switch filterType {
+	case ghpkg.FilterLabel:
+		return gh.ListLabels(ctx, owner, repo)
+	case ghpkg.FilterMilestone:
+		return gh.ListMilestones(ctx, owner, repo)
+	case ghpkg.FilterAssignee:
+		return gh.ListAssignees(ctx, owner, repo)
+	default:
+		return nil, nil
+	}
+}
+
 // BulkAddTrackedItems converts ItemStatus results to TrackedItems and bulk-inserts them.
 // Returns the number of items actually added.
 func (p *Poller) BulkAddTrackedItems(ctx context.Context, items []ghpkg.ItemStatus, owner, repo string) (int, error) {

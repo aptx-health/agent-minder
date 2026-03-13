@@ -17,6 +17,8 @@ type filterStep int
 const (
 	filterStepSelectRepo filterStep = iota
 	filterStepSelectType
+	filterStepFetchingChoices
+	filterStepSelectChoice
 	filterStepInputValue
 	filterStepFetching
 	filterStepPreview
@@ -26,6 +28,12 @@ const (
 // filterSearchResultMsg is sent when a filter search completes.
 type filterSearchResultMsg struct {
 	results *ghpkg.SearchResult
+	err     error
+}
+
+// filterChoicesMsg is sent when available choices for a filter type are fetched.
+type filterChoicesMsg struct {
+	choices []ghpkg.RepoChoice
 	err     error
 }
 
@@ -44,6 +52,8 @@ type filterState struct {
 	filterType   ghpkg.FilterType
 	filterValue  string
 	results      *ghpkg.SearchResult
+	choices      []ghpkg.RepoChoice // available choices for the selected filter type
+	choiceIdx    int                // currently highlighted choice
 	input        textinput.Model
 	err          error
 	hasExisting  bool // true if project already has tracked items
@@ -86,6 +96,8 @@ func (m Model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateFilterSelectRepo(msg)
 	case filterStepSelectType:
 		return m.updateFilterSelectType(msg)
+	case filterStepSelectChoice:
+		return m.updateFilterSelectChoice(msg)
 	case filterStepInputValue:
 		return m.updateFilterInputValue(msg)
 	case filterStepPreview:
@@ -134,17 +146,12 @@ func (m Model) updateFilterSelectType(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		return m, nil
 	case "l":
 		fs.filterType = ghpkg.FilterLabel
-		fs.step = filterStepInputValue
-		fs.input.Placeholder = "label name..."
-		cmd := fs.input.Focus()
-		return m, cmd
+		return m.startFetchChoices()
 	case "m":
 		fs.filterType = ghpkg.FilterMilestone
-		fs.step = filterStepInputValue
-		fs.input.Placeholder = "milestone title..."
-		cmd := fs.input.Focus()
-		return m, cmd
+		return m.startFetchChoices()
 	case "p":
+		// Projects are org-level, no list API — go straight to input.
 		fs.filterType = ghpkg.FilterProject
 		fs.step = filterStepInputValue
 		fs.input.Placeholder = "org/project-number..."
@@ -152,8 +159,77 @@ func (m Model) updateFilterSelectType(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		return m, cmd
 	case "a":
 		fs.filterType = ghpkg.FilterAssignee
+		return m.startFetchChoices()
+	}
+	return m, nil
+}
+
+// startFetchChoices kicks off the async fetch of available choices for the selected filter type.
+func (m Model) startFetchChoices() (tea.Model, tea.Cmd) {
+	fs := m.filterState
+	fs.step = filterStepFetchingChoices
+	fs.choices = nil
+	fs.choiceIdx = 0
+	fs.err = nil
+
+	p := m.poller
+	owner := fs.selectedRepo.Owner
+	repo := fs.selectedRepo.Repo
+	ft := fs.filterType
+
+	return m, func() tea.Msg {
+		choices, err := p.FetchFilterChoices(context.Background(), owner, repo, ft)
+		return filterChoicesMsg{choices: choices, err: err}
+	}
+}
+
+func (m Model) updateFilterSelectChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	fs := m.filterState
+	switch msg.String() {
+	case "esc":
+		fs.step = filterStepSelectType
+		fs.choices = nil
+		return m, nil
+	case "up", "k":
+		if fs.choiceIdx > 0 {
+			fs.choiceIdx--
+		}
+		return m, nil
+	case "down", "j":
+		// Last entry is the "type custom" option, so total count = len(choices) + 1
+		max := len(fs.choices)
+		if fs.choiceIdx < max {
+			fs.choiceIdx++
+		}
+		return m, nil
+	case "enter":
+		if fs.choiceIdx < len(fs.choices) {
+			// Selected an existing choice — use it directly.
+			fs.filterValue = fs.choices[fs.choiceIdx].Value
+			fs.step = filterStepFetching
+			fs.err = nil
+
+			p := m.poller
+			owner := fs.selectedRepo.Owner
+			repo := fs.selectedRepo.Repo
+			ft := fs.filterType
+			fv := fs.filterValue
+
+			return m, func() tea.Msg {
+				result, err := p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
+				return filterSearchResultMsg{results: result, err: err}
+			}
+		}
+		// "Type custom value" option selected — go to text input.
 		fs.step = filterStepInputValue
-		fs.input.Placeholder = "username..."
+		switch fs.filterType {
+		case ghpkg.FilterLabel:
+			fs.input.Placeholder = "label name..."
+		case ghpkg.FilterMilestone:
+			fs.input.Placeholder = "milestone title..."
+		case ghpkg.FilterAssignee:
+			fs.input.Placeholder = "username..."
+		}
 		cmd := fs.input.Focus()
 		return m, cmd
 	}
@@ -164,7 +240,12 @@ func (m Model) updateFilterInputValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	fs := m.filterState
 	switch msg.String() {
 	case "esc":
-		fs.step = filterStepSelectType
+		if len(fs.choices) > 0 {
+			// Go back to the choice list if we came from there.
+			fs.step = filterStepSelectChoice
+		} else {
+			fs.step = filterStepSelectType
+		}
 		fs.input.Blur()
 		fs.input.Reset()
 		return m, nil
@@ -311,6 +392,51 @@ func (m Model) renderFilterView() string {
 		b.WriteString(textStyle().Render("    [p] project"))
 		b.WriteString("\n")
 		b.WriteString(textStyle().Render("    [a] assignee"))
+		b.WriteString("\n")
+
+	case filterStepFetchingChoices:
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Repo: %s/%s  Filter: %s",
+			fs.selectedRepo.Owner, fs.selectedRepo.Repo, fs.filterType)))
+		b.WriteString("\n\n")
+		b.WriteString("  ")
+		b.WriteString(m.spinner.View())
+		b.WriteString(" ")
+		b.WriteString(mutedStyle().Render("Loading available options..."))
+		b.WriteString("\n")
+
+	case filterStepSelectChoice:
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Repo: %s/%s  Filter: %s",
+			fs.selectedRepo.Owner, fs.selectedRepo.Repo, fs.filterType)))
+		b.WriteString("\n\n")
+		b.WriteString(textStyle().Render("  Select a value:"))
+		b.WriteString("\n")
+		for i, c := range fs.choices {
+			prefix := "  "
+			if i == fs.choiceIdx {
+				prefix = "> "
+			}
+			entry := fmt.Sprintf("  %s%s", prefix, c.Value)
+			if c.Description != "" {
+				entry += mutedStyle().Render(fmt.Sprintf(" (%s)", c.Description))
+			}
+			if i == fs.choiceIdx {
+				b.WriteString(headerStyle().Render(entry))
+			} else {
+				b.WriteString(textStyle().Render(entry))
+			}
+			b.WriteString("\n")
+		}
+		// "Type custom" option at the end.
+		customPrefix := "  "
+		if fs.choiceIdx == len(fs.choices) {
+			customPrefix = "> "
+		}
+		customEntry := fmt.Sprintf("  %s✎ type custom value...", customPrefix)
+		if fs.choiceIdx == len(fs.choices) {
+			b.WriteString(headerStyle().Render(customEntry))
+		} else {
+			b.WriteString(mutedStyle().Render(customEntry))
+		}
 		b.WriteString("\n")
 
 	case filterStepInputValue:

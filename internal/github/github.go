@@ -259,6 +259,88 @@ func (c *Client) SearchIssues(ctx context.Context, owner, repo string, filterTyp
 	}, nil
 }
 
+// RepoChoice represents a selectable option fetched from a GitHub repo.
+type RepoChoice struct {
+	Value       string // The value to use in the filter (label name, milestone title, username)
+	Description string // Optional extra info (e.g., milestone due date)
+}
+
+// ListLabels returns all labels for a repo.
+func (c *Client) ListLabels(ctx context.Context, owner, repo string) ([]RepoChoice, error) {
+	var all []RepoChoice
+	opts := &github.ListOptions{PerPage: 100}
+	for {
+		labels, resp, err := c.gh.Issues.ListLabels(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list labels: %w", err)
+		}
+		for _, l := range labels {
+			all = append(all, RepoChoice{
+				Value:       l.GetName(),
+				Description: l.GetDescription(),
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// ListMilestones returns open milestones for a repo.
+func (c *Client) ListMilestones(ctx context.Context, owner, repo string) ([]RepoChoice, error) {
+	var all []RepoChoice
+	opts := &github.MilestoneListOptions{
+		State:       "open",
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+	for {
+		milestones, resp, err := c.gh.Issues.ListMilestones(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list milestones: %w", err)
+		}
+		for _, ms := range milestones {
+			desc := ""
+			if ms.DueOn != nil {
+				desc = "due " + ms.GetDueOn().Format("2006-01-02")
+			}
+			all = append(all, RepoChoice{
+				Value:       ms.GetTitle(),
+				Description: desc,
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// ListAssignees returns available assignees for a repo.
+func (c *Client) ListAssignees(ctx context.Context, owner, repo string) ([]RepoChoice, error) {
+	var all []RepoChoice
+	opts := &github.ListOptions{PerPage: 100}
+	for {
+		users, resp, err := c.gh.Issues.ListAssignees(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list assignees: %w", err)
+		}
+		for _, u := range users {
+			all = append(all, RepoChoice{
+				Value:       u.GetLogin(),
+				Description: u.GetName(),
+			})
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
 func extractLabels(labels []*github.Label) []string {
 	out := make([]string, 0, len(labels))
 	for _, l := range labels {
