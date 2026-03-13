@@ -670,15 +670,16 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		}
 	}
 
+	// Gather worktree PR status (mechanical, no LLM) — must run before
+	// the early return so PR state changes can trigger analysis.
+	prStatusSection := p.gatherWorktreePRStatus(ctx, worktreeBranchData)
+
 	// If nothing happened, skip LLM calls.
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !sweepHadUpdates {
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !sweepHadUpdates && prStatusSection == "" {
 		result.Duration = time.Since(start)
 		result.Tier1Summary = "No new activity."
 		return result, nil
 	}
-
-	// Gather worktree PR status (mechanical, no LLM).
-	prStatusSection := p.gatherWorktreePRStatus(ctx, worktreeBranchData)
 
 	// Get active concerns for context.
 	concerns, _ := p.store.ActiveConcerns(p.project.ID)
@@ -827,13 +828,17 @@ type repoWorktreeBranches struct {
 // gatherWorktreePRStatus checks each non-main worktree branch for an open GitHub PR.
 // Returns a formatted section for the tier 2 prompt, or "" if no token or no branches.
 func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWorktreeBranches) string {
+	debugf("=== WORKTREE PR STATUS ===")
 	if len(branchData) == 0 {
+		debugf("  no worktree branch data to check")
 		return ""
 	}
 	token := config.GetIntegrationToken("github")
 	if token == "" {
+		debugf("  no GitHub token configured, skipping PR status")
 		return ""
 	}
+	debugf("  checking %d repo(s) for worktree PRs", len(branchData))
 	gh := ghpkg.NewClient(token)
 
 	var b strings.Builder
@@ -841,19 +846,23 @@ func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWo
 	found := false
 
 	for _, rd := range branchData {
+		debugf("  repo: %s/%s, branches: %v", rd.owner, rd.repo, rd.branches)
 		for _, branch := range rd.branches {
 			pr, err := gh.FetchPRForBranch(ctx, rd.owner, rd.repo, branch)
 			if err != nil {
+				debugf("  branch %q: ERROR: %v", branch, err)
 				p.emit("error", fmt.Sprintf("PR lookup for %s/%s branch %q: %v", rd.owner, rd.repo, branch, err), nil)
 				fmt.Fprintf(&b, "\n- %s: error checking PR", branch)
 				found = true
 				continue
 			}
 			if pr == nil {
+				debugf("  branch %q: no PR found", branch)
 				fmt.Fprintf(&b, "\n- %s: no PR", branch)
 				found = true
 				continue
 			}
+			debugf("  branch %q: PR #%d %q (state=%s, draft=%v, review=%s)", branch, pr.Number, pr.Title, pr.State, pr.Draft, pr.ReviewState)
 			parts := []string{pr.State}
 			if pr.Draft {
 				parts = append(parts, "draft")
@@ -867,8 +876,10 @@ func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWo
 	}
 
 	if !found {
+		debugf("  no branches found (unexpected)")
 		return ""
 	}
+	debugf("=== PR STATUS RESULT ===\n%s", b.String())
 	return b.String()
 }
 
