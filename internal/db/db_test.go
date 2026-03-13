@@ -1079,3 +1079,53 @@ func TestPruneTrackedItems_RespectsKeepTerminal(t *testing.T) {
 		t.Errorf("pruned = %d, want 0 (only 2 terminal, keepTerminal=2)", pruned)
 	}
 }
+
+func TestRemoveTerminalTrackedItems(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "cleanuptest", MinderIdentity: "cleanuptest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Add 3 open, 2 closed, 1 merged, 1 not-planned.
+	for i := 1; i <= 3; i++ {
+		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+	}
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 4, LastStatus: "Closd"})
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 5, LastStatus: "Mrgd"})
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 6, LastStatus: "Closd"})
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 7, LastStatus: "NotPl"})
+
+	// Count terminal items.
+	count, err := store.CountTerminalTrackedItems(p.ID)
+	if err != nil {
+		t.Fatalf("CountTerminalTrackedItems: %v", err)
+	}
+	if count != 4 {
+		t.Errorf("count = %d, want 4", count)
+	}
+
+	// Remove terminal items.
+	removed, err := store.RemoveTerminalTrackedItems(p.ID)
+	if err != nil {
+		t.Fatalf("RemoveTerminalTrackedItems: %v", err)
+	}
+	if removed != 4 {
+		t.Errorf("removed = %d, want 4", removed)
+	}
+
+	// Verify only open items remain.
+	items, _ := store.GetTrackedItems(p.ID)
+	if len(items) != 3 {
+		t.Fatalf("remaining = %d, want 3", len(items))
+	}
+	for _, item := range items {
+		if item.LastStatus != "Open" {
+			t.Errorf("expected Open, got %s for #%d", item.LastStatus, item.Number)
+		}
+	}
+
+	// Count should now be 0.
+	count, _ = store.CountTerminalTrackedItems(p.ID)
+	if count != 0 {
+		t.Errorf("count after cleanup = %d, want 0", count)
+	}
+}

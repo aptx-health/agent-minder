@@ -578,7 +578,12 @@ func (m Model) renderBottomBar() string {
 		}
 		b.WriteString("\n")
 	case "track", "untrack":
-		if m.trackStep == trackStepPreview {
+		if m.trackStep == trackStepCleanupConfirm {
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Clean up %d done items? (y/n)", m.trackCleanupCount)))
+			b.WriteString("\n")
+			b.WriteString(helpStyle().Render("y: confirm \u2022 n/esc: cancel"))
+			b.WriteString("\n")
+		} else if m.trackStep == trackStepPreview {
 			// Preview step: help bar only (preview renders in main content area).
 			action := "track"
 			if m.mode == "untrack" {
@@ -612,6 +617,9 @@ func (m Model) renderBottomBar() string {
 				b.WriteString("\n")
 			}
 			help := "up/down: navigate \u2022 enter: submit \u2022 esc: cancel"
+			if m.mode == "untrack" {
+				help += " \u2022 c: clean up done"
+			}
 			b.WriteString(helpStyle().Render(help))
 			b.WriteString("\n")
 		}
