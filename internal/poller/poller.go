@@ -943,7 +943,11 @@ Respond with a JSON object (no markdown fences):
 Rules:
 - "analysis": Provide a clear, actionable status update. Synthesize across git, bus, and tracked item context.
 
-- "concerns": Return the FULL list of currently valid concerns. You are given the existing active concerns with timestamps — use them as your starting point. Remove concerns that are resolved or no longer relevant. Add new concerns as needed. Update severity or wording if the situation has changed. If there are no concerns, return an empty array.
+- "concerns": Return the FULL list of currently valid concerns. You are given the existing active concerns with timestamps — use them as your starting point. ACTIVELY reconcile each existing concern against ALL current evidence before carrying it forward:
+  - If ANY part of a concern is contradicted by new evidence (e.g., a branch now has a PR, an item was merged), you MUST either rewrite the concern to remove the resolved part or drop it entirely.
+  - Do NOT carry forward concerns verbatim if the facts have changed — always rewrite to reflect current state.
+  - Remove concerns that are fully resolved. Rewrite concerns that are partially resolved (e.g., if a concern mentions 2 branches without PRs but 1 now has a PR, rewrite to mention only the remaining branch).
+  - Add new concerns as needed. Update severity or wording if the situation has changed. If there are no concerns, return an empty array.
   - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
   - Keep each concern to 1-2 sentences. Be specific, not exhaustive.
   - Do NOT raise concerns about closed/merged items — they are done.
@@ -960,7 +964,7 @@ Evidence standards:
 - Related git commits in tracked items are the strongest signal of active development. If an item has recent commits, it IS being worked on.
 - Only claim something is "actively being worked on" if there is direct evidence: recent commits, PR activity, or explicit comments. Detailed specs alone do not mean work has started.
 - Base all claims on the data provided. Do not infer activity that isn't evidenced.
-- "Worktree PR Status" shows which active worktree branches have associated GitHub PRs. A branch with an open PR means work has been submitted for review — do NOT raise concerns about that work being incomplete or stalled. Use the PR review state (approved, changes_requested, pending) to assess readiness.
+- "Worktree PR Status" is authoritative for branch-to-PR association. Cross-reference it against every existing concern that mentions branches or PRs. A branch with an open PR means work has been submitted for review — you MUST remove or rewrite any concern claiming that branch has no PR, is stalled, or has unclear status. Use the PR review state (approved, changes_requested, pending) to assess readiness.
 
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
 }
