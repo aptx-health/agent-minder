@@ -92,3 +92,64 @@ func TestParseItemRef_MissingRepo(t *testing.T) {
 		t.Error("expected error for missing repo in prefix")
 	}
 }
+
+func TestParseNumbers_Basic(t *testing.T) {
+	nums, err := ParseNumbers("42 17 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nums) != 3 || nums[0] != 42 || nums[1] != 17 || nums[2] != 5 {
+		t.Errorf("got %v", nums)
+	}
+}
+
+func TestParseNumbers_WithHash(t *testing.T) {
+	nums, err := ParseNumbers("#42 #17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nums) != 2 || nums[0] != 42 || nums[1] != 17 {
+		t.Errorf("got %v", nums)
+	}
+}
+
+func TestParseNumbers_Mixed(t *testing.T) {
+	nums, err := ParseNumbers(" #3  7  #12 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nums) != 3 || nums[0] != 3 || nums[1] != 7 || nums[2] != 12 {
+		t.Errorf("got %v", nums)
+	}
+}
+
+func TestParseNumbers_Empty(t *testing.T) {
+	nums, err := ParseNumbers("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nums != nil {
+		t.Errorf("expected nil, got %v", nums)
+	}
+}
+
+func TestParseNumbers_Invalid(t *testing.T) {
+	_, err := ParseNumbers("42 abc 5")
+	if err == nil {
+		t.Error("expected error for non-numeric input")
+	}
+}
+
+func TestParseNumbers_Zero(t *testing.T) {
+	_, err := ParseNumbers("0")
+	if err == nil {
+		t.Error("expected error for zero")
+	}
+}
+
+func TestParseNumbers_Negative(t *testing.T) {
+	_, err := ParseNumbers("-1")
+	if err == nil {
+		t.Error("expected error for negative")
+	}
+}

@@ -45,16 +45,25 @@ type onboardResultMsg struct {
 // clearUserMsgStatusMsg clears the user message status after a delay.
 type clearUserMsgStatusMsg struct{}
 
-// addTrackedItemResultMsg is sent when a tracked item add completes.
-type addTrackedItemResultMsg struct {
-	item *db.TrackedItem
-	err  error
+// bulkTrackResultMsg is sent when a bulk track operation completes.
+type bulkTrackResultMsg struct {
+	added  int
+	failed int
+	errors []string
 }
 
-// removeTrackedItemResultMsg is sent when a tracked item remove completes.
-type removeTrackedItemResultMsg struct {
-	ref string
-	err error
+// bulkUntrackResultMsg is sent when a bulk untrack operation completes.
+type bulkUntrackResultMsg struct {
+	removed int
+	failed  int
+	errors  []string
+}
+
+// trackFormRow holds one row of the multi-repo track/untrack form.
+type trackFormRow struct {
+	owner, repo, ownerRepo string
+	input                  textinput.Model
+	original               string // untrack: original numbers for diffing
 }
 
 // clearTrackStatusMsg clears the track status after a delay.
@@ -107,7 +116,8 @@ type Model struct {
 	onboardStatus string
 
 	// Track mode (add/remove tracked items).
-	trackInput  textinput.Model
+	trackRows   []trackFormRow
+	trackFocus  int
 	trackStatus string
 
 	// Auto-pause on idle.
@@ -152,11 +162,6 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	oi.SetHeight(3)
 	oi.SetWidth(80)
 
-	ti := textinput.New()
-	ti.Placeholder = "#42 or owner/repo#42"
-	ti.CharLimit = 100
-	ti.SetWidth(40)
-
 	aVP := viewport.New()
 	aVP.KeyMap = safeViewportKeyMap()
 	aVP.SoftWrap = true
@@ -176,9 +181,8 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		broadcastInput: bi,
 		userMsgInput:   ta,
 		onboardInput:   oi,
-		spinner:        sp,
-		trackInput:     ti,
-		analysisVP:     aVP,
+		spinner:    sp,
+		analysisVP: aVP,
 		eventLogVP:     eVP,
 		lastUserInput:  time.Now(),
 	}
@@ -267,6 +271,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearBroadcastStatusMsg:
 		m.broadcastStatus = ""
 		m.mode = "normal"
+		m.resizeViewports()
 		return m, nil
 
 	case userMsgResultMsg:
@@ -282,6 +287,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearUserMsgStatusMsg:
 		m.userMsgStatus = ""
 		m.mode = "normal"
+		m.resizeViewports()
 		return m, nil
 
 	case onboardResultMsg:
@@ -297,25 +303,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case clearOnboardStatusMsg:
 		m.onboardStatus = ""
 		m.mode = "normal"
+		m.resizeViewports()
 		return m, nil
 
-	case addTrackedItemResultMsg:
-		if msg.err != nil {
-			m.trackStatus = fmt.Sprintf("Error: %v", msg.err)
+	case bulkTrackResultMsg:
+		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		if msg.failed > 0 {
+			m.trackStatus = fmt.Sprintf("Tracked %d, %d failed: %s", msg.added, msg.failed, strings.Join(msg.errors, "; "))
 		} else {
-			m.trackStatus = fmt.Sprintf("Now tracking %s: %s [%s]", msg.item.DisplayRef(), msg.item.Title, msg.item.LastStatus)
-			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+			m.trackStatus = fmt.Sprintf("Tracked %d items", msg.added)
 		}
 		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 			return clearTrackStatusMsg{}
 		})
 
-	case removeTrackedItemResultMsg:
-		if msg.err != nil {
-			m.trackStatus = fmt.Sprintf("Error: %v", msg.err)
+	case bulkUntrackResultMsg:
+		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		if msg.failed > 0 {
+			m.trackStatus = fmt.Sprintf("Untracked %d, %d failed: %s", msg.removed, msg.failed, strings.Join(msg.errors, "; "))
 		} else {
-			m.trackStatus = fmt.Sprintf("Untracked %s", msg.ref)
-			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+			m.trackStatus = fmt.Sprintf("Untracked %d items", msg.removed)
 		}
 		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 			return clearTrackStatusMsg{}
@@ -323,7 +330,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearTrackStatusMsg:
 		m.trackStatus = ""
+		m.trackRows = nil
 		m.mode = "normal"
+		m.resizeViewports()
 		return m, nil
 
 	case idleCheckMsg:
@@ -374,18 +383,40 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	case "i":
+		ghRepos := m.poller.GitHubRepos()
+		if len(ghRepos) == 0 {
+			m.trackStatus = "No GitHub repos enrolled"
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearTrackStatusMsg{}
+			})
+		}
 		m.mode = "track"
 		m.trackStatus = ""
-		m.trackInput.Reset()
-		m.trackInput.Placeholder = "#42 or owner/repo#42"
-		cmd := m.trackInput.Focus()
+		m.trackRows = buildTrackRows(ghRepos, nil)
+		m.trackFocus = 0
+		cmd := m.trackRows[0].input.Focus()
+		m.resizeViewports()
 		return m, cmd
 	case "I":
+		if len(m.trackedItems) == 0 {
+			m.trackStatus = "Nothing tracked"
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearTrackStatusMsg{}
+			})
+		}
+		ghRepos := m.poller.GitHubRepos()
+		if len(ghRepos) == 0 {
+			m.trackStatus = "No GitHub repos enrolled"
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearTrackStatusMsg{}
+			})
+		}
 		m.mode = "untrack"
 		m.trackStatus = ""
-		m.trackInput.Reset()
-		m.trackInput.Placeholder = "#42 or owner/repo#42"
-		cmd := m.trackInput.Focus()
+		m.trackRows = buildTrackRows(ghRepos, m.trackedItems)
+		m.trackFocus = 0
+		cmd := m.trackRows[0].input.Focus()
+		m.resizeViewports()
 		return m, cmd
 	case "w":
 		m.showWorktrees = !m.showWorktrees
@@ -410,6 +441,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.width > 4 {
 			m.userMsgInput.SetWidth(m.width - 4)
 		}
+		m.resizeViewports()
 		cmd := m.userMsgInput.Focus()
 		return m, cmd
 	case "m":
@@ -419,6 +451,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.width > 4 {
 			m.broadcastInput.SetWidth(m.width - 4)
 		}
+		m.resizeViewports()
 		cmd := m.broadcastInput.Focus()
 		return m, cmd
 	case "o":
@@ -428,6 +461,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.width > 4 {
 			m.onboardInput.SetWidth(m.width - 4)
 		}
+		m.resizeViewports()
 		cmd := m.onboardInput.Focus()
 		return m, cmd
 	case "up", "down", "pgup", "pgdown":
@@ -444,6 +478,7 @@ func (m Model) updateBroadcast(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = "normal"
 		m.broadcastStatus = ""
 		m.broadcastInput.Blur()
+		m.resizeViewports()
 		return m, nil
 	case "ctrl+d":
 		value := m.broadcastInput.Value()
@@ -475,6 +510,7 @@ func (m Model) updateUserMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = "normal"
 		m.userMsgStatus = ""
 		m.userMsgInput.Blur()
+		m.resizeViewports()
 		return m, nil
 	case "ctrl+d":
 		value := m.userMsgInput.Value()
@@ -506,6 +542,7 @@ func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = "normal"
 		m.onboardStatus = ""
 		m.onboardInput.Blur()
+		m.resizeViewports()
 		return m, nil
 	case "ctrl+d":
 		guidance := m.onboardInput.Value()
@@ -531,51 +568,159 @@ func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.mode = "normal"
 		m.trackStatus = ""
-		m.trackInput.Blur()
+		m.trackRows = nil
+		m.resizeViewports()
+		return m, nil
+	case "up":
+		if m.trackFocus > 0 {
+			m.trackRows[m.trackFocus].input.Blur()
+			m.trackFocus--
+			cmd := m.trackRows[m.trackFocus].input.Focus()
+			return m, cmd
+		}
+		return m, nil
+	case "down", "tab":
+		if m.trackFocus < len(m.trackRows)-1 {
+			m.trackRows[m.trackFocus].input.Blur()
+			m.trackFocus++
+			cmd := m.trackRows[m.trackFocus].input.Focus()
+			return m, cmd
+		}
 		return m, nil
 	case "enter":
-		value := m.trackInput.Value()
-		if strings.TrimSpace(value) == "" {
-			m.mode = "normal"
-			m.trackInput.Blur()
-			return m, nil
+		return m.submitTrackForm()
+	}
+
+	var cmd tea.Cmd
+	m.trackRows[m.trackFocus].input, cmd = m.trackRows[m.trackFocus].input.Update(msg)
+	return m, cmd
+}
+
+// buildTrackRows creates trackFormRow entries from GitHub repos.
+// If items is non-nil (untrack mode), pre-populates with tracked numbers.
+func buildTrackRows(ghRepos []poller.GitHubRepo, items []db.TrackedItem) []trackFormRow {
+	rows := make([]trackFormRow, 0, len(ghRepos))
+	for _, gr := range ghRepos {
+		ownerRepo := gr.Owner + "/" + gr.Repo
+		ti := textinput.New()
+		ti.Placeholder = "space-separated numbers, e.g. 42 17 5"
+		ti.CharLimit = 200
+		ti.SetWidth(50)
+
+		var original string
+		if items != nil {
+			var nums []string
+			for _, item := range items {
+				if item.Owner == gr.Owner && item.Repo == gr.Repo {
+					nums = append(nums, fmt.Sprintf("%d", item.Number))
+				}
+			}
+			if len(nums) > 0 {
+				original = strings.Join(nums, " ")
+				ti.SetValue(original)
+			}
 		}
 
-		defaultOwner, defaultRepo := m.poller.DefaultOwnerRepo()
-		ref, err := ghpkg.ParseItemRef(value, defaultOwner, defaultRepo)
+		rows = append(rows, trackFormRow{
+			owner:     gr.Owner,
+			repo:      gr.Repo,
+			ownerRepo: ownerRepo,
+			input:     ti,
+			original:  original,
+		})
+	}
+	return rows
+}
+
+// submitTrackForm collects input from all rows and fires the async bulk command.
+func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
+	for i := range m.trackRows {
+		m.trackRows[i].input.Blur()
+	}
+
+	mode := m.mode
+	p := m.poller
+
+	if mode == "track" {
+		// Collect refs from non-empty rows.
+		var refs []*ghpkg.ItemRef
+		for _, row := range m.trackRows {
+			nums, err := ghpkg.ParseNumbers(row.input.Value())
+			if err != nil {
+				m.trackStatus = fmt.Sprintf("Error in %s: %v", row.ownerRepo, err)
+				return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+					return clearTrackStatusMsg{}
+				})
+			}
+			for _, n := range nums {
+				refs = append(refs, &ghpkg.ItemRef{Owner: row.owner, Repo: row.repo, Number: n})
+			}
+		}
+		if len(refs) == 0 {
+			m.mode = "normal"
+			m.trackRows = nil
+			m.resizeViewports()
+			return m, nil
+		}
+		m.trackStatus = fmt.Sprintf("Tracking %d items...", len(refs))
+		return m, func() tea.Msg {
+			var added, failed int
+			var errs []string
+			for _, ref := range refs {
+				_, err := p.AddTrackedItemByRef(context.Background(), ref)
+				if err != nil {
+					failed++
+					errs = append(errs, fmt.Sprintf("%s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err))
+				} else {
+					added++
+				}
+			}
+			return bulkTrackResultMsg{added: added, failed: failed, errors: errs}
+		}
+	}
+
+	// Untrack mode: diff original vs current to find removed numbers.
+	var refs []*ghpkg.ItemRef
+	for _, row := range m.trackRows {
+		origNums, _ := ghpkg.ParseNumbers(row.original)
+		curNums, err := ghpkg.ParseNumbers(row.input.Value())
 		if err != nil {
-			m.trackStatus = fmt.Sprintf("Error: %v", err)
+			m.trackStatus = fmt.Sprintf("Error in %s: %v", row.ownerRepo, err)
 			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 				return clearTrackStatusMsg{}
 			})
 		}
-
-		m.trackInput.Blur()
-		mode := m.mode
-		p := m.poller
-
-		if mode == "untrack" {
-			m.trackStatus = fmt.Sprintf("Removing %s/%s#%d...", ref.Owner, ref.Repo, ref.Number)
-			return m, func() tea.Msg {
-				err := p.RemoveTrackedItemByRef(ref)
-				return removeTrackedItemResultMsg{
-					ref: fmt.Sprintf("%s/%s#%d", ref.Owner, ref.Repo, ref.Number),
-					err: err,
-				}
+		curSet := make(map[int]bool, len(curNums))
+		for _, n := range curNums {
+			curSet[n] = true
+		}
+		for _, n := range origNums {
+			if !curSet[n] {
+				refs = append(refs, &ghpkg.ItemRef{Owner: row.owner, Repo: row.repo, Number: n})
 			}
 		}
-
-		// Track mode: resolve via GitHub API.
-		m.trackStatus = fmt.Sprintf("Resolving %s/%s#%d...", ref.Owner, ref.Repo, ref.Number)
-		return m, func() tea.Msg {
-			item, err := p.AddTrackedItemByRef(context.Background(), ref)
-			return addTrackedItemResultMsg{item: item, err: err}
-		}
 	}
-
-	var cmd tea.Cmd
-	m.trackInput, cmd = m.trackInput.Update(msg)
-	return m, cmd
+	if len(refs) == 0 {
+		m.mode = "normal"
+		m.trackRows = nil
+		m.resizeViewports()
+		return m, nil
+	}
+	m.trackStatus = fmt.Sprintf("Untracking %d items...", len(refs))
+	return m, func() tea.Msg {
+		var removed, failed int
+		var errs []string
+		for _, ref := range refs {
+			err := p.RemoveTrackedItemByRef(ref)
+			if err != nil {
+				failed++
+				errs = append(errs, fmt.Sprintf("%s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err))
+			} else {
+				removed++
+			}
+		}
+		return bulkUntrackResultMsg{removed: removed, failed: failed, errors: errs}
+	}
 }
 
 // listenForEvents returns a command that waits for the next poller event.

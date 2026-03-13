@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ItemRef holds the parsed components of a GitHub item reference.
@@ -64,4 +65,25 @@ func ParseItemRef(input, defaultOwner, defaultRepo string) (*ItemRef, error) {
 	}
 
 	return nil, fmt.Errorf("unrecognized format: %q (use #42 or owner/repo#42)", input)
+}
+
+// ParseNumbers splits a space-separated string of issue numbers into ints.
+// Each token may optionally have a '#' prefix. Returns error on invalid input.
+func ParseNumbers(input string) ([]int, error) {
+	fields := strings.FieldsFunc(input, func(r rune) bool {
+		return unicode.IsSpace(r)
+	})
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	result := make([]int, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimPrefix(f, "#")
+		n, err := strconv.Atoi(f)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid issue number: %q", f)
+		}
+		result = append(result, n)
+	}
+	return result, nil
 }

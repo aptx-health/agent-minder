@@ -408,8 +408,8 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 
 	fixed += 1 // analysis header
 	fixed += 1 // event log header
-	fixed += 3 // bottom bar (blank + 2 help rows)
 	fixed += 3 // blank lines (after analysis VP, after event log VP, before bottom bar)
+	fixed += m.bottomBarHeight()
 
 	remaining := m.height - fixed
 	if remaining < 6 {
@@ -432,6 +432,34 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 	}
 
 	return analysisH, eventLogH
+}
+
+// bottomBarHeight returns the number of terminal lines the bottom bar will occupy.
+func (m Model) bottomBarHeight() int {
+	switch m.mode {
+	case "broadcast":
+		if m.broadcastStatus != "" {
+			return 3 // blank + status + empty
+		}
+		return 6 // blank + textarea(3) + help + empty
+	case "usermsg":
+		if m.userMsgStatus != "" {
+			return 3
+		}
+		return 6
+	case "onboard":
+		if m.onboardStatus != "" {
+			return 3
+		}
+		return 7 // blank + header + textarea(3) + help + empty
+	case "track", "untrack":
+		if m.trackStatus != "" {
+			return 3 // blank + status + empty
+		}
+		return len(m.trackRows) + 3 // blank + header + rows + help
+	default:
+		return 3 // blank + 2 help rows
+	}
 }
 
 // renderBottomBar renders the input area or help bar depending on mode.
@@ -493,40 +521,36 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render("ctrl+d: generate & publish \u2022 esc: cancel (leave empty for generic onboarding)"))
 		}
 		b.WriteString("\n")
-	case "track":
+	case "track", "untrack":
 		if m.trackStatus != "" && !strings.HasPrefix(m.trackStatus, "Error:") {
 			b.WriteString("  ")
 			b.WriteString(m.spinner.View())
 			b.WriteString(" ")
 			b.WriteString(mutedStyle().Render(m.trackStatus))
-		} else if m.trackStatus != "" {
+			b.WriteString("\n\n")
+		} else if strings.HasPrefix(m.trackStatus, "Error:") {
 			b.WriteString(errorStyle().Render(fmt.Sprintf("  %s", m.trackStatus)))
+			b.WriteString("\n\n")
 		} else {
-			b.WriteString(headerStyle().Render("  Track item: "))
-			b.WriteString(m.trackInput.View())
+			label := "Track issues"
+			if m.mode == "untrack" {
+				label = "Untrack issues (remove numbers to untrack)"
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  %s:", label)))
+			b.WriteString("\n")
+			for i, row := range m.trackRows {
+				cursor := " "
+				if i == m.trackFocus {
+					cursor = "\u25b8"
+				}
+				b.WriteString(fmt.Sprintf("  %s %s: ", cursor, mutedStyle().Render(row.ownerRepo)))
+				b.WriteString(row.input.View())
+				b.WriteString("\n")
+			}
+			help := "up/down: navigate \u2022 enter: submit \u2022 esc: cancel"
+			b.WriteString(helpStyle().Render(help))
+			b.WriteString("\n")
 		}
-		b.WriteString("\n")
-		if m.trackStatus == "" {
-			b.WriteString(helpStyle().Render("enter: add \u2022 esc: cancel"))
-		}
-		b.WriteString("\n")
-	case "untrack":
-		if m.trackStatus != "" && !strings.HasPrefix(m.trackStatus, "Error:") {
-			b.WriteString("  ")
-			b.WriteString(m.spinner.View())
-			b.WriteString(" ")
-			b.WriteString(mutedStyle().Render(m.trackStatus))
-		} else if m.trackStatus != "" {
-			b.WriteString(errorStyle().Render(fmt.Sprintf("  %s", m.trackStatus)))
-		} else {
-			b.WriteString(headerStyle().Render("  Untrack item: "))
-			b.WriteString(m.trackInput.View())
-		}
-		b.WriteString("\n")
-		if m.trackStatus == "" {
-			b.WriteString(helpStyle().Render("enter: remove \u2022 esc: cancel"))
-		}
-		b.WriteString("\n")
 	default:
 		if m.broadcastStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.broadcastStatus)))
