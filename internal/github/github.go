@@ -381,6 +381,55 @@ func (c *Client) ListIssuesByMilestone(ctx context.Context, owner, repo string, 
 	}, nil
 }
 
+// BranchPRStatus holds the PR info found for a worktree branch.
+type BranchPRStatus struct {
+	Number      int
+	Title       string
+	State       string // "open", "closed", "merged"
+	Draft       bool
+	ReviewState string // "approved", "changes_requested", "pending", or ""
+}
+
+// FetchPRForBranch looks up an open PR whose head branch matches the given branch name.
+// Returns nil (no error) if no PR exists for that branch.
+func (c *Client) FetchPRForBranch(ctx context.Context, owner, repo, branch string) (*BranchPRStatus, error) {
+	opts := &github.PullRequestListOptions{
+		Head:  owner + ":" + branch,
+		State: "open",
+		ListOptions: github.ListOptions{
+			PerPage: 1,
+		},
+	}
+	prs, _, err := c.gh.PullRequests.List(ctx, owner, repo, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list PRs for branch %q: %w", branch, err)
+	}
+	if len(prs) == 0 {
+		return nil, nil
+	}
+
+	pr := prs[0]
+	status := &BranchPRStatus{
+		Number: pr.GetNumber(),
+		Title:  pr.GetTitle(),
+		Draft:  pr.GetDraft(),
+	}
+	if pr.GetMerged() {
+		status.State = "merged"
+	} else if pr.GetState() == "closed" {
+		status.State = "closed"
+	} else {
+		status.State = "open"
+	}
+
+	// Fetch review state for open PRs.
+	if status.State == "open" && !status.Draft {
+		status.ReviewState = c.FetchPRReviewState(ctx, owner, repo, status.Number)
+	}
+
+	return status, nil
+}
+
 func extractLabels(labels []*github.Label) []string {
 	out := make([]string, 0, len(labels))
 	for _, l := range labels {

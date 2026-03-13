@@ -506,6 +506,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	// Sync worktrees for each repo and include active branches in git summary.
 	// Track newly-added worktree paths so we can skip their commits below —
 	// a new worktree appearing is mechanical, not new activity (#39).
+	// Also collect non-main worktree branches for PR status lookup.
+	var worktreeBranchData []repoWorktreeBranches
 	newWorktreePaths := make(map[string]bool)
 	for _, repo := range repos {
 		wtEntries, err := gitpkg.Worktrees(repo.Path)
@@ -594,6 +596,19 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		if len(branchNames) > 1 { // Only interesting if more than just main.
 			fmt.Fprintf(&gitSummary, "\n### %s active branches: %s\n", repo.ShortName, strings.Join(branchNames, ", "))
 		}
+		// Collect non-main worktree branches for PR status lookup.
+		owner, rp := parseGitHubRemote(gitpkg.RemoteURL(repo.Path))
+		if owner != "" {
+			var branches []string
+			for _, wt := range wtEntries {
+				if !wt.IsMain && wt.Branch != "" {
+					branches = append(branches, wt.Branch)
+				}
+			}
+			if len(branches) > 0 {
+				worktreeBranchData = append(worktreeBranchData, repoWorktreeBranches{owner: owner, repo: rp, branches: branches})
+			}
+		}
 	}
 
 	// Gather message bus activity.
@@ -661,6 +676,9 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		result.Tier1Summary = "No new activity."
 		return result, nil
 	}
+
+	// Gather worktree PR status (mechanical, no LLM).
+	prStatusSection := p.gatherWorktreePRStatus(ctx, worktreeBranchData)
 
 	// Get active concerns for context.
 	concerns, _ := p.store.ActiveConcerns(p.project.ID)
@@ -747,7 +765,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		tier2Model = "claude-opus-4-6"
 	}
 
-	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, concerns, trackedItems)
+	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, prStatusSection, concerns, trackedItems)
 	debugf("=== TIER 2 INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", tier2SystemPrompt(p.project.Name), tier2Prompt)
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
@@ -797,6 +815,61 @@ func (p *Poller) recordPollResult(result *PollResult) {
 		Tier2Response:  result.Tier2Analysis,
 		BusMessageSent: result.BusMessageSent,
 	})
+}
+
+// repoWorktreeBranches holds owner/repo and non-main worktree branches for PR lookup.
+type repoWorktreeBranches struct {
+	owner    string
+	repo     string
+	branches []string
+}
+
+// gatherWorktreePRStatus checks each non-main worktree branch for an open GitHub PR.
+// Returns a formatted section for the tier 2 prompt, or "" if no token or no branches.
+func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWorktreeBranches) string {
+	if len(branchData) == 0 {
+		return ""
+	}
+	token := config.GetIntegrationToken("github")
+	if token == "" {
+		return ""
+	}
+	gh := ghpkg.NewClient(token)
+
+	var b strings.Builder
+	b.WriteString("## Worktree PR Status")
+	found := false
+
+	for _, rd := range branchData {
+		for _, branch := range rd.branches {
+			pr, err := gh.FetchPRForBranch(ctx, rd.owner, rd.repo, branch)
+			if err != nil {
+				p.emit("error", fmt.Sprintf("PR lookup for %s/%s branch %q: %v", rd.owner, rd.repo, branch, err), nil)
+				fmt.Fprintf(&b, "\n- %s: error checking PR", branch)
+				found = true
+				continue
+			}
+			if pr == nil {
+				fmt.Fprintf(&b, "\n- %s: no PR", branch)
+				found = true
+				continue
+			}
+			parts := []string{pr.State}
+			if pr.Draft {
+				parts = append(parts, "draft")
+			}
+			if pr.ReviewState != "" {
+				parts = append(parts, "review: "+pr.ReviewState)
+			}
+			fmt.Fprintf(&b, "\n- %s: PR #%d %q (%s)", branch, pr.Number, pr.Title, strings.Join(parts, ", "))
+			found = true
+		}
+	}
+
+	if !found {
+		return ""
+	}
+	return b.String()
 }
 
 // --- Tier 1 Haiku Agent Prompts (focused, parallel) ---
@@ -876,11 +949,12 @@ Evidence standards:
 - Related git commits in tracked items are the strongest signal of active development. If an item has recent commits, it IS being worked on.
 - Only claim something is "actively being worked on" if there is direct evidence: recent commits, PR activity, or explicit comments. Detailed specs alone do not mean work has started.
 - Base all claims on the data provided. Do not infer activity that isn't evidenced.
+- "Worktree PR Status" shows which active worktree branches have associated GitHub PRs. A branch with an open PR means work has been submitted for review — do NOT raise concerns about that work being incomplete or stalled. Use the PR review state (approved, changes_requested, pending) to assess readiness.
 
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
 }
 
-func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges string, concerns []db.Concern, trackedItems []db.TrackedItem) string {
+func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStatus string, concerns []db.Concern, trackedItems []db.TrackedItem) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Project Context\n")
@@ -896,6 +970,9 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges string,
 	}
 	if trackedChanges != "" {
 		fmt.Fprintf(&b, "## Tracked Item Status Changes\n%s\n\n", trackedChanges)
+	}
+	if prStatus != "" {
+		fmt.Fprintf(&b, "%s\n\n", prStatus)
 	}
 
 	// Tracked items with full sweep summaries — direct from sweep agents, not compressed.
