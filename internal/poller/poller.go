@@ -783,7 +783,17 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		tier2Model = "claude-opus-4-6"
 	}
 
-	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, prStatusSection, concerns, trackedItems)
+	// Fetch recently completed items for progress context.
+	ttl := p.project.MessageTTLSec
+	if ttl <= 0 {
+		ttl = 14 * 24 * 3600
+	}
+	completedItems, err := p.store.RecentCompletedItems(p.project.ID, ttl)
+	if err != nil {
+		p.emit("error", fmt.Sprintf("fetching completed items: %v", err), nil)
+	}
+
+	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, prStatusSection, concerns, trackedItems, completedItems)
 	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model, "system_prompt", tier2SystemPrompt(p.project.Name), "user_prompt", tier2Prompt)
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
@@ -972,6 +982,7 @@ Rules:
   - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
   - Keep each concern to 1-2 sentences. Be specific, not exhaustive.
   - Do NOT raise concerns about closed/merged items — they are done.
+  - A "Recently Completed Work" section may be present showing items that were previously tracked and have since been completed. Use this as evidence of forward progress — do NOT flag lack of progress if completed items show recent work.
   - For PRs: Use draft/review state to assess lifecycle. A draft PR is work-in-progress. "changes_requested" means the author needs to address feedback. "approved" means ready to merge. "pending" means awaiting review.
 
 - "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
@@ -990,7 +1001,7 @@ Evidence standards:
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
 }
 
-func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStatus string, concerns []db.Concern, trackedItems []db.TrackedItem) string {
+func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStatus string, concerns []db.Concern, trackedItems []db.TrackedItem, completedItems []db.CompletedItem) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Project Context\n")
@@ -1033,6 +1044,22 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 			}
 			if item.ProgressSummary != "" {
 				fmt.Fprintf(&b, "  Progress: %s\n", item.ProgressSummary)
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if len(completedItems) > 0 {
+		b.WriteString("## Recently Completed Work\n")
+		b.WriteString("These items were previously tracked and have been completed. They provide context on recent progress.\n")
+		for _, ci := range completedItems {
+			typeTag := "issue"
+			if ci.ItemType == "pull_request" {
+				typeTag = "PR"
+			}
+			fmt.Fprintf(&b, "- [%s] [%s] %s: %s\n", ci.FinalStatus, typeTag, ci.DisplayRef(), ci.Title)
+			if ci.Summary != "" {
+				fmt.Fprintf(&b, "  %s\n", ci.Summary)
 			}
 		}
 		b.WriteString("\n")

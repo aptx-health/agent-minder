@@ -49,15 +49,17 @@ Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `u` u
 - Broadcast mode: `m` opens textarea, ctrl+d sends through tier 2 LLM → publishes to bus
 - Onboard mode: `o` opens textarea for optional guidance, ctrl+d generates onboarding message via tier 2 LLM → publishes to `<project>/onboarding` with replace semantics
 
-### DB schema (internal/db) — currently v2
+### DB schema (internal/db) — currently v7
 
 **projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model, llm_summarizer_model, llm_analyzer_model
 
 **polls**: project_id, new_commits, new_messages, concerns_raised, llm_response (legacy), tier1_response, tier2_response, bus_message_sent, polled_at
 
+**completed_items**: project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at — archived from tracked_items when they reach terminal state (only if progress_summary was non-empty)
+
 **Also**: repos, worktrees, topics, concerns (see `schema.go` for full DDL)
 
-Migration v1→v2 adds `llm_summarizer_model`/`llm_analyzer_model` to projects and `tier1_response`/`tier2_response`/`bus_message_sent` to polls, copies existing data into new columns.
+Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items).
 
 `Poll.LLMResponse()` accessor returns tier2 > tier1 > raw (backward compat).
 

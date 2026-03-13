@@ -1129,3 +1129,172 @@ func TestRemoveTerminalTrackedItems(t *testing.T) {
 		t.Errorf("count after cleanup = %d, want 0", count)
 	}
 }
+
+func TestArchiveTrackedItem(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "archivetest", MinderIdentity: "archivetest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Item with progress summary should be archived.
+	item := &TrackedItem{
+		ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 1,
+		ItemType: "pull_request", Title: "Add auth", LastStatus: "Mrgd",
+		ObjectiveSummary: "Implement OAuth2 flow",
+		ProgressSummary:  "OAuth2 flow implemented and merged",
+	}
+	store.AddTrackedItem(item)
+
+	err := store.ArchiveTrackedItem(item)
+	if err != nil {
+		t.Fatalf("ArchiveTrackedItem: %v", err)
+	}
+
+	completed, err := store.RecentCompletedItems(p.ID, 3600)
+	if err != nil {
+		t.Fatalf("RecentCompletedItems: %v", err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed count = %d, want 1", len(completed))
+	}
+	if completed[0].FinalStatus != "Mrgd" {
+		t.Errorf("final_status = %q, want Mrgd", completed[0].FinalStatus)
+	}
+	if completed[0].Summary != "Implement OAuth2 flow — OAuth2 flow implemented and merged" {
+		t.Errorf("summary = %q, want combined objective + progress", completed[0].Summary)
+	}
+}
+
+func TestArchiveTrackedItem_SkipsNoProgress(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "archiveskip", MinderIdentity: "archiveskip/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Item with no progress summary should NOT be archived.
+	item := &TrackedItem{
+		ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 2,
+		ItemType: "issue", Title: "Accidental add", LastStatus: "Closd",
+		ProgressSummary: "",
+	}
+	store.AddTrackedItem(item)
+
+	err := store.ArchiveTrackedItem(item)
+	if err != nil {
+		t.Fatalf("ArchiveTrackedItem: %v", err)
+	}
+
+	completed, _ := store.RecentCompletedItems(p.ID, 3600)
+	if len(completed) != 0 {
+		t.Errorf("completed count = %d, want 0 (no progress summary)", len(completed))
+	}
+}
+
+func TestArchiveTerminalTrackedItems(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "archiveterminal", MinderIdentity: "archiveterminal/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// 2 open, 2 terminal (1 with progress, 1 without).
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 1, LastStatus: "Open"})
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 2, LastStatus: "Open"})
+	item3 := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 3, LastStatus: "Mrgd"}
+	store.AddTrackedItem(item3)
+	item3.ProgressSummary = "Feature shipped"
+	store.UpdateTrackedItem(item3)
+	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 4, LastStatus: "Closd"}) // no progress
+
+	removed, err := store.ArchiveTerminalTrackedItems(p.ID)
+	if err != nil {
+		t.Fatalf("ArchiveTerminalTrackedItems: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+
+	// Only open items should remain.
+	items, _ := store.GetTrackedItems(p.ID)
+	if len(items) != 2 {
+		t.Errorf("remaining tracked = %d, want 2", len(items))
+	}
+
+	// Only 1 should be archived (the one with progress).
+	completed, _ := store.RecentCompletedItems(p.ID, 3600)
+	if len(completed) != 1 {
+		t.Errorf("completed count = %d, want 1", len(completed))
+	}
+	if len(completed) > 0 && completed[0].Number != 3 {
+		t.Errorf("archived item number = %d, want 3", completed[0].Number)
+	}
+}
+
+func TestPruneCompletedItems(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "prunecompleted", MinderIdentity: "prunecompleted/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Insert a completed item with an old timestamp.
+	store.db.Exec(`
+		INSERT INTO completed_items (project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at)
+		VALUES (?, 'github', 'org', 'repo', 1, 'issue', 'Old item', 'Closd', 'Done long ago', datetime('now', '-30 days'))
+	`, p.ID)
+
+	// Insert a recent one.
+	store.db.Exec(`
+		INSERT INTO completed_items (project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at)
+		VALUES (?, 'github', 'org', 'repo', 2, 'issue', 'Recent item', 'Mrgd', 'Just done', datetime('now'))
+	`, p.ID)
+
+	// Prune items older than 14 days.
+	pruned, err := store.PruneCompletedItems(p.ID, 14*24*3600)
+	if err != nil {
+		t.Fatalf("PruneCompletedItems: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("pruned = %d, want 1", pruned)
+	}
+
+	// Only the recent item should remain.
+	remaining, _ := store.RecentCompletedItems(p.ID, 30*24*3600)
+	if len(remaining) != 1 {
+		t.Fatalf("remaining = %d, want 1", len(remaining))
+	}
+	if remaining[0].Number != 2 {
+		t.Errorf("remaining item number = %d, want 2", remaining[0].Number)
+	}
+}
+
+func TestPruneTrackedItems_ArchivesBeforeDelete(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "prunearchive", MinderIdentity: "prunearchive/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// 5 open + 5 terminal (with progress summaries).
+	for i := 1; i <= 5; i++ {
+		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+	}
+	for i := 6; i <= 10; i++ {
+		item := &TrackedItem{
+			ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i,
+			LastStatus: "Closd", LastCheckedAt: fmt.Sprintf("2026-01-%02dT00:00:00Z", i),
+		}
+		store.AddTrackedItem(item)
+		item.ProgressSummary = fmt.Sprintf("Work done on item %d", i)
+		store.UpdateTrackedItem(item)
+	}
+
+	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
+	if err != nil {
+		t.Fatalf("PruneTrackedItems: %v", err)
+	}
+	if pruned != 1 {
+		t.Errorf("pruned = %d, want 1", pruned)
+	}
+
+	// The pruned item (#6, oldest) should now be in completed_items.
+	completed, _ := store.RecentCompletedItems(p.ID, 3600)
+	if len(completed) != 1 {
+		t.Fatalf("completed count = %d, want 1", len(completed))
+	}
+	if completed[0].Number != 6 {
+		t.Errorf("archived item number = %d, want 6", completed[0].Number)
+	}
+}

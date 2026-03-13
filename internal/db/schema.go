@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 6
+const currentVersion = 7
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -99,6 +99,20 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 	created_at          TEXT DEFAULT (datetime('now')),
 	UNIQUE(project_id, source, owner, repo, number)
 );
+
+CREATE TABLE IF NOT EXISTS completed_items (
+	id           INTEGER PRIMARY KEY,
+	project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	source       TEXT NOT NULL DEFAULT 'github',
+	owner        TEXT NOT NULL,
+	repo         TEXT NOT NULL,
+	number       INTEGER NOT NULL,
+	item_type    TEXT NOT NULL DEFAULT 'issue',
+	title        TEXT NOT NULL DEFAULT '',
+	final_status TEXT NOT NULL DEFAULT 'Closd',
+	summary      TEXT NOT NULL DEFAULT '',
+	completed_at TEXT DEFAULT (datetime('now'))
+);
 `
 
 // Open opens (or creates) the agent-minder SQLite database and runs migrations,
@@ -163,6 +177,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 6 {
 		if err := migrateV6(db); err != nil {
 			return fmt.Errorf("apply migration v6: %w", err)
+		}
+	}
+
+	if version < 7 {
+		if err := migrateV7(db); err != nil {
+			return fmt.Errorf("apply migration v7: %w", err)
 		}
 	}
 
@@ -269,6 +289,28 @@ func migrateV6(db *sqlx.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("%s: %w", stmt, err)
 		}
+	}
+	return nil
+}
+
+func migrateV7(db *sqlx.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS completed_items (
+			id           INTEGER PRIMARY KEY,
+			project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			source       TEXT NOT NULL DEFAULT 'github',
+			owner        TEXT NOT NULL,
+			repo         TEXT NOT NULL,
+			number       INTEGER NOT NULL,
+			item_type    TEXT NOT NULL DEFAULT 'issue',
+			title        TEXT NOT NULL DEFAULT '',
+			final_status TEXT NOT NULL DEFAULT 'Closd',
+			summary      TEXT NOT NULL DEFAULT '',
+			completed_at TEXT DEFAULT (datetime('now'))
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create completed_items table: %w", err)
 	}
 	return nil
 }

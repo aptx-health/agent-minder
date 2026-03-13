@@ -123,6 +123,27 @@ func (t *TrackedItem) DisplayRef() string {
 	return fmt.Sprintf("%s/%s#%d", t.Owner, t.Repo, t.Number)
 }
 
+// CompletedItem represents a tracked item that reached terminal state and was archived
+// before being pruned. Only items with a progress summary are archived.
+type CompletedItem struct {
+	ID          int64  `db:"id"`
+	ProjectID   int64  `db:"project_id"`
+	Source      string `db:"source"`
+	Owner       string `db:"owner"`
+	Repo        string `db:"repo"`
+	Number      int    `db:"number"`
+	ItemType    string `db:"item_type"`
+	Title       string `db:"title"`
+	FinalStatus string `db:"final_status"` // "Closd", "Mrgd", "NotPl"
+	Summary     string `db:"summary"`      // snapshot of objective + progress
+	CompletedAt string `db:"completed_at"`
+}
+
+// DisplayRef returns a compact reference like "owner/repo#123".
+func (c *CompletedItem) DisplayRef() string {
+	return fmt.Sprintf("%s/%s#%d", c.Owner, c.Repo, c.Number)
+}
+
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.
 func (p *Poll) LLMResponse() string {
 	if p.Tier2Response != "" {

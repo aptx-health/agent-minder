@@ -775,7 +775,7 @@ func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.trackStep = trackStepFetching
 			m.trackStatus = fmt.Sprintf("Cleaning up %d items...", m.trackCleanupCount)
 			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				removed, err := store.RemoveTerminalTrackedItems(projectID)
+				removed, err := store.ArchiveTerminalTrackedItems(projectID)
 				return cleanupResultMsg{removed: removed, err: err}
 			})
 		case "n", "esc":
