@@ -63,9 +63,11 @@ go install github.com/dustinlange/agent-minder@latest
 
 Requires:
 - Go 1.25+
-- [agent-msg](https://github.com/dustinlange/agent-msg) installed (provides the shared SQLite message bus)
 - `ANTHROPIC_API_KEY` environment variable set
-- `GITHUB_TOKEN` environment variable for tracked items (issue/PR status fetching)
+
+Optional:
+- [agent-msg](https://github.com/dustinlange/agent-msg) — enables the shared message bus for inter-agent coordination. Without it, agent-minder runs normally but bus features (broadcast, onboard, user messages) are unavailable.
+- `GITHUB_TOKEN` — enables tracked items (issue/PR status fetching via GitHub API). Without it, the `track`/`untrack` commands and sweep pipeline are unavailable.
 
 ## Commands
 
@@ -250,8 +252,11 @@ lnav ~/.agent-minder/debug.log
 
 ## agent-msg integration
 
-agent-minder sits on top of agent-msg's SQLite database:
+agent-msg is **optional**. Without it, agent-minder still monitors git repos, tracks GitHub items, runs the LLM pipeline, and displays everything in the TUI — you just won't have inter-agent messaging.
+
+When agent-msg is available, agent-minder sits on top of its SQLite database:
 
 - **Reads**: Recent messages, unread messages, topic summaries, active agents
 - **Writes**: Publishes messages as `<project>/minder` identity when coordination is needed
 - **Compatible**: agent-msg's bash scripts (`agent-pub`, `agent-check`, `agent-ack`, `agent-topics`) continue working against the same database
+- **Graceful degradation**: If the agent-msg DB is missing at startup, a warning is logged and bus features are disabled. Polling, git monitoring, and GitHub sweeps continue normally.
