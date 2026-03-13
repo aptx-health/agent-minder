@@ -540,6 +540,25 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 				}
 			}
 		}
+		// Gather commits from non-main worktrees (main repo path already covered above).
+		for _, wt := range wtEntries {
+			if wt.IsMain || wt.Path == repo.Path {
+				continue
+			}
+			entries, err := gitpkg.LogSince(wt.Path, since)
+			if err != nil || len(entries) == 0 {
+				continue
+			}
+			result.NewCommits += len(entries)
+			label := wt.Branch
+			if label == "" {
+				label = "detached"
+			}
+			fmt.Fprintf(&gitSummary, "\n### %s [%s] (%d new commits)\n", repo.ShortName, label, len(entries))
+			for _, e := range entries {
+				fmt.Fprintf(&gitSummary, "- %s: %s (%s)\n", e.Hash[:7], e.Subject, e.Author)
+			}
+		}
 		// Append active branches to git summary for LLM context.
 		if len(branchNames) > 1 { // Only interesting if more than just main.
 			fmt.Fprintf(&gitSummary, "\n### %s active branches: %s\n", repo.ShortName, strings.Join(branchNames, ", "))
