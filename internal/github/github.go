@@ -263,6 +263,7 @@ func (c *Client) SearchIssues(ctx context.Context, owner, repo string, filterTyp
 type RepoChoice struct {
 	Value       string // The value to use in the filter (label name, milestone title, username)
 	Description string // Optional extra info (e.g., milestone due date)
+	ID          int    // Numeric ID (e.g., milestone number) for API calls that need it
 }
 
 // ListLabels returns all labels for a repo.
@@ -308,6 +309,7 @@ func (c *Client) ListMilestones(ctx context.Context, owner, repo string) ([]Repo
 			all = append(all, RepoChoice{
 				Value:       ms.GetTitle(),
 				Description: desc,
+				ID:          ms.GetNumber(),
 			})
 		}
 		if resp.NextPage == 0 {
@@ -339,6 +341,44 @@ func (c *Client) ListAssignees(ctx context.Context, owner, repo string) ([]RepoC
 		opts.Page = resp.NextPage
 	}
 	return all, nil
+}
+
+// ListIssuesByMilestone returns open issues for a specific milestone number.
+// Uses the Issues list API instead of the Search API to avoid query syntax issues
+// with special characters in milestone titles.
+func (c *Client) ListIssuesByMilestone(ctx context.Context, owner, repo string, milestoneNumber int) (*SearchResult, error) {
+	var allItems []ItemStatus
+	opts := &github.IssueListByRepoOptions{
+		Milestone: fmt.Sprintf("%d", milestoneNumber),
+		State:     "open",
+		ListOptions: github.ListOptions{
+			PerPage: 21,
+		},
+	}
+
+	issues, _, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list issues by milestone: %w", err)
+	}
+
+	for _, issue := range issues {
+		// Skip pull requests (Issues API returns PRs too).
+		if issue.PullRequestLinks != nil {
+			continue
+		}
+		allItems = append(allItems, ItemStatus{
+			Number:   issue.GetNumber(),
+			Title:    issue.GetTitle(),
+			State:    issue.GetState(),
+			Labels:   extractLabels(issue.Labels),
+			ItemType: "issue",
+		})
+	}
+
+	return &SearchResult{
+		Items:      allItems,
+		TotalCount: len(allItems),
+	}, nil
 }
 
 func extractLabels(labels []*github.Label) []string {
