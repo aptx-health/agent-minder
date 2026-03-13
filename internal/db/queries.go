@@ -483,6 +483,30 @@ func (s *Store) PruneTrackedItems(projectID int64, maxTotal, keepTerminal int) (
 	return pruned, nil
 }
 
+// RemoveTerminalTrackedItems deletes all tracked items with terminal status
+// (Closd, Mrgd, NotPl) for a project. Returns the number of items removed.
+func (s *Store) RemoveTerminalTrackedItems(projectID int64) (int, error) {
+	result, err := s.db.Exec(`
+		DELETE FROM tracked_items
+		WHERE project_id = ? AND last_status IN ('Closd', 'Mrgd', 'NotPl')
+	`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("remove terminal tracked items: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+// CountTerminalTrackedItems returns the count of tracked items with terminal status.
+func (s *Store) CountTerminalTrackedItems(projectID int64) (int, error) {
+	var count int
+	err := s.db.Get(&count, `
+		SELECT COUNT(*) FROM tracked_items
+		WHERE project_id = ? AND last_status IN ('Closd', 'Mrgd', 'NotPl')
+	`, projectID)
+	return count, err
+}
+
 // LastPoll returns the most recent poll for a project, or nil if none.
 func (s *Store) LastPoll(projectID int64) (*Poll, error) {
 	polls, err := s.RecentPolls(projectID, 1)

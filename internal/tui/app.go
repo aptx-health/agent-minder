@@ -59,6 +59,12 @@ type bulkUntrackResultMsg struct {
 	errors  []string
 }
 
+// cleanupResultMsg is sent when cleanup of terminal items completes.
+type cleanupResultMsg struct {
+	removed int
+	err     error
+}
+
 // trackFormRow holds one row of the multi-repo track/untrack form.
 type trackFormRow struct {
 	owner, repo, ownerRepo string
@@ -70,9 +76,10 @@ type trackFormRow struct {
 type trackStep int
 
 const (
-	trackStepInput    trackStep = iota // entering issue numbers
-	trackStepFetching                  // fetching item details from GitHub
-	trackStepPreview                   // showing items for confirmation
+	trackStepInput          trackStep = iota // entering issue numbers
+	trackStepFetching                       // fetching item details from GitHub
+	trackStepPreview                        // showing items for confirmation
+	trackStepCleanupConfirm                 // confirming cleanup of terminal items
 )
 
 // trackPreviewItem holds resolved item info for the confirmation preview.
@@ -144,6 +151,7 @@ type Model struct {
 	trackError        bool
 	trackStep         trackStep
 	trackPreviewItems []trackPreviewItem
+	trackCleanupCount int // number of terminal items pending cleanup
 
 	// Filter mode (bulk add tracked items).
 	filterState  *filterState
@@ -379,12 +387,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
+	case cleanupResultMsg:
+		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		if msg.err != nil {
+			m.trackError = true
+			m.trackStatus = fmt.Sprintf("Cleanup failed: %v", msg.err)
+		} else {
+			m.trackStatus = fmt.Sprintf("Cleaned up %d done items", msg.removed)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearTrackStatusMsg{}
+		})
+
 	case clearTrackStatusMsg:
 		m.trackStatus = ""
 		m.trackError = false
 		m.trackRows = nil
 		m.trackStep = trackStepInput
 		m.trackPreviewItems = nil
+		m.trackCleanupCount = 0
 		m.mode = "normal"
 		m.resizeViewports()
 		return m, nil
@@ -691,6 +712,32 @@ func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Cleanup confirm step: y to proceed, n/esc to go back.
+	if m.trackStep == trackStepCleanupConfirm {
+		switch msg.String() {
+		case "y":
+			store := m.store
+			projectID := m.project.ID
+			m.trackStep = trackStepFetching
+			m.trackStatus = fmt.Sprintf("Cleaning up %d items...", m.trackCleanupCount)
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				removed, err := store.RemoveTerminalTrackedItems(projectID)
+				return cleanupResultMsg{removed: removed, err: err}
+			})
+		case "n", "esc":
+			m.trackStep = trackStepInput
+			m.trackCleanupCount = 0
+			if len(m.trackRows) > 0 {
+				cmd := m.trackRows[m.trackFocus].input.Focus()
+				m.resizeViewports()
+				return m, cmd
+			}
+			m.resizeViewports()
+			return m, nil
+		}
+		return m, nil
+	}
+
 	// Fetching step: only allow esc.
 	if m.trackStep == trackStepFetching {
 		if msg.String() == "esc" {
@@ -732,6 +779,24 @@ func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		return m.submitTrackForm()
+	case "c":
+		if m.mode == "untrack" {
+			count, err := m.store.CountTerminalTrackedItems(m.project.ID)
+			if err != nil || count == 0 {
+				m.trackStatus = "No done items to clean up"
+				m.trackError = false
+				return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+					return clearTrackStatusMsg{}
+				})
+			}
+			for i := range m.trackRows {
+				m.trackRows[i].input.Blur()
+			}
+			m.trackCleanupCount = count
+			m.trackStep = trackStepCleanupConfirm
+			m.resizeViewports()
+			return m, nil
+		}
 	}
 
 	var cmd tea.Cmd
