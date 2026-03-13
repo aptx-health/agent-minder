@@ -205,7 +205,8 @@ func (m Model) updateFilterSelectChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	case "enter":
 		if fs.choiceIdx < len(fs.choices) {
 			// Selected an existing choice — use it directly.
-			fs.filterValue = fs.choices[fs.choiceIdx].Value
+			choice := fs.choices[fs.choiceIdx]
+			fs.filterValue = choice.Value
 			fs.step = filterStepFetching
 			fs.err = nil
 
@@ -214,9 +215,18 @@ func (m Model) updateFilterSelectChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 			repo := fs.selectedRepo.Repo
 			ft := fs.filterType
 			fv := fs.filterValue
+			choiceID := choice.ID
 
 			return m, func() tea.Msg {
-				result, err := p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
+				var result *ghpkg.SearchResult
+				var err error
+				if ft == ghpkg.FilterMilestone && choiceID > 0 {
+					// Use Issues API with milestone number to avoid search query
+					// syntax issues with special characters in milestone titles.
+					result, err = p.SearchIssuesByMilestone(context.Background(), owner, repo, choiceID)
+				} else {
+					result, err = p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
+				}
 				return filterSearchResultMsg{results: result, err: err}
 			}
 		}
@@ -462,7 +472,12 @@ func (m Model) renderFilterView() string {
 		b.WriteString("\n\n")
 
 		if fs.err != nil {
-			b.WriteString(errorStyle().Render(fmt.Sprintf("  Error: %v", fs.err)))
+			errMsg := fmt.Sprintf("  Error: %v", fs.err)
+			maxW := m.width - 4
+			if maxW > 20 {
+				errMsg = wrapText(errMsg, maxW)
+			}
+			b.WriteString(errorStyle().Render(errMsg))
 			b.WriteString("\n")
 		} else if fs.results == nil || len(fs.results.Items) == 0 {
 			b.WriteString(mutedStyle().Render("  No matching issues found."))
@@ -503,5 +518,29 @@ func (m Model) renderFilterView() string {
 		b.WriteString("\n")
 	}
 
+	return b.String()
+}
+
+// wrapText wraps a string to the given width, breaking on spaces.
+func wrapText(s string, width int) string {
+	if len(s) <= width {
+		return s
+	}
+	var b strings.Builder
+	line := ""
+	for _, word := range strings.Fields(s) {
+		if line == "" {
+			line = word
+		} else if len(line)+1+len(word) > width {
+			b.WriteString(line)
+			b.WriteString("\n  ")
+			line = word
+		} else {
+			line += " " + word
+		}
+	}
+	if line != "" {
+		b.WriteString(line)
+	}
 	return b.String()
 }

@@ -72,6 +72,16 @@ func (p *Poller) FetchFilterChoices(ctx context.Context, owner, repo string, fil
 	}
 }
 
+// SearchIssuesByMilestone searches for issues using a milestone number via the Issues API.
+func (p *Poller) SearchIssuesByMilestone(ctx context.Context, owner, repo string, milestoneNumber int) (*ghpkg.SearchResult, error) {
+	token := config.GetIntegrationToken("github")
+	if token == "" {
+		return nil, fmt.Errorf("no GitHub token configured")
+	}
+	gh := ghpkg.NewClient(token)
+	return gh.ListIssuesByMilestone(ctx, owner, repo, milestoneNumber)
+}
+
 // BulkAddTrackedItems converts ItemStatus results to TrackedItems and bulk-inserts them.
 // Returns the number of items actually added.
 func (p *Poller) BulkAddTrackedItems(ctx context.Context, items []ghpkg.ItemStatus, owner, repo string) (int, error) {
