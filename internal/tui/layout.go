@@ -466,7 +466,10 @@ func (m Model) bottomBarHeight() int {
 	case "filter":
 		return 3 // blank + help + empty
 	default:
-		return 3 // blank + 2 help rows
+		if m.showHelp {
+			return 2 + len(allHelpHints()) + 2 // blank + header + hints + close hint + blank
+		}
+		return 2 // blank + 1 help row
 	}
 }
 
@@ -596,14 +599,18 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.filterStatus)))
 			b.WriteString("\n")
 		}
-		b.WriteString(renderHelpBar(m.width))
+		if m.showHelp {
+			b.WriteString(renderHelpOverlay(m.width))
+		} else {
+			b.WriteString(renderHelpBar(m.width))
+		}
 		b.WriteString("\n")
 	}
 
 	return b.String()
 }
 
-// renderHelpBar builds a two-row help bar with styled key hints.
+// renderHelpBar builds a single-line condensed help bar with ? for full list.
 func renderHelpBar(width int) string {
 	keyStyle := helpKeyStyle()
 	descStyle := helpStyle()
@@ -614,36 +621,69 @@ func renderHelpBar(width int) string {
 		desc string
 	}
 
-	hints := []hint{
-		{"p", "pause/resume"},
-		{"r", "poll now"},
-		{"e", "expand"},
-		{"w", "worktrees"},
+	// Show essential keys on the condensed bar.
+	condensed := []hint{
+		{"p", "pause"},
+		{"r", "poll"},
 		{"i", "track"},
-		{"I", "untrack"},
 		{"f", "filter"},
-		{"u", "user msg"},
 		{"m", "broadcast"},
-		{"o", "onboard"},
-		{"d", "details"},
-		{"t", "theme"},
+		{"q", "quit"},
+		{"?", "help"},
+	}
+
+	var row strings.Builder
+	for _, h := range condensed {
+		entry := keyStyle.Render(h.key) + descStyle.Render(": "+h.desc)
+		if row.Len() > 0 {
+			row.WriteString(sep)
+		}
+		row.WriteString(entry)
+	}
+
+	return row.String()
+}
+
+// allHelpHints returns the full list of keybind hints for the help overlay.
+func allHelpHints() []struct{ key, desc string } {
+	return []struct{ key, desc string }{
+		{"p", "pause/resume polling"},
+		{"r", "poll now"},
+		{"e", "expand/collapse analysis"},
+		{"w", "toggle worktrees"},
+		{"i", "track issues"},
+		{"I", "untrack issues"},
+		{"f", "filter & bulk track"},
+		{"u", "post user message"},
+		{"m", "broadcast to agents"},
+		{"o", "generate onboarding"},
+		{"d", "toggle repo/topic details"},
+		{"t", "cycle theme"},
+		{"\u2191/\u2193", "scroll event log"},
+		{"?", "toggle this help"},
 		{"q", "quit"},
 	}
+}
 
-	var row1, row2 strings.Builder
-	for idx, h := range hints {
-		entry := keyStyle.Render(h.key) + descStyle.Render(": "+h.desc)
-		target := &row1
-		if idx >= 8 {
-			target = &row2
-		}
-		if target.Len() > 0 {
-			target.WriteString(sep)
-		}
-		target.WriteString(entry)
+// renderHelpOverlay renders the full help overlay box.
+func renderHelpOverlay(width int) string {
+	keyStyle := helpKeyStyle()
+	descStyle := helpStyle()
+	hints := allHelpHints()
+
+	var b strings.Builder
+	b.WriteString(headerStyle().Render("Keybindings"))
+	b.WriteString("\n")
+	for _, h := range hints {
+		b.WriteString(fmt.Sprintf("  %s %s\n",
+			keyStyle.Render(fmt.Sprintf("%3s", h.key)),
+			descStyle.Render(h.desc)))
 	}
+	b.WriteString(mutedStyle().Render("  press ? to close"))
+	b.WriteString("\n")
 
-	return row1.String() + "\n" + row2.String()
+	_ = width // available for future width-aware formatting
+	return b.String()
 }
 
 // truncateLine truncates a string to maxWidth characters, adding "..." if truncated.

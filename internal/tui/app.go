@@ -128,6 +128,9 @@ type Model struct {
 	// Auto-pause on idle.
 	lastUserInput time.Time
 	autoPaused    bool
+
+	// Help overlay.
+	showHelp bool
 }
 
 // safeViewportKeyMap returns a viewport KeyMap that only uses arrow keys and
@@ -402,6 +405,10 @@ type clearFilterStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "?":
+		m.showHelp = !m.showHelp
+		m.resizeViewports()
+		return m, nil
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "p":
