@@ -212,7 +212,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	eVP.SoftWrap = true
 	eVP.FillHeight = true
 
-	return Model{
+	m := Model{
 		project:        project,
 		store:          store,
 		poller:         p,
@@ -227,6 +227,21 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		eventLogVP:     eVP,
 		lastUserInput:  time.Now(),
 	}
+	m.applyTextareaTheme()
+	return m
+}
+
+// applyTextareaTheme sets textarea styles to match the current theme.
+func (m *Model) applyTextareaTheme() {
+	var s textarea.Styles
+	if currentTheme().Name == "light" {
+		s = textarea.DefaultLightStyles()
+	} else {
+		s = textarea.DefaultDarkStyles()
+	}
+	m.broadcastInput.SetStyles(s)
+	m.userMsgInput.SetStyles(s)
+	m.onboardInput.SetStyles(s)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -597,6 +612,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "t":
 		cycleTheme()
+		m.applyTextareaTheme()
 		m.rebuildAnalysisContent()
 		m.rebuildEventLogContent()
 		return m, nil
