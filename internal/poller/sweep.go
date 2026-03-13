@@ -294,7 +294,7 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 	if newHash != item.ContentHash || item.ContentHash == "" {
 		// Run Haiku summarizer.
 		prompt := buildItemSweepPrompt(item, content, relatedCommits)
-		debugf("=== SWEEP HAIKU INPUT [%s] ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", item.DisplayRef(), itemSweepSystemPrompt(), prompt)
+		debugLog("llm call", "stage", "sweep", "step", "input", "component", "sweep_haiku", "model", haikuModel, "item", item.DisplayRef(), "system_prompt", itemSweepSystemPrompt(), "user_prompt", prompt)
 		resp, err := p.provider.Complete(ctx, &llm.Request{
 			Model:     haikuModel,
 			System:    itemSweepSystemPrompt(),
@@ -307,7 +307,7 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 			p.emit("error", fmt.Sprintf("haiku sweep for %s: %v", item.DisplayRef(), err), nil)
 			item.ContentHash = newHash
 		} else {
-			debugf("=== SWEEP HAIKU OUTPUT [%s] ===\n%s\n", item.DisplayRef(), resp.Content)
+			debugLog("llm response", "stage", "sweep", "step", "output", "component", "sweep_haiku", "item", item.DisplayRef(), "response", resp.Content)
 			result.HaikuRan = true
 			parsed := parseItemSweep(resp.Content)
 			if parsed != nil {
@@ -317,7 +317,7 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 			item.ContentHash = newHash
 		}
 	} else {
-		debugf("=== SWEEP SKIP [%s] === hash match, using cached summaries\n", item.DisplayRef())
+		debugLog("cache hit", "stage", "sweep", "step", "skip", "item", item.DisplayRef())
 	}
 	// If hash matches, keep cached summaries — only metadata updated.
 
