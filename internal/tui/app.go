@@ -415,6 +415,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
+	case filterChoicesMsg:
+		if m.filterState != nil {
+			if msg.err != nil || len(msg.choices) == 0 {
+				// No choices available or error — fall back to text input.
+				m.filterState.step = filterStepInputValue
+				switch m.filterState.filterType {
+				case ghpkg.FilterLabel:
+					m.filterState.input.Placeholder = "label name..."
+				case ghpkg.FilterMilestone:
+					m.filterState.input.Placeholder = "milestone title..."
+				case ghpkg.FilterAssignee:
+					m.filterState.input.Placeholder = "username..."
+				}
+				return m, m.filterState.input.Focus()
+			}
+			m.filterState.choices = msg.choices
+			m.filterState.choiceIdx = 0
+			m.filterState.step = filterStepSelectChoice
+		}
+		return m, nil
+
 	case filterSearchResultMsg:
 		if m.filterState != nil {
 			if msg.err != nil {
