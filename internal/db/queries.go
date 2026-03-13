@@ -319,7 +319,7 @@ func (s *Store) AddTrackedItem(item *TrackedItem) error {
 	result, err := s.db.Exec(`
 		INSERT INTO tracked_items (project_id, source, owner, repo, number, item_type, title, state, labels, last_status, last_checked_at)
 		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-		WHERE (SELECT COUNT(*) FROM tracked_items WHERE project_id = ?) < 10
+		WHERE (SELECT COUNT(*) FROM tracked_items WHERE project_id = ?) < 20
 	`, item.ProjectID, item.Source, item.Owner, item.Repo, item.Number,
 		item.ItemType, item.Title, item.State, item.Labels, item.LastStatus, item.LastCheckedAt,
 		item.ProjectID)
@@ -331,7 +331,7 @@ func (s *Store) AddTrackedItem(item *TrackedItem) error {
 		return fmt.Errorf("rows affected: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("tracked item limit reached (max 10 per project)")
+		return fmt.Errorf("tracked item limit reached (max 20 per project)")
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
@@ -365,6 +365,61 @@ func (s *Store) RemoveTrackedItem(projectID int64, owner, repo string, number in
 		return fmt.Errorf("tracked item %s/%s#%d not found", owner, repo, number)
 	}
 	return nil
+}
+
+// ClearTrackedItems removes all tracked items for a project.
+func (s *Store) ClearTrackedItems(projectID int64) error {
+	_, err := s.db.Exec(`DELETE FROM tracked_items WHERE project_id = ?`, projectID)
+	if err != nil {
+		return fmt.Errorf("clear tracked items: %w", err)
+	}
+	return nil
+}
+
+// BulkAddTrackedItems inserts multiple tracked items in a transaction.
+// Uses INSERT OR IGNORE to skip duplicates (same project+owner+repo+number).
+// Enforces the cap of 20 items per project. Returns the count of newly inserted rows.
+func (s *Store) BulkAddTrackedItems(items []*TrackedItem) (int, error) {
+	if len(items) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	projectID := items[0].ProjectID
+
+	var current int
+	if err := tx.Get(&current, `SELECT COUNT(*) FROM tracked_items WHERE project_id = ?`, projectID); err != nil {
+		return 0, fmt.Errorf("count tracked items: %w", err)
+	}
+
+	inserted := 0
+	for _, item := range items {
+		if current+inserted >= 20 {
+			break
+		}
+		result, err := tx.Exec(`
+			INSERT OR IGNORE INTO tracked_items (project_id, source, owner, repo, number, item_type, title, state, labels, last_status, last_checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, item.ProjectID, item.Source, item.Owner, item.Repo, item.Number,
+			item.ItemType, item.Title, item.State, item.Labels, item.LastStatus, item.LastCheckedAt)
+		if err != nil {
+			return inserted, fmt.Errorf("insert tracked item: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		if n > 0 {
+			inserted += int(n)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return inserted, nil
 }
 
 // UpdateTrackedItem updates a tracked item's mutable fields after a status check.

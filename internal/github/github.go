@@ -142,6 +142,70 @@ func (c *Client) FetchItemContent(ctx context.Context, owner, repo string, numbe
 	return content, nil
 }
 
+// FilterType represents the type of filter for searching issues.
+type FilterType string
+
+const (
+	FilterLabel     FilterType = "label"
+	FilterMilestone FilterType = "milestone"
+	FilterProject   FilterType = "project"
+	FilterAssignee  FilterType = "assignee"
+)
+
+// SearchResult holds the results of a GitHub issue search.
+type SearchResult struct {
+	Items      []ItemStatus
+	TotalCount int
+}
+
+// SearchIssues searches for open issues in a repo matching the given filter.
+// Requests up to 21 results to detect overflow beyond the 20-item cap.
+func (c *Client) SearchIssues(ctx context.Context, owner, repo string, filterType FilterType, filterValue string) (*SearchResult, error) {
+	query := fmt.Sprintf("repo:%s/%s is:issue is:open", owner, repo)
+
+	switch filterType {
+	case FilterLabel:
+		query += fmt.Sprintf(" label:\"%s\"", filterValue)
+	case FilterMilestone:
+		query += fmt.Sprintf(" milestone:\"%s\"", filterValue)
+	case FilterProject:
+		query += fmt.Sprintf(" project:%s", filterValue)
+	case FilterAssignee:
+		query += fmt.Sprintf(" assignee:%s", filterValue)
+	default:
+		return nil, fmt.Errorf("unknown filter type: %s", filterType)
+	}
+
+	opts := &github.SearchOptions{
+		Sort:  "created",
+		Order: "desc",
+		ListOptions: github.ListOptions{
+			PerPage: 21,
+		},
+	}
+
+	result, _, err := c.gh.Search.Issues(ctx, query, opts)
+	if err != nil {
+		return nil, fmt.Errorf("search issues: %w", err)
+	}
+
+	items := make([]ItemStatus, 0, len(result.Issues))
+	for _, issue := range result.Issues {
+		items = append(items, ItemStatus{
+			Number:   issue.GetNumber(),
+			Title:    issue.GetTitle(),
+			State:    issue.GetState(),
+			Labels:   extractLabels(issue.Labels),
+			ItemType: "issue",
+		})
+	}
+
+	return &SearchResult{
+		Items:      items,
+		TotalCount: result.GetTotal(),
+	}, nil
+}
+
 func extractLabels(labels []*github.Label) []string {
 	out := make([]string, 0, len(labels))
 	for _, l := range labels {

@@ -12,6 +12,87 @@ import (
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 )
 
+// GitHubRepo represents a GitHub repository identified by owner and repo name.
+type GitHubRepo struct {
+	Owner string
+	Repo  string
+}
+
+// GitHubRepos returns the deduplicated list of GitHub repos from enrolled repos.
+func (p *Poller) GitHubRepos() []GitHubRepo {
+	repos, err := p.store.GetRepos(p.project.ID)
+	if err != nil || len(repos) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var result []GitHubRepo
+	for _, r := range repos {
+		remote := gitpkg.RemoteURL(r.Path)
+		owner, repo := parseGitHubRemote(remote)
+		if owner == "" {
+			continue
+		}
+		key := owner + "/" + repo
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, GitHubRepo{Owner: owner, Repo: repo})
+	}
+	return result
+}
+
+// SearchGitHubIssues searches for issues in a GitHub repo matching the given filter.
+func (p *Poller) SearchGitHubIssues(ctx context.Context, owner, repo string, filterType ghpkg.FilterType, filterValue string) (*ghpkg.SearchResult, error) {
+	token := config.GetIntegrationToken("github")
+	if token == "" {
+		return nil, fmt.Errorf("no GitHub token configured")
+	}
+	gh := ghpkg.NewClient(token)
+	return gh.SearchIssues(ctx, owner, repo, filterType, filterValue)
+}
+
+// BulkAddTrackedItems converts ItemStatus results to TrackedItems and bulk-inserts them.
+// Returns the number of items actually added.
+func (p *Poller) BulkAddTrackedItems(ctx context.Context, items []ghpkg.ItemStatus, owner, repo string) (int, error) {
+	dbItems := make([]*db.TrackedItem, 0, len(items))
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, s := range items {
+		dbItems = append(dbItems, &db.TrackedItem{
+			ProjectID:     p.project.ID,
+			Source:        "github",
+			Owner:         owner,
+			Repo:          repo,
+			Number:        s.Number,
+			ItemType:      s.ItemType,
+			Title:         s.Title,
+			State:         s.State,
+			Labels:        strings.Join(s.Labels, ","),
+			LastStatus:    s.CompactStatus(),
+			LastCheckedAt: now,
+		})
+	}
+
+	added, err := p.store.BulkAddTrackedItems(dbItems)
+	if err != nil {
+		return 0, err
+	}
+	if added > 0 {
+		p.emit("tracked", fmt.Sprintf("Bulk added %d items from %s/%s", added, owner, repo), nil)
+	}
+	return added, nil
+}
+
+// ClearAndBulkAddTrackedItems clears existing tracked items then bulk-adds new ones.
+func (p *Poller) ClearAndBulkAddTrackedItems(ctx context.Context, items []ghpkg.ItemStatus, owner, repo string) (int, error) {
+	if err := p.store.ClearTrackedItems(p.project.ID); err != nil {
+		return 0, fmt.Errorf("clear tracked items: %w", err)
+	}
+	p.emit("tracked", "Cleared all tracked items", nil)
+	return p.BulkAddTrackedItems(ctx, items, owner, repo)
+}
+
 // DefaultOwnerRepo derives a default owner/repo from the project's enrolled repos.
 // It looks for GitHub remote URLs and returns the first match.
 func (p *Poller) DefaultOwnerRepo() (owner, repo string) {

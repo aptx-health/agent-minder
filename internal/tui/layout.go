@@ -49,35 +49,41 @@ func (m Model) View() tea.View {
 		}
 	}
 
-	// Analysis section.
-	expandHint := "e: expand"
-	if m.analysisExpanded {
-		expandHint = "e: collapse"
-	}
-	b.WriteString(headerStyle().Render("Last Analysis"))
-	b.WriteString("  ")
-	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
-	if m.lastPoll != nil {
+	// Main content area: filter mode replaces analysis+event log.
+	if m.mode == "filter" {
+		b.WriteString(m.renderFilterView())
+		b.WriteString("\n")
+	} else {
+		// Analysis section.
+		expandHint := "e: expand"
+		if m.analysisExpanded {
+			expandHint = "e: collapse"
+		}
+		b.WriteString(headerStyle().Render("Last Analysis"))
 		b.WriteString("  ")
-		b.WriteString(mutedStyle().Render(m.lastPoll.Duration.Round(time.Millisecond).String()))
-	}
-	b.WriteString("\n")
-	b.WriteString(m.analysisVP.View())
-	b.WriteString("\n\n")
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
+		if m.lastPoll != nil {
+			b.WriteString("  ")
+			b.WriteString(mutedStyle().Render(m.lastPoll.Duration.Round(time.Millisecond).String()))
+		}
+		b.WriteString("\n")
+		b.WriteString(m.analysisVP.View())
+		b.WriteString("\n\n")
 
-	// Event log section.
-	b.WriteString(headerStyle().Render("Event Log"))
-	scrollHint := ""
-	if !m.eventLogVP.AtTop() || !m.eventLogVP.AtBottom() {
-		pct := m.eventLogVP.ScrollPercent()
-		scrollHint = fmt.Sprintf("  [%.0f%%]", pct*100)
+		// Event log section.
+		b.WriteString(headerStyle().Render("Event Log"))
+		scrollHint := ""
+		if !m.eventLogVP.AtTop() || !m.eventLogVP.AtBottom() {
+			pct := m.eventLogVP.ScrollPercent()
+			scrollHint = fmt.Sprintf("  [%.0f%%]", pct*100)
+		}
+		if scrollHint != "" {
+			b.WriteString(mutedStyle().Render(scrollHint))
+		}
+		b.WriteString("\n")
+		b.WriteString(m.eventLogVP.View())
+		b.WriteString("\n")
 	}
-	if scrollHint != "" {
-		b.WriteString(mutedStyle().Render(scrollHint))
-	}
-	b.WriteString("\n")
-	b.WriteString(m.eventLogVP.View())
-	b.WriteString("\n")
 
 	// Bottom bar: input or help.
 	b.WriteString(m.renderBottomBar())
@@ -510,6 +516,30 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render("enter: add \u2022 esc: cancel"))
 		}
 		b.WriteString("\n")
+	case "filter":
+		if m.filterStatus != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.filterStatus)))
+		} else if m.filterState != nil {
+			switch m.filterState.step {
+			case filterStepSelectRepo:
+				b.WriteString(helpStyle().Render("up/down: select \u2022 enter: confirm \u2022 esc: cancel"))
+			case filterStepSelectType:
+				b.WriteString(helpStyle().Render("l: label \u2022 m: milestone \u2022 p: project \u2022 a: assignee \u2022 esc: back"))
+			case filterStepInputValue:
+				b.WriteString(helpStyle().Render("enter: search \u2022 esc: back"))
+			case filterStepFetching:
+				// no help, spinner is shown in filter view
+			case filterStepPreview:
+				if m.filterState.err != nil || m.filterState.results == nil || len(m.filterState.results.Items) == 0 {
+					b.WriteString(helpStyle().Render("esc: back"))
+				} else {
+					b.WriteString(helpStyle().Render("enter: add all \u2022 esc: back"))
+				}
+			case filterStepConflict:
+				b.WriteString(helpStyle().Render("a: append \u2022 c: clear & replace \u2022 esc: back"))
+			}
+		}
+		b.WriteString("\n\n")
 	case "untrack":
 		if m.trackStatus != "" && !strings.HasPrefix(m.trackStatus, "Error:") {
 			b.WriteString("  ")
@@ -534,6 +564,10 @@ func (m Model) renderBottomBar() string {
 		}
 		if m.userMsgStatus != "" {
 			b.WriteString(userMsgStyle().Render(fmt.Sprintf("  %s", m.userMsgStatus)))
+			b.WriteString("\n")
+		}
+		if m.filterStatus != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.filterStatus)))
 			b.WriteString("\n")
 		}
 		b.WriteString(renderHelpBar(m.width))
@@ -561,6 +595,7 @@ func renderHelpBar(width int) string {
 		{"w", "worktrees"},
 		{"i", "track"},
 		{"I", "untrack"},
+		{"f", "filter"},
 		{"u", "user msg"},
 		{"m", "broadcast"},
 		{"o", "onboard"},
@@ -573,7 +608,7 @@ func renderHelpBar(width int) string {
 	for idx, h := range hints {
 		entry := keyStyle.Render(h.key) + descStyle.Render(": "+h.desc)
 		target := &row1
-		if idx >= 7 {
+		if idx >= 8 {
 			target = &row2
 		}
 		if target.Len() > 0 {
