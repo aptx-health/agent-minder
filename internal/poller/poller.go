@@ -481,8 +481,15 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	// Gather git activity and sync worktrees.
+	// Use last poll time as the lookback boundary so commits aren't double-counted.
+	// Fall back to 2x refresh interval on first poll (no prior poll exists).
 	var gitSummary strings.Builder
-	since := time.Now().Add(-p.project.RefreshInterval() * 2) // Look back 2 intervals.
+	since := time.Now().Add(-p.project.RefreshInterval() * 2)
+	if lastPoll, err := p.store.LastPoll(p.project.ID); err == nil && lastPoll != nil {
+		if t, err := time.Parse("2006-01-02 15:04:05", lastPoll.PolledAt); err == nil {
+			since = t
+		}
+	}
 	for _, repo := range repos {
 		entries, err := gitpkg.LogSince(repo.Path, since)
 		if err != nil || len(entries) == 0 {
