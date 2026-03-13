@@ -12,33 +12,32 @@ import (
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 )
 
-// GitHubRepo represents a GitHub repository identified by owner and repo name.
+// GitHubRepo holds a deduplicated owner/repo pair from enrolled repos.
 type GitHubRepo struct {
 	Owner string
 	Repo  string
 }
 
-// GitHubRepos returns the deduplicated list of GitHub repos from enrolled repos.
+// GitHubRepos returns deduplicated GitHub owner/repo pairs from enrolled repos.
 func (p *Poller) GitHubRepos() []GitHubRepo {
 	repos, err := p.store.GetRepos(p.project.ID)
 	if err != nil || len(repos) == 0 {
 		return nil
 	}
-
 	seen := make(map[string]bool)
 	var result []GitHubRepo
 	for _, r := range repos {
 		remote := gitpkg.RemoteURL(r.Path)
-		owner, repo := parseGitHubRemote(remote)
-		if owner == "" {
+		o, rp := parseGitHubRemote(remote)
+		if o == "" {
 			continue
 		}
-		key := owner + "/" + repo
+		key := o + "/" + rp
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		result = append(result, GitHubRepo{Owner: owner, Repo: repo})
+		result = append(result, GitHubRepo{Owner: o, Repo: rp})
 	}
 	return result
 }
@@ -96,17 +95,11 @@ func (p *Poller) ClearAndBulkAddTrackedItems(ctx context.Context, items []ghpkg.
 // DefaultOwnerRepo derives a default owner/repo from the project's enrolled repos.
 // It looks for GitHub remote URLs and returns the first match.
 func (p *Poller) DefaultOwnerRepo() (owner, repo string) {
-	repos, err := p.store.GetRepos(p.project.ID)
-	if err != nil || len(repos) == 0 {
+	ghRepos := p.GitHubRepos()
+	if len(ghRepos) == 0 {
 		return "", ""
 	}
-	for _, r := range repos {
-		remote := gitpkg.RemoteURL(r.Path)
-		if o, rp := parseGitHubRemote(remote); o != "" {
-			return o, rp
-		}
-	}
-	return "", ""
+	return ghRepos[0].Owner, ghRepos[0].Repo
 }
 
 // parseGitHubRemote extracts owner/repo from a GitHub remote URL.
