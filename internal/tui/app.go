@@ -461,6 +461,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return clearFilterStatusMsg{}
 		})
 
+	case bulkUpdateResultMsg:
+		if msg.err != nil {
+			m.filterStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.filterStatus = fmt.Sprintf("Updated: +%d new, -%d closed", msg.added, msg.removed)
+			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		}
+		m.filterState = nil
+		m.mode = "normal"
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearFilterStatusMsg{}
+		})
+
 	case clearFilterStatusMsg:
 		m.filterStatus = ""
 		return m, nil

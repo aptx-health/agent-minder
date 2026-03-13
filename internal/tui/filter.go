@@ -43,6 +43,13 @@ type bulkAddResultMsg struct {
 	err   error
 }
 
+// bulkUpdateResultMsg is sent when an update (add new + remove terminal) completes.
+type bulkUpdateResultMsg struct {
+	added   int
+	removed int
+	err     error
+}
+
 // filterState holds all state for the filter flow.
 type filterState struct {
 	step         filterStep
@@ -335,6 +342,13 @@ func (m Model) updateFilterConflict(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			items = items[:20]
 		}
 		return m.startBulkAdd(items, true)
+	case "u":
+		// Update: add new items and remove closed/merged/not-planned.
+		items := fs.results.Items
+		if len(items) > 20 {
+			items = items[:20]
+		}
+		return m.startBulkUpdate(items)
 	}
 	return m, nil
 }
@@ -357,6 +371,21 @@ func (m Model) startBulkAdd(items []ghpkg.ItemStatus, clearFirst bool) (tea.Mode
 			added, err = p.BulkAddTrackedItems(context.Background(), items, owner, repo)
 		}
 		return bulkAddResultMsg{added: added, err: err}
+	}
+}
+
+// startBulkUpdate kicks off the async update operation: removes terminal items then adds new ones.
+func (m Model) startBulkUpdate(items []ghpkg.ItemStatus) (tea.Model, tea.Cmd) {
+	fs := m.filterState
+	fs.step = filterStepFetching // reuse fetching step for spinner
+
+	p := m.poller
+	owner := fs.selectedRepo.Owner
+	repo := fs.selectedRepo.Repo
+
+	return m, func() tea.Msg {
+		added, removed, err := p.UpdateTrackedItems(context.Background(), items, owner, repo)
+		return bulkUpdateResultMsg{added: added, removed: removed, err: err}
 	}
 }
 
@@ -510,6 +539,8 @@ func (m Model) renderFilterView() string {
 	case filterStepConflict:
 		b.WriteString(textStyle().Render(fmt.Sprintf("  %d existing tracked items found.", len(m.trackedItems))))
 		b.WriteString("\n\n")
+		b.WriteString(textStyle().Render("  [u] update (add new, remove closed/merged)"))
+		b.WriteString("\n")
 		b.WriteString(textStyle().Render("  [a] append to existing"))
 		b.WriteString("\n")
 		b.WriteString(textStyle().Render("  [c] clear and replace"))
