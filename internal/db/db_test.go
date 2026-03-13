@@ -478,18 +478,18 @@ func TestTrackedItemsCap(t *testing.T) {
 	p := &Project{Name: "captest", MinderIdentity: "captest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
 	store.CreateProject(p)
 
-	// Add 10 items.
-	for i := 1; i <= 10; i++ {
+	// Add 20 items.
+	for i := 1; i <= 20; i++ {
 		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}
 		if err := store.AddTrackedItem(item); err != nil {
 			t.Fatalf("AddTrackedItem %d: %v", i, err)
 		}
 	}
 
-	// 11th should fail.
-	item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 11, LastStatus: "Open"}
+	// 21st should fail.
+	item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 21, LastStatus: "Open"}
 	if err := store.AddTrackedItem(item); err == nil {
-		t.Error("expected 11th item to be rejected")
+		t.Error("expected 21st item to be rejected")
 	}
 }
 
@@ -506,6 +506,91 @@ func TestTrackedItemCascadeDelete(t *testing.T) {
 	items, _ := store.GetTrackedItems(p.ID)
 	if len(items) != 0 {
 		t.Error("tracked items should be deleted with project")
+	}
+}
+
+func TestBulkAddTrackedItems(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "bulktest", MinderIdentity: "bulktest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Bulk add 5 items.
+	items := make([]*TrackedItem, 5)
+	for i := range items {
+		items[i] = &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i + 1, LastStatus: "Open"}
+	}
+	added, err := store.BulkAddTrackedItems(items)
+	if err != nil {
+		t.Fatalf("BulkAddTrackedItems: %v", err)
+	}
+	if added != 5 {
+		t.Errorf("expected 5 added, got %d", added)
+	}
+
+	// Bulk add same items again — duplicates should be ignored.
+	added, err = store.BulkAddTrackedItems(items)
+	if err != nil {
+		t.Fatalf("BulkAddTrackedItems dupes: %v", err)
+	}
+	if added != 0 {
+		t.Errorf("expected 0 added for dupes, got %d", added)
+	}
+
+	// Verify count.
+	got, _ := store.GetTrackedItems(p.ID)
+	if len(got) != 5 {
+		t.Errorf("expected 5 items, got %d", len(got))
+	}
+}
+
+func TestBulkAddTrackedItemsCap(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "bulkcap", MinderIdentity: "bulkcap/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	// Add 18 items individually.
+	for i := 1; i <= 18; i++ {
+		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+	}
+
+	// Bulk add 5 more — only 2 should fit (cap 20).
+	items := make([]*TrackedItem, 5)
+	for i := range items {
+		items[i] = &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 100 + i, LastStatus: "Open"}
+	}
+	added, err := store.BulkAddTrackedItems(items)
+	if err != nil {
+		t.Fatalf("BulkAddTrackedItems: %v", err)
+	}
+	if added != 2 {
+		t.Errorf("expected 2 added (cap enforcement), got %d", added)
+	}
+
+	got, _ := store.GetTrackedItems(p.ID)
+	if len(got) != 20 {
+		t.Errorf("expected 20 items total, got %d", len(got))
+	}
+}
+
+func TestClearTrackedItems(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "cleartest", MinderIdentity: "cleartest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	store.CreateProject(p)
+
+	for i := 1; i <= 5; i++ {
+		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+	}
+
+	if err := store.ClearTrackedItems(p.ID); err != nil {
+		t.Fatalf("ClearTrackedItems: %v", err)
+	}
+
+	got, _ := store.GetTrackedItems(p.ID)
+	if len(got) != 0 {
+		t.Errorf("expected 0 items after clear, got %d", len(got))
 	}
 }
 

@@ -121,6 +121,10 @@ type Model struct {
 	trackStatus string
 	trackError  bool
 
+	// Filter mode (bulk add tracked items).
+	filterState  *filterState
+	filterStatus string
+
 	// Auto-pause on idle.
 	lastUserInput time.Time
 	autoPaused    bool
@@ -234,6 +238,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateOnboard(msg)
 		case "track", "untrack":
 			return m.updateTrack(msg)
+		case "filter":
+			return m.updateFilter(msg)
 		default:
 			return m.updateNormal(msg)
 		}
@@ -339,6 +345,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
+	case filterSearchResultMsg:
+		if m.filterState != nil {
+			if msg.err != nil {
+				m.filterState.err = msg.err
+				m.filterState.step = filterStepPreview
+			} else {
+				m.filterState.results = msg.results
+				m.filterState.step = filterStepPreview
+			}
+		}
+		return m, nil
+
+	case bulkAddResultMsg:
+		if msg.err != nil {
+			m.filterStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.filterStatus = fmt.Sprintf("Added %d items", msg.added)
+			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		}
+		m.filterState = nil
+		m.mode = "normal"
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearFilterStatusMsg{}
+		})
+
+	case clearFilterStatusMsg:
+		m.filterStatus = ""
+		return m, nil
+
 	case idleCheckMsg:
 		threshold := m.project.IdlePauseDuration()
 		if threshold > 0 && !m.autoPaused && !m.poller.IsPaused() && time.Since(m.lastUserInput) >= threshold {
@@ -363,6 +398,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 type clearBroadcastStatusMsg struct{}
 type clearOnboardStatusMsg struct{}
+type clearFilterStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -402,6 +438,19 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.trackRows[0].input.Focus()
 		m.resizeViewports()
 		return m, cmd
+	case "f":
+		repos := m.poller.GitHubRepos()
+		if len(repos) == 0 {
+			m.trackStatus = "No GitHub repos enrolled"
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearTrackStatusMsg{}
+			})
+		}
+		hasExisting := len(m.trackedItems) > 0
+		m.filterState = newFilterState(repos, hasExisting)
+		m.filterStatus = ""
+		m.mode = "filter"
+		return m, nil
 	case "I":
 		if len(m.trackedItems) == 0 {
 			m.trackStatus = "Nothing tracked"
