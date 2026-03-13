@@ -98,6 +98,27 @@ go test ./internal/msgbus/... -v        # Client + publisher tests (9 tests)
 go test -tags integration -run TestIntegrationTwoTierPipeline -v ./internal/poller/ -timeout 90s
 ```
 
+## Debug logging
+
+Structured JSON logging via `log/slog` to `~/.agent-minder/debug.log`, enabled with `MINDER_DEBUG=1`.
+
+- Package-level `debugLogger *slog.Logger` with `slog.NewJSONHandler`; `debugLog(msg, attrs...)` is the logging function
+- Every log line has structured attrs: `stage` (gather/tier1/tier2/sweep/broadcast/onboard/publish/reconcile), `step` (start/input/output/skip/error/complete), `component` (git_summarizer/bus_summarizer/analyzer/sweep_haiku/pr_status), `model`, `item`
+- Long content in `system_prompt`, `user_prompt`, `response` fields
+
+### Viewing logs
+
+```bash
+# Quick watch
+tail -f ~/.agent-minder/debug.log | jq '{time, level, msg, stage, step, component}'
+
+# With lnav (color-coded by pipeline stage)
+lnav -i lnav/agent-minder.json   # one-time install
+lnav ~/.agent-minder/debug.log
+```
+
+The `lnav/agent-minder.json` format file ships with the repo. It color-codes stages and hides prompt/response fields (expand with `p` in lnav).
+
 ## Key patterns
 
 - `Poller.doPoll()` is the main loop body — gathers git + bus data, runs both LLM tiers, publishes, records

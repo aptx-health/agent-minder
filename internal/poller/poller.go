@@ -8,7 +8,7 @@ package poller
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,15 +28,15 @@ func debugEnabled() bool {
 	return os.Getenv("MINDER_DEBUG") != ""
 }
 
-// debugLog is a file-backed logger for LLM prompt/response tracing.
+// debugLogger is a structured JSON logger for LLM prompt/response tracing.
 // Nil when MINDER_DEBUG is not set.
-var debugLog *log.Logger
+var debugLogger *slog.Logger
 var debugLogFile *os.File
 
-// initDebugLog sets up file-based debug logging to ~/.agent-minder/debug.log.
+// initDebugLog sets up structured JSON logging to ~/.agent-minder/debug.log.
 // Safe to call multiple times; only initializes once.
 func initDebugLog() {
-	if debugLog != nil || !debugEnabled() {
+	if debugLogger != nil || !debugEnabled() {
 		return
 	}
 	home, err := os.UserHomeDir()
@@ -49,7 +49,7 @@ func initDebugLog() {
 		return
 	}
 	debugLogFile = f
-	debugLog = log.New(f, "", log.LstdFlags)
+	debugLogger = slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // closeDebugLog closes the debug log file.
@@ -59,12 +59,13 @@ func closeDebugLog() {
 	}
 }
 
-// debugf writes a formatted message to the debug log file.
-func debugf(format string, args ...interface{}) {
-	if debugLog == nil {
+// debugLog logs a structured message to the debug log file.
+// Does nothing when MINDER_DEBUG is not set.
+func debugLog(msg string, attrs ...any) {
+	if debugLogger == nil {
 		return
 	}
-	debugLog.Printf(format, args...)
+	debugLogger.Info(msg, attrs...)
 }
 
 // relativeAge returns a human-readable duration string (e.g., "5m", "2h") from
@@ -268,6 +269,7 @@ Keep messages actionable and concise. Use the project's coordination topic.`
 
 	prompt := fmt.Sprintf("## Project Context\n%s\n\n## User Request\n%s", contextBuf.String(), userPrompt)
 
+	debugLog("llm call", "stage", "broadcast", "step", "input", "component", "analyzer", "model", model, "system_prompt", system, "user_prompt", prompt)
 	resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     model,
 		System:    system,
@@ -275,8 +277,10 @@ Keep messages actionable and concise. Use the project's coordination topic.`
 		MaxTokens: 512,
 	})
 	if err != nil {
+		debugLog("llm error", "stage", "broadcast", "step", "error", "component", "analyzer", "error", err.Error())
 		return nil, fmt.Errorf("LLM broadcast call: %w", err)
 	}
+	debugLog("llm response", "stage", "broadcast", "step", "output", "component", "analyzer", "response", resp.Content)
 
 	parsed := parseAnalysis(resp.Content)
 	if parsed.BusMessage != nil {
@@ -390,6 +394,7 @@ Respond with ONLY a JSON object:
 		prompt = fmt.Sprintf("## Project Context\n%s\n\nGenerate a general onboarding message for any new agent joining this project.", contextBuf.String())
 	}
 
+	debugLog("llm call", "stage", "onboard", "step", "input", "component", "analyzer", "model", model, "system_prompt", system, "user_prompt", prompt)
 	resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     model,
 		System:    system,
@@ -397,8 +402,10 @@ Respond with ONLY a JSON object:
 		MaxTokens: 1024,
 	})
 	if err != nil {
+		debugLog("llm error", "stage", "onboard", "step", "error", "component", "analyzer", "error", err.Error())
 		return nil, fmt.Errorf("LLM onboard call: %w", err)
 	}
+	debugLog("llm response", "stage", "onboard", "step", "output", "component", "analyzer", "response", resp.Content)
 
 	parsed := parseAnalysis(resp.Content)
 	if parsed.BusMessage != nil {
@@ -475,6 +482,7 @@ func (p *Poller) run(ctx context.Context) {
 func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	start := time.Now()
 	result := &PollResult{}
+	debugLog("poll start", "stage", "gather", "step", "start", "project", p.project.Name)
 
 	repos, err := p.store.GetRepos(p.project.ID)
 	if err != nil {
@@ -611,6 +619,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		}
 	}
 
+	debugLog("gather complete", "stage", "gather", "step", "complete", "component", "git", "commits", result.NewCommits, "worktrees", result.NewWorktrees)
+
 	// Gather message bus activity.
 	var msgSummary strings.Builder
 	dbPath := msgbus.DefaultDBPath()
@@ -634,6 +644,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			}
 		}
 	}
+
+	debugLog("gather complete", "stage", "gather", "step", "complete", "component", "bus", "messages", result.NewMessages)
 
 	// Sweep tracked items: fetch metadata + content, hash check, Haiku summarize.
 	trackedItems, err := p.store.GetTrackedItems(p.project.ID)
@@ -661,6 +673,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			}
 		}
 	}
+	debugLog("sweep complete", "stage", "sweep", "step", "complete", "items", len(sweepResults))
+
 	// Check if any tracked items had content updates (Haiku ran).
 	sweepHadUpdates := false
 	for _, sr := range sweepResults {
@@ -678,6 +692,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !sweepHadUpdates && prStatusSection == "" {
 		result.Duration = time.Since(start)
 		result.Tier1Summary = "No new activity."
+		debugLog("poll skip", "stage", "gather", "step", "skip", "project", p.project.Name)
 		return result, nil
 	}
 
@@ -700,7 +715,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		go func() {
 			defer tier1WG.Done()
 			prompt := buildGitSummaryPrompt(p.project, repos, gitSummary.String())
-			debugf("=== GIT SUMMARIZER INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", gitSummarizerSystemPrompt(), prompt)
+			debugLog("llm call", "stage", "tier1", "step", "input", "component", "git_summarizer", "model", tier1Model, "system_prompt", gitSummarizerSystemPrompt(), "user_prompt", prompt)
 			resp, err := p.provider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
 				System:    gitSummarizerSystemPrompt(),
@@ -709,10 +724,11 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			})
 			if err != nil {
 				gitErr = err
+				debugLog("llm error", "stage", "tier1", "step", "error", "component", "git_summarizer", "error", err.Error())
 				return
 			}
 			gitTier1 = resp.Content
-			debugf("=== GIT SUMMARIZER OUTPUT ===\n%s\n", resp.Content)
+			debugLog("llm response", "stage", "tier1", "step", "output", "component", "git_summarizer", "response", resp.Content)
 		}()
 	}
 
@@ -722,7 +738,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		go func() {
 			defer tier1WG.Done()
 			prompt := buildBusSummaryPrompt(p.project, msgSummary.String())
-			debugf("=== BUS SUMMARIZER INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", busSummarizerSystemPrompt(), prompt)
+			debugLog("llm call", "stage", "tier1", "step", "input", "component", "bus_summarizer", "model", tier1Model, "system_prompt", busSummarizerSystemPrompt(), "user_prompt", prompt)
 			resp, err := p.provider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
 				System:    busSummarizerSystemPrompt(),
@@ -731,10 +747,11 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			})
 			if err != nil {
 				busErr = err
+				debugLog("llm error", "stage", "tier1", "step", "error", "component", "bus_summarizer", "error", err.Error())
 				return
 			}
 			busTier1 = resp.Content
-			debugf("=== BUS SUMMARIZER OUTPUT ===\n%s\n", resp.Content)
+			debugLog("llm response", "stage", "tier1", "step", "output", "component", "bus_summarizer", "response", resp.Content)
 		}()
 	}
 
@@ -767,7 +784,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, prStatusSection, concerns, trackedItems)
-	debugf("=== TIER 2 INPUT ===\nSYSTEM:\n%s\n\nPROMPT:\n%s\n", tier2SystemPrompt(p.project.Name), tier2Prompt)
+	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model, "system_prompt", tier2SystemPrompt(p.project.Name), "user_prompt", tier2Prompt)
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     tier2Model,
@@ -776,13 +793,14 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		MaxTokens: 1024,
 	})
 	if err != nil {
+		debugLog("llm error", "stage", "tier2", "step", "error", "component", "analyzer", "error", err.Error())
 		result.Duration = time.Since(start)
 		// Tier 2 failed but tier 1 succeeded — still usable.
 		p.recordPollResult(result)
 		return result, nil
 	}
 
-	debugf("=== TIER 2 OUTPUT ===\n%s\n", tier2Resp.Content)
+	debugLog("llm response", "stage", "tier2", "step", "output", "component", "analyzer", "response", tier2Resp.Content)
 
 	// Parse tier 2 structured response.
 	analysis := parseAnalysis(tier2Resp.Content)
@@ -794,13 +812,16 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		msg := analysis.BusMessage.Message
 		if err := p.publisher.Publish(topic, p.project.MinderIdentity, msg); err == nil {
 			result.BusMessageSent = fmt.Sprintf("[%s] %s", topic, msg)
+			debugLog("bus publish", "stage", "publish", "step", "complete", "topic", topic)
 		}
 	}
 
 	// Reconcile concerns: the analyzer returns the full desired list.
 	result.Concerns = reconcileConcerns(p.store, p.project.ID, concerns, analysis.Concerns)
+	debugLog("concerns reconciled", "stage", "reconcile", "step", "complete", "active", len(result.Concerns), "previous", len(concerns))
 
 	result.Duration = time.Since(start)
+	debugLog("poll complete", "stage", "gather", "step", "complete", "project", p.project.Name, "duration_ms", result.Duration.Milliseconds(), "commits", result.NewCommits, "messages", result.NewMessages)
 	p.recordPollResult(result)
 	return result, nil
 }
@@ -828,17 +849,17 @@ type repoWorktreeBranches struct {
 // gatherWorktreePRStatus checks each non-main worktree branch for an open GitHub PR.
 // Returns a formatted section for the tier 2 prompt, or "" if no token or no branches.
 func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWorktreeBranches) string {
-	debugf("=== WORKTREE PR STATUS ===")
+	debugLog("pr status start", "stage", "gather", "step", "start", "component", "pr_status")
 	if len(branchData) == 0 {
-		debugf("  no worktree branch data to check")
+		debugLog("pr status skip", "stage", "gather", "step", "skip", "component", "pr_status", "reason", "no branch data")
 		return ""
 	}
 	token := config.GetIntegrationToken("github")
 	if token == "" {
-		debugf("  no GitHub token configured, skipping PR status")
+		debugLog("pr status skip", "stage", "gather", "step", "skip", "component", "pr_status", "reason", "no github token")
 		return ""
 	}
-	debugf("  checking %d repo(s) for worktree PRs", len(branchData))
+	debugLog("pr status checking", "stage", "gather", "step", "input", "component", "pr_status", "repos", len(branchData))
 	gh := ghpkg.NewClient(token)
 
 	var b strings.Builder
@@ -846,23 +867,23 @@ func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWo
 	found := false
 
 	for _, rd := range branchData {
-		debugf("  repo: %s/%s, branches: %v", rd.owner, rd.repo, rd.branches)
+		debugLog("pr status repo", "stage", "gather", "component", "pr_status", "repo", fmt.Sprintf("%s/%s", rd.owner, rd.repo), "branches", strings.Join(rd.branches, ","))
 		for _, branch := range rd.branches {
 			pr, err := gh.FetchPRForBranch(ctx, rd.owner, rd.repo, branch)
 			if err != nil {
-				debugf("  branch %q: ERROR: %v", branch, err)
+				debugLog("pr status error", "stage", "gather", "step", "error", "component", "pr_status", "branch", branch, "error", err.Error())
 				p.emit("error", fmt.Sprintf("PR lookup for %s/%s branch %q: %v", rd.owner, rd.repo, branch, err), nil)
 				fmt.Fprintf(&b, "\n- %s: error checking PR", branch)
 				found = true
 				continue
 			}
 			if pr == nil {
-				debugf("  branch %q: no PR found", branch)
+				debugLog("pr status none", "stage", "gather", "component", "pr_status", "branch", branch, "result", "no PR")
 				fmt.Fprintf(&b, "\n- %s: no PR", branch)
 				found = true
 				continue
 			}
-			debugf("  branch %q: PR #%d %q (state=%s, draft=%v, review=%s)", branch, pr.Number, pr.Title, pr.State, pr.Draft, pr.ReviewState)
+			debugLog("pr status found", "stage", "gather", "step", "output", "component", "pr_status", "branch", branch, "pr_number", pr.Number, "title", pr.Title, "state", pr.State, "draft", pr.Draft, "review", pr.ReviewState)
 			parts := []string{pr.State}
 			if pr.Draft {
 				parts = append(parts, "draft")
@@ -876,10 +897,10 @@ func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWo
 	}
 
 	if !found {
-		debugf("  no branches found (unexpected)")
+		debugLog("pr status empty", "stage", "gather", "step", "complete", "component", "pr_status", "result", "no branches found")
 		return ""
 	}
-	debugf("=== PR STATUS RESULT ===\n%s", b.String())
+	debugLog("pr status complete", "stage", "gather", "step", "complete", "component", "pr_status", "result", b.String())
 	return b.String()
 }
 
