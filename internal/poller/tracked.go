@@ -12,20 +12,44 @@ import (
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 )
 
+// GitHubRepo holds a deduplicated owner/repo pair from enrolled repos.
+type GitHubRepo struct {
+	Owner string
+	Repo  string
+}
+
+// GitHubRepos returns deduplicated GitHub owner/repo pairs from enrolled repos.
+func (p *Poller) GitHubRepos() []GitHubRepo {
+	repos, err := p.store.GetRepos(p.project.ID)
+	if err != nil || len(repos) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var result []GitHubRepo
+	for _, r := range repos {
+		remote := gitpkg.RemoteURL(r.Path)
+		o, rp := parseGitHubRemote(remote)
+		if o == "" {
+			continue
+		}
+		key := o + "/" + rp
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, GitHubRepo{Owner: o, Repo: rp})
+	}
+	return result
+}
+
 // DefaultOwnerRepo derives a default owner/repo from the project's enrolled repos.
 // It looks for GitHub remote URLs and returns the first match.
 func (p *Poller) DefaultOwnerRepo() (owner, repo string) {
-	repos, err := p.store.GetRepos(p.project.ID)
-	if err != nil || len(repos) == 0 {
+	ghRepos := p.GitHubRepos()
+	if len(ghRepos) == 0 {
 		return "", ""
 	}
-	for _, r := range repos {
-		remote := gitpkg.RemoteURL(r.Path)
-		if o, rp := parseGitHubRemote(remote); o != "" {
-			return o, rp
-		}
-	}
-	return "", ""
+	return ghRepos[0].Owner, ghRepos[0].Repo
 }
 
 // parseGitHubRemote extracts owner/repo from a GitHub remote URL.
