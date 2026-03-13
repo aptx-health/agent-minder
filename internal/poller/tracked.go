@@ -122,6 +122,24 @@ func (p *Poller) ClearAndBulkAddTrackedItems(ctx context.Context, items []ghpkg.
 	return p.BulkAddTrackedItems(ctx, items, owner, repo)
 }
 
+// UpdateTrackedItems removes terminal (closed/merged/not-planned) items and adds new ones.
+// Returns (added, removed, error).
+func (p *Poller) UpdateTrackedItems(ctx context.Context, items []ghpkg.ItemStatus, owner, repo string) (int, int, error) {
+	removed, err := p.store.RemoveTerminalTrackedItems(p.project.ID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("remove terminal items: %w", err)
+	}
+	if removed > 0 {
+		p.emit("tracked", fmt.Sprintf("Removed %d closed/merged items", removed), nil)
+	}
+
+	added, err := p.BulkAddTrackedItems(ctx, items, owner, repo)
+	if err != nil {
+		return 0, removed, err
+	}
+	return added, removed, nil
+}
+
 // DefaultOwnerRepo derives a default owner/repo from the project's enrolled repos.
 // It looks for GitHub remote URLs and returns the first match.
 func (p *Poller) DefaultOwnerRepo() (owner, repo string) {
