@@ -387,8 +387,11 @@ func (m *Model) rebuildAnalysisContent() {
 		return
 	}
 	var b strings.Builder
-	b.WriteString(mutedStyle().Render(fmt.Sprintf("  %d commits, %d messages",
-		m.lastPoll.NewCommits, m.lastPoll.NewMessages)))
+	statusParts := fmt.Sprintf("  %d commits, %d messages", m.lastPoll.NewCommits, m.lastPoll.NewMessages)
+	if m.lastPoll.NewWorktrees > 0 {
+		statusParts += fmt.Sprintf(", %d new worktrees", m.lastPoll.NewWorktrees)
+	}
+	b.WriteString(mutedStyle().Render(statusParts))
 	b.WriteString("\n")
 	if m.lastPoll.BusMessageSent != "" {
 		b.WriteString(broadcastStyle().Render(fmt.Sprintf("  >> Bus: %s", m.lastPoll.BusMessageSent)))

@@ -112,6 +112,7 @@ type TrackedItemChange struct {
 type PollResult struct {
 	NewCommits          int
 	NewMessages         int
+	NewWorktrees        int
 	TrackedItemChanges  []TrackedItemChange
 	Tier1Summary        string
 	Tier2Analysis       string
@@ -480,8 +481,15 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	// Gather git activity and sync worktrees.
+	// Use last poll time as the lookback boundary so commits aren't double-counted.
+	// Fall back to 2x refresh interval on first poll (no prior poll exists).
 	var gitSummary strings.Builder
-	since := time.Now().Add(-p.project.RefreshInterval() * 2) // Look back 2 intervals.
+	since := time.Now().Add(-p.project.RefreshInterval() * 2)
+	if lastPoll, err := p.store.LastPoll(p.project.ID); err == nil && lastPoll != nil {
+		if t, err := time.Parse("2006-01-02 15:04:05", lastPoll.PolledAt); err == nil {
+			since = t
+		}
+	}
 	for _, repo := range repos {
 		entries, err := gitpkg.LogSince(repo.Path, since)
 		if err != nil || len(entries) == 0 {
@@ -495,6 +503,9 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	// Sync worktrees for each repo and include active branches in git summary.
+	// Track newly-added worktree paths so we can skip their commits below —
+	// a new worktree appearing is mechanical, not new activity (#39).
+	newWorktreePaths := make(map[string]bool)
 	for _, repo := range repos {
 		wtEntries, err := gitpkg.Worktrees(repo.Path)
 		if err != nil {
@@ -534,15 +545,34 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			if err := p.store.ReplaceWorktrees(repo.ID, dbWorktrees); err == nil {
 				for _, branch := range added {
 					p.emit("worktree", fmt.Sprintf("New worktree: %s/%s", repo.ShortName, branch), nil)
+					result.NewWorktrees++
 				}
 				for _, branch := range removed {
 					p.emit("worktree", fmt.Sprintf("Removed worktree: %s/%s", repo.ShortName, branch), nil)
 				}
 			}
+			// Record newly-added worktree paths so we skip their commits.
+			addedSet := make(map[string]bool, len(added))
+			for _, b := range added {
+				addedSet[b] = true
+			}
+			for _, wt := range dbWorktrees {
+				branch := wt.Branch
+				if branch == "" {
+					branch = "(detached)"
+				}
+				if addedSet[branch] {
+					newWorktreePaths[wt.Path] = true
+				}
+			}
 		}
 		// Gather commits from non-main worktrees (main repo path already covered above).
+		// Skip newly-added worktrees — their existing commits aren't new activity (#39).
 		for _, wt := range wtEntries {
 			if wt.IsMain || wt.Path == repo.Path {
+				continue
+			}
+			if newWorktreePaths[wt.Path] {
 				continue
 			}
 			entries, err := gitpkg.LogSince(wt.Path, since)
@@ -916,6 +946,9 @@ func (p *Poller) summarize(result *PollResult) string {
 	}
 	if result.NewMessages > 0 {
 		parts = append(parts, fmt.Sprintf("%d new messages", result.NewMessages))
+	}
+	if result.NewWorktrees > 0 {
+		parts = append(parts, fmt.Sprintf("%d new worktrees", result.NewWorktrees))
 	}
 	if len(result.TrackedItemChanges) > 0 {
 		parts = append(parts, fmt.Sprintf("%d tracked item changes", len(result.TrackedItemChanges)))
