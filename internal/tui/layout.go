@@ -453,7 +453,7 @@ func (m Model) bottomBarHeight() int {
 		}
 		return 7 // blank + header + textarea(3) + help + empty
 	case "track", "untrack":
-		if m.trackStatus != "" {
+		if m.trackStatus != "" || m.trackError {
 			return 3 // blank + status + empty
 		}
 		return len(m.trackRows) + 3 // blank + header + rows + help
@@ -522,13 +522,13 @@ func (m Model) renderBottomBar() string {
 		}
 		b.WriteString("\n")
 	case "track", "untrack":
-		if m.trackStatus != "" && !strings.HasPrefix(m.trackStatus, "Error:") {
+		if m.trackStatus != "" && !m.trackError {
 			b.WriteString("  ")
 			b.WriteString(m.spinner.View())
 			b.WriteString(" ")
 			b.WriteString(mutedStyle().Render(m.trackStatus))
 			b.WriteString("\n\n")
-		} else if strings.HasPrefix(m.trackStatus, "Error:") {
+		} else if m.trackError {
 			b.WriteString(errorStyle().Render(fmt.Sprintf("  %s", m.trackStatus)))
 			b.WriteString("\n\n")
 		} else {

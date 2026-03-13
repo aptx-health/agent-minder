@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 // ItemRef holds the parsed components of a GitHub item reference.
@@ -70,9 +69,7 @@ func ParseItemRef(input, defaultOwner, defaultRepo string) (*ItemRef, error) {
 // ParseNumbers splits a space-separated string of issue numbers into ints.
 // Each token may optionally have a '#' prefix. Returns error on invalid input.
 func ParseNumbers(input string) ([]int, error) {
-	fields := strings.FieldsFunc(input, func(r rune) bool {
-		return unicode.IsSpace(r)
-	})
+	fields := strings.Fields(input)
 	if len(fields) == 0 {
 		return nil, nil
 	}

@@ -119,6 +119,7 @@ type Model struct {
 	trackRows   []trackFormRow
 	trackFocus  int
 	trackStatus string
+	trackError  bool
 
 	// Auto-pause on idle.
 	lastUserInput time.Time
@@ -309,6 +310,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bulkTrackResultMsg:
 		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
 		if msg.failed > 0 {
+			m.trackError = true
 			m.trackStatus = fmt.Sprintf("Tracked %d, %d failed: %s", msg.added, msg.failed, strings.Join(msg.errors, "; "))
 		} else {
 			m.trackStatus = fmt.Sprintf("Tracked %d items", msg.added)
@@ -320,6 +322,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bulkUntrackResultMsg:
 		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
 		if msg.failed > 0 {
+			m.trackError = true
 			m.trackStatus = fmt.Sprintf("Untracked %d, %d failed: %s", msg.removed, msg.failed, strings.Join(msg.errors, "; "))
 		} else {
 			m.trackStatus = fmt.Sprintf("Untracked %d items", msg.removed)
@@ -330,6 +333,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearTrackStatusMsg:
 		m.trackStatus = ""
+		m.trackError = false
 		m.trackRows = nil
 		m.mode = "normal"
 		m.resizeViewports()
@@ -392,6 +396,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = "track"
 		m.trackStatus = ""
+		m.trackError = false
 		m.trackRows = buildTrackRows(ghRepos, nil)
 		m.trackFocus = 0
 		cmd := m.trackRows[0].input.Focus()
@@ -413,6 +418,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.mode = "untrack"
 		m.trackStatus = ""
+		m.trackError = false
 		m.trackRows = buildTrackRows(ghRepos, m.trackedItems)
 		m.trackFocus = 0
 		cmd := m.trackRows[0].input.Focus()
@@ -571,7 +577,7 @@ func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.trackRows = nil
 		m.resizeViewports()
 		return m, nil
-	case "up":
+	case "up", "shift+tab":
 		if m.trackFocus > 0 {
 			m.trackRows[m.trackFocus].input.Blur()
 			m.trackFocus--
@@ -632,6 +638,21 @@ func buildTrackRows(ghRepos []poller.GitHubRepo, items []db.TrackedItem) []track
 	return rows
 }
 
+// dedupeRefs removes duplicate ItemRefs by owner/repo/number.
+func dedupeRefs(refs []*ghpkg.ItemRef) []*ghpkg.ItemRef {
+	seen := make(map[string]bool, len(refs))
+	out := make([]*ghpkg.ItemRef, 0, len(refs))
+	for _, r := range refs {
+		key := fmt.Sprintf("%s/%s#%d", r.Owner, r.Repo, r.Number)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, r)
+	}
+	return out
+}
+
 // submitTrackForm collects input from all rows and fires the async bulk command.
 func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 	for i := range m.trackRows {
@@ -647,6 +668,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 		for _, row := range m.trackRows {
 			nums, err := ghpkg.ParseNumbers(row.input.Value())
 			if err != nil {
+				m.trackError = true
 				m.trackStatus = fmt.Sprintf("Error in %s: %v", row.ownerRepo, err)
 				return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 					return clearTrackStatusMsg{}
@@ -656,6 +678,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 				refs = append(refs, &ghpkg.ItemRef{Owner: row.owner, Repo: row.repo, Number: n})
 			}
 		}
+		refs = dedupeRefs(refs)
 		if len(refs) == 0 {
 			m.mode = "normal"
 			m.trackRows = nil
@@ -663,7 +686,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.trackStatus = fmt.Sprintf("Tracking %d items...", len(refs))
-		return m, func() tea.Msg {
+		asyncCmd := func() tea.Msg {
 			var added, failed int
 			var errs []string
 			for _, ref := range refs {
@@ -677,6 +700,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 			}
 			return bulkTrackResultMsg{added: added, failed: failed, errors: errs}
 		}
+		return m, tea.Batch(m.spinner.Tick, asyncCmd)
 	}
 
 	// Untrack mode: diff original vs current to find removed numbers.
@@ -685,6 +709,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 		origNums, _ := ghpkg.ParseNumbers(row.original)
 		curNums, err := ghpkg.ParseNumbers(row.input.Value())
 		if err != nil {
+			m.trackError = true
 			m.trackStatus = fmt.Sprintf("Error in %s: %v", row.ownerRepo, err)
 			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 				return clearTrackStatusMsg{}
@@ -700,6 +725,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	refs = dedupeRefs(refs)
 	if len(refs) == 0 {
 		m.mode = "normal"
 		m.trackRows = nil
@@ -707,7 +733,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.trackStatus = fmt.Sprintf("Untracking %d items...", len(refs))
-	return m, func() tea.Msg {
+	asyncCmd := func() tea.Msg {
 		var removed, failed int
 		var errs []string
 		for _, ref := range refs {
@@ -721,6 +747,7 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 		}
 		return bulkUntrackResultMsg{removed: removed, failed: failed, errors: errs}
 	}
+	return m, tea.Batch(m.spinner.Tick, asyncCmd)
 }
 
 // listenForEvents returns a command that waits for the next poller event.
