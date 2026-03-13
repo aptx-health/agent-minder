@@ -1,6 +1,6 @@
 # agent-minder
 
-A Go CLI tool that coordinates AI agents working across multiple repositories. It monitors git activity, watches the [agent-msg](https://github.com/dustinlange/agent-msg) message bus, and uses a two-tier LLM pipeline to analyze changes and keep agents informed.
+A Go CLI tool that coordinates AI agents working across multiple repositories. It monitors git activity, watches the [agent-msg](https://github.com/dustinlange/agent-msg) message bus, tracks GitHub issues/PRs, and uses a two-tier LLM pipeline to analyze changes and keep agents informed.
 
 Built as a coordination layer on top of agent-msg's simple bash scripts + SQLite foundation.
 
@@ -15,7 +15,8 @@ Launches a TUI dashboard that:
 1. **Polls** git repos and the agent-msg bus on a configurable interval
 2. **Tier 1 (Haiku)** — Cheap/fast summarizer. Digests raw git commits + bus messages into a terse summary
 3. **Tier 2 (Sonnet)** — Rich analyzer. Produces structured JSON with actionable insights, flags concerns, and optionally publishes messages back to the bus when coordination is needed
-4. **Displays** everything in a real-time terminal dashboard with event log, active concerns, and poll results
+4. **Sweeps** tracked GitHub issues/PRs for status changes, runs per-item Haiku summaries on changed items
+5. **Displays** everything in a real-time terminal dashboard with event log, active concerns, tracked items, and poll results
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -31,6 +32,11 @@ Launches a TUI dashboard that:
 │   myproject/infra                                       │
 │   myproject/coord                                       │
 │                                                         │
+│ Tracked Items (3)                                       │
+│   #42 [Open]  Add auth middleware          repo/app     │
+│   #18 [Mrgd]  Fix DB connection pool       repo/infra  │
+│   #7  [Revw]  Update API docs              repo/app    │
+│                                                         │
 │ Active Concerns (2)                                     │
 │   [WARN] Schema changed in app but infra queries ...    │
 │   [INFO] feature/auth branch stale for 3 days           │
@@ -43,8 +49,9 @@ Launches a TUI dashboard that:
 │   [14:32:05] poll: 3 new commits, 1 new message         │
 │   [14:27:01] poll: No new activity                      │
 │                                                         │
-│ p: pause/resume • r: poll now • e: expand/collapse •    │
-│ m: broadcast • t: theme • q: quit                       │
+│ ?: help • p: pause • r: poll • e: expand • i: items •   │
+│ f: filter • m: broadcast • u: user msg • o: onboard •   │
+│ t: theme • q: quit                                      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -58,6 +65,7 @@ Requires:
 - Go 1.25+
 - [agent-msg](https://github.com/dustinlange/agent-msg) installed (provides the shared SQLite message bus)
 - `ANTHROPIC_API_KEY` environment variable set
+- `GITHUB_TOKEN` environment variable for tracked items (issue/PR status fetching)
 
 ## Commands
 
@@ -68,7 +76,7 @@ Interactive wizard that bootstraps a new project:
 - Derives a project name from directory names
 - Selects a goal type (feature, bugfix, infrastructure, maintenance, standby)
 - Suggests message bus topics (`<project>/app`, `<project>/coord`, etc.)
-- Configures poll interval and writes everything to SQLite
+- Configures poll interval, LLM models, and writes everything to SQLite
 
 ### `agent-minder start <project>` / `resume <project>`
 
@@ -76,10 +84,18 @@ Launches the TUI dashboard + polling loop. Key bindings:
 
 | Key | Action |
 |-----|--------|
+| `?` | Show help overlay |
 | `p` | Pause/resume polling |
 | `r` | Trigger immediate poll |
 | `e` | Expand/collapse poll result |
+| `i` | Toggle tracked items panel |
+| `I` | Bulk track — add issues/PRs across repos |
+| `w` | Bulk untrack — remove tracked items |
+| `d` | Cleanup — remove terminal (merged/closed) items |
+| `f` | Filter events by keyword |
+| `u` | User message — post a raw message to a topic |
 | `m` | Broadcast mode — type a message for the LLM to craft and publish to the bus |
+| `o` | Onboard mode — generate an onboarding message for new agents |
 | `t` | Cycle theme (dark/light) |
 | `q` | Quit |
 
@@ -87,9 +103,29 @@ Launches the TUI dashboard + polling loop. Key bindings:
 
 Quick CLI summary from SQLite — no LLM call. Shows repos, concerns, and last poll result.
 
+### `agent-minder list`
+
+List all configured projects.
+
 ### `agent-minder enroll <project> <repo-dir>`
 
 Add a repo to an existing project.
+
+### `agent-minder track <project> <owner/repo> <number> [number ...]`
+
+Track GitHub issues or PRs. The sweep pipeline will monitor their status each poll cycle.
+
+### `agent-minder untrack <project> <owner/repo> <number> [number ...]`
+
+Stop tracking GitHub issues or PRs.
+
+### `agent-minder setup <project>`
+
+Re-run project configuration (goal, poll interval, LLM models, etc.).
+
+### `agent-minder delete <project>`
+
+Delete a project and all its associated data.
 
 ## Architecture
 
@@ -98,31 +134,50 @@ Add a repo to an existing project.
 Each poll cycle with new activity runs two LLM calls:
 
 - **Tier 1 (Haiku)** — Summarizes raw data (git commits, bus messages) into a concise factual summary. MaxTokens: 512.
-- **Tier 2 (Sonnet)** — Analyzes the summary + active concerns + project context. Returns structured JSON with an analysis, optional concerns, and an optional bus message. MaxTokens: 1024.
+- **Tier 2 (Sonnet)** — Analyzes the summary + active concerns + tracked items + project context. Returns structured JSON with an analysis, optional concerns, and an optional bus message. MaxTokens: 1024.
 
 The tier 2 response is parsed for:
 - **Analysis** — Displayed in the TUI
-- **Concerns** — Inserted into SQLite (deduplicated against existing active concerns via keyword overlap)
+- **Concerns** — Managed via `reconcileConcerns()`: each cycle returns the full desired list, diffs against existing (adds new, resolves dropped, updates severity). Severities: `info`, `warning`, `danger`.
 - **Bus message** — Published to agent-msg if the analyzer determines coordination is needed
 
-### Bus publishing
+### GitHub item sweep
 
-The minder reads from and writes to the agent-msg SQLite database directly. When tier 2 decides a bus message is warranted (e.g., breaking changes detected, coordination needed), it publishes via `INSERT INTO messages`. Other agents see these messages through the normal agent-msg tools.
+Tracked items (issues/PRs) are swept each poll cycle:
+- Fetches current status from GitHub API (`go-github` client)
+- Detects state changes (open → closed, draft → ready, review state changes)
+- Runs a per-item **Haiku** call to generate a progress summary when status changes
+- Archives completed items (merged/closed with a summary) to `completed_items` table
+- Status tags in TUI: Open, Closd, Mrgd, Draft, Revw, Blkd
+
+### Bus integration
+
+The minder reads from and writes to the agent-msg SQLite database directly:
+- **`Client`** — Read-only connection (`?mode=ro`) for polling messages
+- **`Publisher`** — Read-write connection for publishing; supports `PublishReplace()` for single-message topics (e.g., onboarding)
+- Both use `sqliteutil.OpenWithRecovery()` to auto-detect and recover from stale WAL/SHM files
+- agent-msg's bash scripts (`agent-pub`, `agent-check`, `agent-ack`) remain fully compatible
 
 ### Broadcast mode
 
 Press `m` in the TUI to enter broadcast mode. Type a prompt describing what you want to communicate, and the tier 2 model crafts a context-aware message using current project state, then publishes it to the coordination topic.
 
+### Onboard mode
+
+Press `o` to generate an onboarding message for new agents joining the project. Optionally provide guidance text. The tier 2 model generates a comprehensive onboarding message and publishes it to `<project>/onboarding` with replace semantics (only the latest onboarding message is kept).
+
 ### Data storage
 
-All state lives in SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys):
+All state lives in SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys). Schema version: **v7**.
 
-- **projects** — Name, goal, LLM config, poll settings
-- **repos** — Git repositories tracked per project
+- **projects** — Name, goal, LLM config, poll settings, idle pause
+- **repos** — Git repositories tracked per project (with optional summary)
 - **worktrees** — Git worktrees per repo
 - **topics** — Message bus topics to monitor
 - **concerns** — Active/resolved issues the minder tracks
 - **polls** — Full history of poll results with tier 1/tier 2 responses
+- **tracked_items** — GitHub issues/PRs being monitored (with content hash, progress summary, draft/review state)
+- **completed_items** — Archived from tracked_items when they reach terminal state
 
 ## Project structure
 
@@ -133,17 +188,27 @@ agent-minder/
 │   ├── init.go          # Interactive setup wizard
 │   ├── start.go         # TUI + poller launch
 │   ├── status.go        # CLI status summary
+│   ├── list.go          # List projects
 │   ├── enroll.go        # Add repo to project
+│   ├── track.go         # Track GitHub issues/PRs
+│   ├── untrack.go       # Untrack GitHub issues/PRs
+│   ├── setup.go         # Reconfigure project
+│   ├── delete.go        # Delete project
 │   ├── pause.go         # Pause hint
 │   └── resume.go        # Alias for start
 ├── internal/
-│   ├── db/              # SQLite schema, migrations, CRUD
+│   ├── db/              # SQLite schema, migrations (v1→v7), CRUD
 │   ├── llm/             # Provider interface (Anthropic + OpenAI-compatible)
-│   ├── poller/          # Two-tier poll loop, analysis parsing, broadcast
-│   ├── tui/             # Bubbletea v2 dashboard
+│   ├── poller/          # Two-tier poll loop, analysis parsing, item sweep
+│   ├── tui/             # Bubbletea v2 dashboard (app, styles, layout, filter)
 │   ├── git/             # Git CLI wrappers
+│   ├── github/          # GitHub API client (go-github), issue/PR status fetching
 │   ├── discovery/       # Repo scanning, project name derivation
-│   └── msgbus/          # Agent-msg SQLite client (read) + publisher (write)
+│   ├── sqliteutil/      # SQLite health + WAL recovery
+│   ├── msgbus/          # Agent-msg SQLite client (read) + publisher (write)
+│   └── secrets/         # Secret detection and filtering
+├── lnav/
+│   └── agent-minder.json  # lnav format file for debug log viewing
 ├── go.mod
 ├── go.sum
 └── main.go
@@ -153,8 +218,35 @@ agent-minder/
 
 - [bubbletea v2](https://charm.land/bubbletea) + [lipgloss v2](https://charm.land/lipgloss) + [bubbles v2](https://charm.land/bubbles) — TUI framework
 - [anthropic-sdk-go](https://github.com/anthropics/anthropic-sdk-go) + [openai-go](https://github.com/openai/openai-go) — LLM providers
+- [go-github](https://github.com/google/go-github) — GitHub API client
 - [sqlx](https://github.com/jmoiron/sqlx) + [modernc.org/sqlite](https://modernc.org/sqlite) — Database (pure Go, no CGo)
 - [cobra](https://github.com/spf13/cobra) — CLI framework
+
+## Testing
+
+```bash
+go test ./...                           # All unit tests
+go test ./internal/db/... -v            # DB + migration tests
+go test ./internal/poller/... -v        # Analysis parsing, concern dedup, sweep, tracked items
+go test ./internal/msgbus/... -v        # Client + publisher tests
+go test ./internal/github/... -v        # GitHub URL parsing + status tests
+
+# Integration test (requires ANTHROPIC_API_KEY + existing agent-test project):
+go test -tags integration -run TestIntegrationTwoTierPipeline -v ./internal/poller/ -timeout 90s
+```
+
+## Debug logging
+
+Structured JSON logging via `log/slog` to `~/.agent-minder/debug.log`, enabled with `MINDER_DEBUG=1`.
+
+```bash
+# Quick watch
+tail -f ~/.agent-minder/debug.log | jq '{time, level, msg, stage, step, component}'
+
+# With lnav (color-coded by pipeline stage)
+lnav -i lnav/agent-minder.json   # one-time install
+lnav ~/.agent-minder/debug.log
+```
 
 ## agent-msg integration
 
