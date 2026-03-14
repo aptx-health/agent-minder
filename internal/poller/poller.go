@@ -43,7 +43,10 @@ func initDebugLog() {
 	if err != nil {
 		return
 	}
-	logPath := filepath.Join(home, ".agent-minder", "debug.log")
+	logPath := os.Getenv("MINDER_LOG")
+	if logPath == "" {
+		logPath = filepath.Join(home, ".agent-minder", "debug.log")
+	}
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return
