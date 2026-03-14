@@ -166,6 +166,7 @@ func (m Model) renderInfoDetail() string {
 
 // renderConcerns returns wrapped concerns, capped at maxConcernLines total.
 // If the wrapped output exceeds the cap, concerns are truncated to fit.
+// When concernsExpanded is true, all concerns are shown without caps.
 func (m Model) renderConcerns() string {
 	concerns, _ := m.store.ActiveConcerns(m.project.ID)
 	if len(concerns) == 0 {
@@ -176,11 +177,17 @@ func (m Model) renderConcerns() string {
 	maxConcerns := 5
 
 	var b strings.Builder
+	toggleHint := "[c: expand]"
+	if m.concernsExpanded {
+		toggleHint = "[c: collapse]"
+	}
 	b.WriteString(headerStyle().Render(fmt.Sprintf("Active Concerns (%d)", len(concerns))))
+	b.WriteString(" ")
+	b.WriteString(mutedStyle().Render(toggleHint))
 	b.WriteString("\n")
 
 	shown := concerns
-	if len(shown) > maxConcerns {
+	if !m.concernsExpanded && len(shown) > maxConcerns {
 		shown = shown[:maxConcerns]
 	}
 
@@ -201,7 +208,7 @@ func (m Model) renderConcerns() string {
 		rendered := style.Width(m.width - 2).Render(fmt.Sprintf("  [%s] %s", prefix, c.Message))
 		lineCount := strings.Count(rendered, "\n") + 1
 
-		if linesUsed+lineCount > maxConcernLines && concertsShown > 0 {
+		if !m.concernsExpanded && linesUsed+lineCount > maxConcernLines && concertsShown > 0 {
 			remaining := len(concerns) - concertsShown
 			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more", remaining)))
 			b.WriteString("\n")
@@ -214,7 +221,7 @@ func (m Model) renderConcerns() string {
 		concertsShown++
 	}
 
-	if len(concerns) > maxConcerns {
+	if !m.concernsExpanded && len(concerns) > maxConcerns {
 		b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more", len(concerns)-maxConcerns)))
 		b.WriteString("\n")
 	}
@@ -766,6 +773,7 @@ func allHelpHints() []struct{ key, desc string } {
 		{"e", "expand/collapse analysis"},
 		{"w", "toggle worktrees"},
 		{"x", "expand/collapse tracked"},
+		{"c", "expand/collapse concerns"},
 		{"i", "track issues"},
 		{"I", "untrack issues"},
 		{"f", "filter & bulk track"},

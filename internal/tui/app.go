@@ -123,6 +123,7 @@ type Model struct {
 	// Tracked items (refreshed on poll results).
 	trackedItems     []db.TrackedItem
 	trackedExpanded  bool // 'x' toggles compact strip vs expanded list with titles
+	concernsExpanded bool // 'c' toggles capped vs full concern display
 
 	// Worktree display (refreshed on poll results).
 	showWorktrees bool
@@ -609,6 +610,10 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "x":
 		m.trackedExpanded = !m.trackedExpanded
+		m.resizeViewports()
+		return m, nil
+	case "c":
+		m.concernsExpanded = !m.concernsExpanded
 		m.resizeViewports()
 		return m, nil
 	case "d":
