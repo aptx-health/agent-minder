@@ -9,6 +9,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"github.com/dustinlange/agent-minder/internal/db"
+	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
 
@@ -121,6 +122,11 @@ func newSettingsState(project *db.Project) *settingsState {
 				label:       "Autopilot skip label",
 				description: "Issues with this label are excluded",
 				value:       project.AutopilotSkipLabel,
+			},
+			{
+				label:       "Autopilot base branch",
+				description: "Base branch for worktrees and PRs (empty = auto-detect)",
+				value:       project.AutopilotBaseBranch,
 			},
 		},
 	}
@@ -270,6 +276,29 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		case "Autopilot skip label":
 			m.project.AutopilotSkipLabel = strings.TrimSpace(raw)
 			return m.saveSettingsField(ss, field.label, strings.TrimSpace(raw))
+		case "Autopilot base branch":
+			branch := strings.TrimSpace(raw)
+			if branch != "" {
+				// Validate that the branch exists in at least one enrolled repo.
+				repos, err := m.store.GetRepos(m.project.ID)
+				if err != nil || len(repos) == 0 {
+					ss.err = "No enrolled repos to validate against"
+					return m, nil
+				}
+				found := false
+				for _, r := range repos {
+					if gitpkg.BranchExists(r.Path, branch) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					ss.err = fmt.Sprintf("Branch '%s' not found in enrolled repos", branch)
+					return m, nil
+				}
+			}
+			m.project.AutopilotBaseBranch = branch
+			return m.saveSettingsField(ss, field.label, branch)
 		}
 
 		return m, nil

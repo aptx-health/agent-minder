@@ -41,6 +41,29 @@ func TestRenderPrompt(t *testing.T) {
 	}
 }
 
+func TestRenderPromptRebaseInstructions(t *testing.T) {
+	task := &db.AutopilotTask{
+		IssueNumber:  10,
+		IssueTitle:   "Add feature",
+		WorktreePath: "/tmp/wt",
+		Branch:       "agent/issue-10",
+	}
+
+	prompt := renderPrompt(task, "develop", "org", "repo")
+
+	checks := []string{
+		"git fetch origin develop",
+		"git rebase origin/develop",
+		"rebase --abort",
+		"draft PR targeting develop",
+	}
+	for _, check := range checks {
+		if !strings.Contains(prompt, check) {
+			t.Errorf("prompt missing rebase content: %q", check)
+		}
+	}
+}
+
 func TestRenderPromptEmptyBody(t *testing.T) {
 	task := &db.AutopilotTask{
 		IssueNumber:  1,
