@@ -832,7 +832,17 @@ func (m Model) renderBottomBar() string {
 		}
 		b.WriteString("\n\n")
 	default:
-		if m.autopilotMode == "confirm" {
+		if m.pollConfirm {
+			b.WriteString(headerStyle().Render("  Run comprehensive analysis? (Requires LLM tokens)"))
+			b.WriteString("\n")
+			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
+			b.WriteString("\n")
+		} else if m.autopilotMode == "scan-confirm" {
+			b.WriteString(headerStyle().Render("  Analyze tracked items for autopilot? (Requires LLM tokens)"))
+			b.WriteString("\n")
+			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
+			b.WriteString("\n")
+		} else if m.autopilotMode == "confirm" {
 			b.WriteString(headerStyle().Render(
 				fmt.Sprintf("  %d issues found, %d unblocked. Launch %d agents? (y/n)",
 					m.autopilotTotal, m.autopilotUnblocked, m.project.AutopilotMaxAgents)))
