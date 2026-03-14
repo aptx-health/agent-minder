@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	"github.com/dustinlange/agent-minder/internal/poller"
@@ -74,10 +74,6 @@ func newSettingsState(project *db.Project) *settingsState {
 	if statusSec <= 0 {
 		statusSec = 300
 	}
-	analysisSec := project.AnalysisIntervalSec
-	if analysisSec <= 0 {
-		analysisSec = 1800
-	}
 
 	return &settingsState{
 		step:     settingsStepSelectField,
@@ -85,15 +81,9 @@ func newSettingsState(project *db.Project) *settingsState {
 		textarea: ta,
 		fields: []settingsField{
 			{
-				label:       "Status interval",
-				description: "How often to run mechanical status checks",
+				label:       "Sync interval",
+				description: "How often to run status checks",
 				value:       strconv.Itoa(statusSec / 60),
-				unit:        "min",
-			},
-			{
-				label:       "Analysis interval",
-				description: "How often to run LLM analysis",
-				value:       strconv.Itoa(analysisSec / 60),
 				unit:        "min",
 			},
 			{
@@ -211,7 +201,7 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		field := ss.fields[ss.fieldIdx]
 
 		switch field.label {
-		case "Status interval":
+		case "Sync interval":
 			minutes, err := strconv.Atoi(raw)
 			if err != nil || minutes < 1 {
 				ss.err = "Enter a number >= 1"
@@ -228,26 +218,7 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 				if err == nil {
 					m.poller.SetStatusInterval(m.project.StatusInterval())
 				}
-				return settingsSavedMsg{field: "Status interval", err: err}
-			}
-		case "Analysis interval":
-			minutes, err := strconv.Atoi(raw)
-			if err != nil || minutes < 1 {
-				ss.err = "Enter a number >= 1"
-				return m, nil
-			}
-			m.project.AnalysisIntervalSec = minutes * 60
-			ss.fields[ss.fieldIdx].value = strconv.Itoa(minutes)
-			ss.input.Blur()
-			ss.step = settingsStepSelectField
-			ss.err = ""
-
-			return m, func() tea.Msg {
-				err := m.store.UpdateProject(m.project)
-				if err == nil {
-					m.poller.SetAnalysisInterval(m.project.AnalysisInterval())
-				}
-				return settingsSavedMsg{field: "Analysis interval", err: err}
+				return settingsSavedMsg{field: "Sync interval", err: err}
 			}
 		case "Autopilot max agents":
 			n, err := strconv.Atoi(raw)
