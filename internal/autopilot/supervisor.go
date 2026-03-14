@@ -795,9 +795,53 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 	pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
 	if err == nil && pr != nil && pr.Number > 0 {
 		s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
+
+		// Post-completion verification: check agent log for test results.
+		if verified, detail := checkAgentLogForTests(task.AgentLog); !verified {
+			s.emitEvent("warning", fmt.Sprintf("Agent #%d opened PR but %s", task.IssueNumber, detail), task)
+		}
+
 		return "review" // awaiting human review & merge before dependents unblock
 	}
 	return "bailed"
+}
+
+// checkAgentLogForTests scans the agent log for evidence that tests were run.
+// Returns (verified, detail) — verified is true if test execution was detected.
+func checkAgentLogForTests(logPath string) (bool, string) {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return false, "could not read agent log to verify tests"
+	}
+	content := string(data)
+
+	// Look for go test output patterns.
+	hasTestRun := strings.Contains(content, "go test ./...") ||
+		strings.Contains(content, "go test ./")
+	hasBuildRun := strings.Contains(content, "go build ./...") ||
+		strings.Contains(content, "go build ./")
+
+	if !hasTestRun && !hasBuildRun {
+		return false, "no evidence of build/test validation in agent log"
+	}
+	if !hasBuildRun {
+		return false, "no evidence of build validation in agent log"
+	}
+	if !hasTestRun {
+		return false, "no evidence of test validation in agent log"
+	}
+
+	// Check for test failures that weren't resolved.
+	// Look for FAIL at the end of the log (last 2000 chars) indicating unresolved failures.
+	tail := content
+	if len(tail) > 2000 {
+		tail = tail[len(tail)-2000:]
+	}
+	if strings.Contains(tail, "FAIL\t") && !strings.Contains(tail, "ok \t") {
+		return false, "agent log suggests tests may still be failing"
+	}
+
+	return true, ""
 }
 
 func (s *Supervisor) cleanup(task *db.AutopilotTask, deleteBranch bool) {
