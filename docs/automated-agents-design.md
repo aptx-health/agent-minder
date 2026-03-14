@@ -141,9 +141,16 @@ The graph is computed once at `Prepare()` time. Fallback if LLM fails: sequentia
 claude -p \
   --max-turns 50 \
   --max-budget-usd 3.00 \
-  --dangerously-skip-permissions \
+  --allowedTools "Read,Write,Edit,Glob,Grep,Bash(git:*),Bash(gh:*),..." \
   "<templated prompt>"
 ```
+
+The `--allowedTools` flag pre-approves specific tools without granting unrestricted system access.
+Claude Code scopes file operations (Read, Write, Edit) to the working directory (the worktree),
+so agents can only access files within their assigned worktree. Bash commands are restricted to
+common development tools via prefix-match patterns (see `permissions.go` for the full list).
+
+Projects can extend the allowed tools via `.claude/settings.json` in their repo.
 
 Environment: `GITHUB_TOKEN` is set for `gh` CLI access.
 
