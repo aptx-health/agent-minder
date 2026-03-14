@@ -886,6 +886,10 @@ func (m Model) renderAutopilotSlots() string {
 			}
 			b.WriteString(statusRunningStyle().Render(fmt.Sprintf("  Slot %d: #%d %s (%s)",
 				slot.SlotNum, slot.IssueNumber, title, elapsed)))
+			if slot.WorktreePath != "" {
+				b.WriteString("\n")
+				b.WriteString(mutedStyle().Render(fmt.Sprintf("         cd %s", slot.WorktreePath)))
+			}
 		}
 		b.WriteString("\n")
 	}

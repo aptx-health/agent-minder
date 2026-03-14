@@ -29,12 +29,14 @@ type Event struct {
 
 // SlotInfo describes the current state of an agent slot for TUI display.
 type SlotInfo struct {
-	SlotNum     int
-	IssueNumber int
-	IssueTitle  string
-	Branch      string
-	RunningFor  time.Duration
-	Status      string // "running" or "idle"
+	SlotNum      int
+	IssueNumber  int
+	IssueTitle   string
+	Branch       string
+	WorktreePath string
+	AgentLog     string
+	RunningFor   time.Duration
+	Status       string // "running" or "idle"
 }
 
 type slotState struct {
@@ -272,12 +274,14 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 			}
 		} else {
 			infos[i] = SlotInfo{
-				SlotNum:     i + 1,
-				IssueNumber: slot.task.IssueNumber,
-				IssueTitle:  slot.task.IssueTitle,
-				Branch:      slot.task.Branch,
-				RunningFor:  time.Since(slot.startedAt),
-				Status:      "running",
+				SlotNum:      i + 1,
+				IssueNumber:  slot.task.IssueNumber,
+				IssueTitle:   slot.task.IssueTitle,
+				Branch:       slot.task.Branch,
+				WorktreePath: slot.task.WorktreePath,
+				AgentLog:     slot.task.AgentLog,
+				RunningFor:   time.Since(slot.startedAt),
+				Status:       "running",
 			}
 		}
 	}
