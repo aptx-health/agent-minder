@@ -181,6 +181,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		GoalType:            goal.Name,
 		GoalDescription:     goalDesc,
 		RefreshIntervalSec:  int(interval.Seconds()),
+		AnalysisIntervalSec: int(interval.Seconds()),
 		MessageTTLSec:       int(ttl.Seconds()),
 		AutoEnrollWorktrees: autoEnrollBool,
 		IdlePauseSec:        idlePauseSec,
