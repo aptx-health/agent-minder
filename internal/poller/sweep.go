@@ -213,14 +213,6 @@ func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, 
 		}
 	}
 
-	// Auto-prune oldest terminal items when the list is full (archives before deleting).
-	pruned, err := p.store.PruneTrackedItems(p.project.ID, 10, 2)
-	if err != nil {
-		p.emit("error", fmt.Sprintf("pruning tracked items: %v", err), nil)
-	} else if pruned > 0 {
-		p.emit("tracked", fmt.Sprintf("Archived and pruned %d resolved tracked items", pruned), nil)
-	}
-
 	// Prune old completed items beyond the TTL (default 14 days).
 	ttl := p.project.MessageTTLSec
 	if ttl <= 0 {

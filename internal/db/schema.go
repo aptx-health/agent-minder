@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 8
+const currentVersion = 9
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS projects (
 	llm_analyzer_model    TEXT DEFAULT 'claude-sonnet-4-6',
 	idle_pause_sec        INTEGER DEFAULT 14400,
 	analyzer_focus        TEXT DEFAULT '',
+	autopilot_filter_type  TEXT DEFAULT '',
+	autopilot_filter_value TEXT DEFAULT '',
+	autopilot_max_agents   INTEGER DEFAULT 3,
+	autopilot_max_turns    INTEGER DEFAULT 50,
+	autopilot_max_budget_usd REAL DEFAULT 3.00,
+	autopilot_skip_label   TEXT DEFAULT 'no-agent',
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -99,6 +105,23 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 	progress_summary    TEXT DEFAULT '',
 	created_at          TEXT DEFAULT (datetime('now')),
 	UNIQUE(project_id, source, owner, repo, number)
+);
+
+CREATE TABLE IF NOT EXISTS autopilot_tasks (
+	id             INTEGER PRIMARY KEY,
+	project_id     INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	issue_number   INTEGER NOT NULL,
+	issue_title    TEXT NOT NULL DEFAULT '',
+	issue_body     TEXT NOT NULL DEFAULT '',
+	dependencies   TEXT DEFAULT '[]',
+	status         TEXT NOT NULL DEFAULT 'queued',
+	worktree_path  TEXT DEFAULT '',
+	branch         TEXT DEFAULT '',
+	pr_number      INTEGER DEFAULT 0,
+	agent_log      TEXT DEFAULT '',
+	started_at     TEXT DEFAULT '',
+	completed_at   TEXT DEFAULT '',
+	UNIQUE(project_id, issue_number)
 );
 
 CREATE TABLE IF NOT EXISTS completed_items (
@@ -190,6 +213,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 8 {
 		if err := migrateV8(db); err != nil {
 			return fmt.Errorf("apply migration v8: %w", err)
+		}
+	}
+
+	if version < 9 {
+		if err := migrateV9(db); err != nil {
+			return fmt.Errorf("apply migration v9: %w", err)
 		}
 	}
 
@@ -329,6 +358,53 @@ func migrateV8(db *sqlx.DB) error {
 	}
 	if _, err := db.Exec(`UPDATE projects SET analyzer_focus = '' WHERE analyzer_focus IS NULL`); err != nil {
 		return fmt.Errorf("null-fill analyzer_focus: %w", err)
+	}
+	return nil
+}
+
+func migrateV9(db *sqlx.DB) error {
+	// Create autopilot_tasks table.
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS autopilot_tasks (
+			id             INTEGER PRIMARY KEY,
+			project_id     INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			issue_number   INTEGER NOT NULL,
+			issue_title    TEXT NOT NULL DEFAULT '',
+			issue_body     TEXT NOT NULL DEFAULT '',
+			dependencies   TEXT DEFAULT '[]',
+			status         TEXT NOT NULL DEFAULT 'queued',
+			worktree_path  TEXT DEFAULT '',
+			branch         TEXT DEFAULT '',
+			pr_number      INTEGER DEFAULT 0,
+			agent_log      TEXT DEFAULT '',
+			started_at     TEXT DEFAULT '',
+			completed_at   TEXT DEFAULT '',
+			UNIQUE(project_id, issue_number)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create autopilot_tasks table: %w", err)
+	}
+
+	// Add autopilot columns to projects.
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN autopilot_filter_type TEXT DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN autopilot_filter_value TEXT DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN autopilot_max_agents INTEGER DEFAULT 3`,
+		`ALTER TABLE projects ADD COLUMN autopilot_max_turns INTEGER DEFAULT 50`,
+		`ALTER TABLE projects ADD COLUMN autopilot_max_budget_usd REAL DEFAULT 3.00`,
+		`ALTER TABLE projects ADD COLUMN autopilot_skip_label TEXT DEFAULT 'no-agent'`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	// Null-fill new text columns.
+	for _, col := range []string{"autopilot_filter_type", "autopilot_filter_value", "autopilot_skip_label"} {
+		if _, err := db.Exec(fmt.Sprintf(`UPDATE projects SET %s = '' WHERE %s IS NULL`, col, col)); err != nil {
+			return fmt.Errorf("null-fill %s: %w", col, err)
+		}
 	}
 	return nil
 }

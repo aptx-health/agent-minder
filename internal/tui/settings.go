@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
 
@@ -46,7 +47,7 @@ type settingsSavedMsg struct {
 }
 
 // newSettingsState initializes the settings dialog.
-func newSettingsState(pollMinutes int, analyzerFocus string) *settingsState {
+func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project) *settingsState {
 	ti := textinput.New()
 	ti.Placeholder = "value..."
 	ti.CharLimit = 10
@@ -84,6 +85,27 @@ func newSettingsState(pollMinutes int, analyzerFocus string) *settingsState {
 				description: "Custom instructions for the analyzer's perspective and communication style",
 				value:       displayFocus,
 				multiline:   true,
+			},
+			{
+				label:       "Autopilot max agents",
+				description: "Maximum concurrent agents",
+				value:       strconv.Itoa(project.AutopilotMaxAgents),
+			},
+			{
+				label:       "Autopilot max turns",
+				description: "Max turns per agent",
+				value:       strconv.Itoa(project.AutopilotMaxTurns),
+			},
+			{
+				label:       "Autopilot max budget",
+				description: "Max USD budget per agent",
+				value:       fmt.Sprintf("%.2f", project.AutopilotMaxBudgetUSD),
+				unit:        "USD",
+			},
+			{
+				label:       "Autopilot skip label",
+				description: "Issues with this label are excluded",
+				value:       project.AutopilotSkipLabel,
 			},
 		},
 	}
@@ -188,6 +210,33 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 				}
 				return settingsSavedMsg{field: "Poll interval", err: err}
 			}
+		case "Autopilot max agents":
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 || n > 10 {
+				ss.err = "Enter a number 1-10"
+				return m, nil
+			}
+			m.project.AutopilotMaxAgents = n
+			return m.saveSettingsField(ss, field.label, raw)
+		case "Autopilot max turns":
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 {
+				ss.err = "Enter a positive number"
+				return m, nil
+			}
+			m.project.AutopilotMaxTurns = n
+			return m.saveSettingsField(ss, field.label, raw)
+		case "Autopilot max budget":
+			f, err := strconv.ParseFloat(raw, 64)
+			if err != nil || f <= 0 {
+				ss.err = "Enter a positive number"
+				return m, nil
+			}
+			m.project.AutopilotMaxBudgetUSD = f
+			return m.saveSettingsField(ss, field.label, fmt.Sprintf("%.2f", f))
+		case "Autopilot skip label":
+			m.project.AutopilotSkipLabel = strings.TrimSpace(raw)
+			return m.saveSettingsField(ss, field.label, strings.TrimSpace(raw))
 		}
 
 		return m, nil
@@ -240,6 +289,19 @@ func (m Model) updateSettingsEditTextarea(msg tea.KeyPressMsg) (tea.Model, tea.C
 	var cmd tea.Cmd
 	ss.textarea, cmd = ss.textarea.Update(msg)
 	return m, cmd
+}
+
+// saveSettingsField is a common helper for saving a simple text/numeric setting.
+func (m Model) saveSettingsField(ss *settingsState, label, displayValue string) (tea.Model, tea.Cmd) {
+	ss.fields[ss.fieldIdx].value = displayValue
+	ss.input.Blur()
+	ss.step = settingsStepSelectField
+	ss.err = ""
+
+	return m, func() tea.Msg {
+		err := m.store.UpdateProject(m.project)
+		return settingsSavedMsg{field: label, err: err}
+	}
 }
 
 // renderSettingsView renders the settings dialog.

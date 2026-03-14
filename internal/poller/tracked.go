@@ -122,22 +122,15 @@ func (p *Poller) ClearAndBulkAddTrackedItems(ctx context.Context, items []ghpkg.
 	return p.BulkAddTrackedItems(ctx, items, owner, repo)
 }
 
-// UpdateTrackedItems removes terminal (closed/merged/not-planned) items and adds new ones.
-// Returns (added, removed, error).
+// UpdateTrackedItems adds new items to the tracked list (skips duplicates).
+// Returns (added, 0, error). Terminal items are kept for analyzer context;
+// use the TUI cleanup action (c) to archive them manually.
 func (p *Poller) UpdateTrackedItems(ctx context.Context, items []ghpkg.ItemStatus, owner, repo string) (int, int, error) {
-	removed, err := p.store.ArchiveTerminalTrackedItems(p.project.ID)
-	if err != nil {
-		return 0, 0, fmt.Errorf("archive+remove terminal items: %w", err)
-	}
-	if removed > 0 {
-		p.emit("tracked", fmt.Sprintf("Archived and removed %d closed/merged items", removed), nil)
-	}
-
 	added, err := p.BulkAddTrackedItems(ctx, items, owner, repo)
 	if err != nil {
-		return 0, removed, err
+		return 0, 0, err
 	}
-	return added, removed, nil
+	return added, 0, nil
 }
 
 // DefaultOwnerRepo derives a default owner/repo from the project's enrolled repos.

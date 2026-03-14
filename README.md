@@ -98,6 +98,8 @@ Launches the TUI dashboard + polling loop. Key bindings:
 | `u` | User message — post a raw message to a topic |
 | `m` | Broadcast mode — type a message for the LLM to craft and publish to the bus |
 | `o` | Onboard mode — generate an onboarding message for new agents |
+| `a` | Launch autopilot — assign agents to tracked GitHub issues |
+| `A` | Stop autopilot (with confirmation) |
 | `t` | Cycle theme (dark/light) |
 | `q` | Quit |
 
@@ -168,9 +170,17 @@ Press `m` in the TUI to enter broadcast mode. Type a prompt describing what you 
 
 Press `o` to generate an onboarding message for new agents joining the project. Optionally provide guidance text. The tier 2 model generates a comprehensive onboarding message and publishes it to `<project>/onboarding` with replace semantics (only the latest onboarding message is kept).
 
+### Autopilot
+
+Press `a` to launch autopilot — minder converts tracked GitHub issues into a task queue, builds a dependency graph (one LLM call), and dispatches up to N concurrent Claude Code agents to work on unblocked issues in isolated git worktrees. Agents self-triage: they either complete the work and open a draft PR, or bail with a detailed comment explaining what they found.
+
+**Minder is a work dispatcher, not a quality gate.** It generates the dependency graph and assigns work — the target repo's own tooling (pre-commit hooks, linters, test suites, CI/CD) is responsible for enforcing code quality. Repos should have a `CLAUDE.md` with project conventions and build/test commands so agents can work effectively.
+
+See [docs/automated-agents-design.md](docs/automated-agents-design.md) for the full design.
+
 ### Data storage
 
-All state lives in SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys). Schema version: **v7**.
+All state lives in SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys). Schema version: **v9**.
 
 - **projects** — Name, goal, LLM config, poll settings, idle pause
 - **repos** — Git repositories tracked per project (with optional summary)
@@ -180,6 +190,7 @@ All state lives in SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys
 - **polls** — Full history of poll results with tier 1/tier 2 responses
 - **tracked_items** — GitHub issues/PRs being monitored (with content hash, progress summary, draft/review state)
 - **completed_items** — Archived from tracked_items when they reach terminal state
+- **autopilot_tasks** — Issue work queue for autopilot (status, dependencies, worktree path, PR number)
 
 ## Project structure
 
@@ -199,11 +210,12 @@ agent-minder/
 │   ├── pause.go         # Pause hint
 │   └── resume.go        # Alias for start
 ├── internal/
-│   ├── db/              # SQLite schema, migrations (v1→v7), CRUD
+│   ├── autopilot/       # Autopilot supervisor, agent prompt, slot management
+│   ├── db/              # SQLite schema, migrations (v1→v9), CRUD
 │   ├── llm/             # Provider interface (Anthropic + OpenAI-compatible)
 │   ├── poller/          # Two-tier poll loop, analysis parsing, item sweep
 │   ├── tui/             # Bubbletea v2 dashboard (app, styles, layout, filter)
-│   ├── git/             # Git CLI wrappers
+│   ├── git/             # Git CLI wrappers (log, branches, worktrees)
 │   ├── github/          # GitHub API client (go-github), issue/PR status fetching
 │   ├── discovery/       # Repo scanning, project name derivation
 │   ├── sqliteutil/      # SQLite health + WAL recovery

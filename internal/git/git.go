@@ -238,6 +238,37 @@ func DiffStat(dir, spec string) (string, error) {
 	return run(dir, "diff", "--stat", spec)
 }
 
+// WorktreeAdd creates a new git worktree at the given path on a new branch.
+func WorktreeAdd(repoDir, worktreePath, branch string) error {
+	_, err := run(repoDir, "worktree", "add", worktreePath, "-b", branch)
+	return err
+}
+
+// WorktreeRemove removes a git worktree.
+func WorktreeRemove(repoDir, worktreePath string) error {
+	_, err := run(repoDir, "worktree", "remove", "--force", worktreePath)
+	return err
+}
+
+// DeleteBranch deletes a local branch.
+func DeleteBranch(repoDir, branch string) error {
+	_, err := run(repoDir, "branch", "-D", branch)
+	return err
+}
+
+// DefaultBranch returns the default branch name (main, master, etc.).
+func DefaultBranch(dir string) (string, error) {
+	out, err := run(dir, "symbolic-ref", "refs/remotes/origin/HEAD")
+	if err == nil {
+		// Returns something like "refs/remotes/origin/main".
+		parts := strings.Split(out, "/")
+		if len(parts) > 0 {
+			return parts[len(parts)-1], nil
+		}
+	}
+	return "main", nil
+}
+
 // CommitsSince returns the number of commits since a given ref.
 func CommitsSince(dir, ref string) (int, error) {
 	out, err := run(dir, "rev-list", "--count", ref+"..HEAD")
