@@ -261,9 +261,10 @@ func (m Model) renderTrackedStrip() string {
 
 	if m.trackedExpanded {
 		for _, item := range m.trackedItems {
-			dot := statusDot(item.LastStatus)
+			st := m.effectiveStatus(item)
+			dot := statusDot(st)
 			ref := fmt.Sprintf("#%d", item.Number)
-			status := fmt.Sprintf("[%s]", item.LastStatus)
+			status := fmt.Sprintf("[%s]", st)
 			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
 
 			// Truncate title to fit available width.
@@ -292,8 +293,9 @@ func (m Model) renderTrackedStrip() string {
 		line.WriteString("  ")
 
 		for i, item := range m.trackedItems {
-			entry := fmt.Sprintf("#%d[%s]", item.Number, item.LastStatus)
-			dot := statusDot(item.LastStatus)
+			st := m.effectiveStatus(item)
+			entry := fmt.Sprintf("#%d[%s]", item.Number, st)
+			dot := statusDot(st)
 			entryLen := len(entry) + 2 // +2 for dot + space
 			// Build GitHub URL for OSC 8 hyperlink.
 			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
