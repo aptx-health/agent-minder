@@ -28,6 +28,7 @@ type Project struct {
 	AutopilotMaxTurns      int     `db:"autopilot_max_turns"`
 	AutopilotMaxBudgetUSD  float64 `db:"autopilot_max_budget_usd"`
 	AutopilotSkipLabel     string  `db:"autopilot_skip_label"`
+	AutopilotBaseBranch    string  `db:"autopilot_base_branch"`
 	CreatedAt              string  `db:"created_at"`
 }
 

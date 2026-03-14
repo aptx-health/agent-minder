@@ -95,6 +95,13 @@ func (s *Supervisor) IsActive() bool {
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
 // Always starts fresh — clears previous tasks, cleans up orphaned worktrees.
 func (s *Supervisor) Prepare(ctx context.Context) (total, unblocked int, err error) {
+	// Validate configured base branch exists before starting.
+	if s.project.AutopilotBaseBranch != "" {
+		if !gitpkg.BranchExists(s.repoDir, s.project.AutopilotBaseBranch) {
+			return 0, 0, fmt.Errorf("configured base branch %q not found in repo", s.project.AutopilotBaseBranch)
+		}
+	}
+
 	// Clean up any leftovers from a previous run.
 	s.store.ClearAutopilotTasks(s.project.ID)
 	s.cleanOrphanedWorktrees()
@@ -675,17 +682,23 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	// Clean up stale branch from previous run if it exists.
 	gitpkg.DeleteBranch(s.repoDir, task.Branch)
 
-	// Create worktree.
-	if err := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch); err != nil {
+	// Get base branch: use configured value if set, otherwise auto-detect.
+	baseBranch := s.project.AutopilotBaseBranch
+	if baseBranch == "" {
+		baseBranch, _ = gitpkg.DefaultBranch(s.repoDir)
+	}
+
+	// Fetch latest from origin so the worktree starts from the latest base branch.
+	gitpkg.Fetch(s.repoDir)
+
+	// Create worktree from the latest remote base branch.
+	if err := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch, "origin/"+baseBranch); err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to create worktree for #%d: %v", task.IssueNumber, err), task)
 		s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
 		return
 	}
 
 	s.emitEvent("started", fmt.Sprintf("Agent started on #%d: %s", task.IssueNumber, task.IssueTitle), task)
-
-	// Get base branch.
-	baseBranch, _ := gitpkg.DefaultBranch(s.repoDir)
 
 	// Build prompt.
 	prompt := renderPrompt(task, baseBranch, s.owner, s.repo)

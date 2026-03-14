@@ -239,8 +239,13 @@ func DiffStat(dir, spec string) (string, error) {
 }
 
 // WorktreeAdd creates a new git worktree at the given path on a new branch.
-func WorktreeAdd(repoDir, worktreePath, branch string) error {
-	_, err := run(repoDir, "worktree", "add", worktreePath, "-b", branch)
+// If startPoint is non-empty, the branch is created from that ref instead of HEAD.
+func WorktreeAdd(repoDir, worktreePath, branch string, startPoint ...string) error {
+	args := []string{"worktree", "add", worktreePath, "-b", branch}
+	if len(startPoint) > 0 && startPoint[0] != "" {
+		args = append(args, startPoint[0])
+	}
+	_, err := run(repoDir, args...)
 	return err
 }
 
@@ -254,6 +259,25 @@ func WorktreeRemove(repoDir, worktreePath string) error {
 func DeleteBranch(repoDir, branch string) error {
 	_, err := run(repoDir, "branch", "-D", branch)
 	return err
+}
+
+// Fetch fetches from origin.
+func Fetch(dir string) error {
+	_, err := run(dir, "fetch", "origin")
+	return err
+}
+
+// BranchExists checks if a branch exists locally or as a remote tracking branch.
+func BranchExists(dir, branch string) bool {
+	// Check local branch.
+	if _, err := run(dir, "rev-parse", "--verify", "refs/heads/"+branch); err == nil {
+		return true
+	}
+	// Check remote tracking branch.
+	if _, err := run(dir, "rev-parse", "--verify", "refs/remotes/origin/"+branch); err == nil {
+		return true
+	}
+	return false
 }
 
 // DefaultBranch returns the default branch name (main, master, etc.).
