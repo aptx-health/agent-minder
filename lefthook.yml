@@ -1,0 +1,20 @@
+pre-commit:
+  parallel: true
+  commands:
+    build:
+      run: go build ./...
+    vet:
+      run: go vet ./...
+    fmt:
+      run: |
+        UNFMTED=$(gofmt -l . 2>&1)
+        if [ -n "$UNFMTED" ]; then
+          echo "Files not formatted:"
+          echo "$UNFMTED"
+          exit 1
+        fi
+
+pre-push:
+  commands:
+    test:
+      run: go test ./...
