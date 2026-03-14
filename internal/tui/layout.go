@@ -50,8 +50,11 @@ func (m Model) View() tea.View {
 		}
 	}
 
-	// Main content area: filter/track-preview modes replace analysis+event log.
-	if m.mode == "filter" {
+	// Main content area: modal modes replace analysis+event log.
+	if m.mode == "settings" {
+		b.WriteString(m.renderSettingsView())
+		b.WriteString("\n")
+	} else if m.mode == "filter" {
 		b.WriteString(m.renderFilterView())
 		b.WriteString("\n")
 	} else if (m.mode == "track" || m.mode == "untrack") && m.trackStep == trackStepPreview {
@@ -683,6 +686,18 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render(help))
 			b.WriteString("\n")
 		}
+	case "settings":
+		if m.settingsStatus != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.settingsStatus)))
+		} else if m.settingsState != nil {
+			switch m.settingsState.step {
+			case settingsStepSelectField:
+				b.WriteString(helpStyle().Render("up/down: select \u2022 enter: edit \u2022 esc: close"))
+			case settingsStepEditValue:
+				b.WriteString(helpStyle().Render("enter: save \u2022 esc: cancel"))
+			}
+		}
+		b.WriteString("\n\n")
 	case "filter":
 		if m.filterStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.filterStatus)))
@@ -774,6 +789,7 @@ func allHelpHints() []struct{ key, desc string } {
 		{"w", "toggle worktrees"},
 		{"x", "expand/collapse tracked"},
 		{"c", "expand/collapse concerns"},
+		{"s", "settings"},
 		{"i", "track issues"},
 		{"I", "untrack issues"},
 		{"f", "filter & bulk track"},
