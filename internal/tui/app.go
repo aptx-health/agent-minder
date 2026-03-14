@@ -121,7 +121,8 @@ type Model struct {
 	showInfo         bool // 'i' toggles repos/topics detail
 
 	// Tracked items (refreshed on poll results).
-	trackedItems []db.TrackedItem
+	trackedItems     []db.TrackedItem
+	trackedExpanded  bool // 'x' toggles compact strip vs expanded list with titles
 
 	// Worktree display (refreshed on poll results).
 	showWorktrees bool
@@ -604,6 +605,10 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.showWorktrees && len(m.worktrees) == 0 {
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
 		}
+		m.resizeViewports()
+		return m, nil
+	case "x":
+		m.trackedExpanded = !m.trackedExpanded
 		m.resizeViewports()
 		return m, nil
 	case "d":
