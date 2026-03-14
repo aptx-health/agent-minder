@@ -21,6 +21,7 @@ type Project struct {
 	LLMSummarizerModel   string `db:"llm_summarizer_model"`
 	LLMAnalyzerModel     string `db:"llm_analyzer_model"`
 	IdlePauseSec         int    `db:"idle_pause_sec"`
+	AnalyzerFocus        string `db:"analyzer_focus"`
 	CreatedAt            string `db:"created_at"`
 }
 

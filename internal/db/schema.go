@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 7
+const currentVersion = 8
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	llm_summarizer_model  TEXT DEFAULT 'claude-haiku-4-5',
 	llm_analyzer_model    TEXT DEFAULT 'claude-sonnet-4-6',
 	idle_pause_sec        INTEGER DEFAULT 14400,
+	analyzer_focus        TEXT DEFAULT '',
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -186,6 +187,12 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
+	if version < 8 {
+		if err := migrateV8(db); err != nil {
+			return fmt.Errorf("apply migration v8: %w", err)
+		}
+	}
+
 	_, err = db.Exec("UPDATE schema_version SET version = ?", currentVersion)
 	return err
 }
@@ -311,6 +318,17 @@ func migrateV7(db *sqlx.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create completed_items table: %w", err)
+	}
+	return nil
+}
+
+func migrateV8(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN analyzer_focus TEXT DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add analyzer_focus: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE projects SET analyzer_focus = '' WHERE analyzer_focus IS NULL`); err != nil {
+		return fmt.Errorf("null-fill analyzer_focus: %w", err)
 	}
 	return nil
 }
