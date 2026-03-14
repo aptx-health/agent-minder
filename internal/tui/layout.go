@@ -819,7 +819,8 @@ func renderHelpBar(width int) string {
 func allHelpHints() []struct{ key, desc string } {
 	return []struct{ key, desc string }{
 		{"p", "pause/resume polling"},
-		{"r", "poll now"},
+		{"r", "status check"},
+		{"R", "full poll (status + analysis)"},
 		{"e", "expand/collapse analysis"},
 		{"w", "toggle worktrees"},
 		{"x", "expand/collapse tracked"},

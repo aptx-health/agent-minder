@@ -48,7 +48,7 @@ type settingsSavedMsg struct {
 }
 
 // newSettingsState initializes the settings dialog.
-func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project) *settingsState {
+func newSettingsState(project *db.Project) *settingsState {
 	ti := textinput.New()
 	ti.Placeholder = "value..."
 	ti.CharLimit = 10
@@ -61,7 +61,7 @@ func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project
 	ta.SetWidth(80)
 
 	// Show the effective focus (default if empty) truncated for the field list.
-	effectiveFocus := analyzerFocus
+	effectiveFocus := project.AnalyzerFocus
 	if effectiveFocus == "" {
 		effectiveFocus = poller.DefaultAnalyzerFocus
 	}
@@ -70,15 +70,30 @@ func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project
 		displayFocus = displayFocus[:57] + "..."
 	}
 
+	statusSec := project.StatusIntervalSec
+	if statusSec <= 0 {
+		statusSec = 300
+	}
+	analysisSec := project.AnalysisIntervalSec
+	if analysisSec <= 0 {
+		analysisSec = 1800
+	}
+
 	return &settingsState{
 		step:     settingsStepSelectField,
 		input:    ti,
 		textarea: ta,
 		fields: []settingsField{
 			{
-				label:       "Poll interval",
-				description: "How often to poll for changes",
-				value:       strconv.Itoa(pollMinutes),
+				label:       "Status interval",
+				description: "How often to run mechanical status checks",
+				value:       strconv.Itoa(statusSec / 60),
+				unit:        "min",
+			},
+			{
+				label:       "Analysis interval",
+				description: "How often to run LLM analysis",
+				value:       strconv.Itoa(analysisSec / 60),
 				unit:        "min",
 			},
 			{
@@ -196,14 +211,13 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		field := ss.fields[ss.fieldIdx]
 
 		switch field.label {
-		case "Poll interval":
+		case "Status interval":
 			minutes, err := strconv.Atoi(raw)
 			if err != nil || minutes < 1 {
 				ss.err = "Enter a number >= 1"
 				return m, nil
 			}
-			newSec := minutes * 60
-			m.project.RefreshIntervalSec = newSec
+			m.project.StatusIntervalSec = minutes * 60
 			ss.fields[ss.fieldIdx].value = strconv.Itoa(minutes)
 			ss.input.Blur()
 			ss.step = settingsStepSelectField
@@ -212,9 +226,28 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 			return m, func() tea.Msg {
 				err := m.store.UpdateProject(m.project)
 				if err == nil {
-					m.poller.SetRefreshInterval(m.project.RefreshInterval())
+					m.poller.SetStatusInterval(m.project.StatusInterval())
 				}
-				return settingsSavedMsg{field: "Poll interval", err: err}
+				return settingsSavedMsg{field: "Status interval", err: err}
+			}
+		case "Analysis interval":
+			minutes, err := strconv.Atoi(raw)
+			if err != nil || minutes < 1 {
+				ss.err = "Enter a number >= 1"
+				return m, nil
+			}
+			m.project.AnalysisIntervalSec = minutes * 60
+			ss.fields[ss.fieldIdx].value = strconv.Itoa(minutes)
+			ss.input.Blur()
+			ss.step = settingsStepSelectField
+			ss.err = ""
+
+			return m, func() tea.Msg {
+				err := m.store.UpdateProject(m.project)
+				if err == nil {
+					m.poller.SetAnalysisInterval(m.project.AnalysisInterval())
+				}
+				return settingsSavedMsg{field: "Analysis interval", err: err}
 			}
 		case "Autopilot max agents":
 			n, err := strconv.Atoi(raw)
