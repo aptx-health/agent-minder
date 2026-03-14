@@ -160,6 +160,36 @@ The `lnav/agent-minder.json` format file ships with the repo. It color-codes sta
 - Spinner ticks flow through the standard bubbletea Update loop via `spinner.TickMsg`
 - Theme is global mutable state (package-level `themeIndex`), cycled via `cycleTheme()`
 
+## Useful shortcuts
+
+```bash
+# Recreate a completed agent's worktree (branch must still exist — works for review tasks)
+git worktree add ~/.agent-minder/worktrees/<project>/issue-<N> agent/issue-<N>
+
+# Shell helper
+minder-checkout() {
+  git worktree add ~/.agent-minder/worktrees/$1/issue-$2 agent/issue-$2
+  cd ~/.agent-minder/worktrees/$1/issue-$2
+}
+# Usage: minder-checkout minder-improvement 65
+```
+
+## Testing in worktrees
+
+Use `scripts/test-env.sh` to run an isolated instance against its own DB and log file:
+
+```bash
+source scripts/test-env.sh <project-name>
+go run . start "$MINDER_PROJECT"
+```
+
+This auto-derives paths from the branch name (e.g., `agent/issue-65` → `~/.agent-minder/minder-agent-issue-65.db`), copies the production DB on first run, and enables debug logging.
+
+**Environment variables:**
+- `MINDER_DB` — override database path (default: `~/.agent-minder/minder.db`)
+- `MINDER_LOG` — override debug log path (default: `~/.agent-minder/debug.log`)
+- `MINDER_DEBUG=1` — enable structured JSON debug logging
+
 ## Anthropic SDK notes
 
 - System prompt uses `TextBlockParam{Text: "..."}` (NOT `NewTextBlock()` which returns `ContentBlockParamUnion`)
