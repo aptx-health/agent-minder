@@ -123,6 +123,11 @@ type Model struct {
 	// Tracked items (refreshed on poll results).
 	trackedItems     []db.TrackedItem
 	trackedExpanded  bool // 'x' toggles compact strip vs expanded list with titles
+	concernsExpanded bool // 'c' toggles capped vs full concern display
+
+	// Settings dialog.
+	settingsState  *settingsState
+	settingsStatus string
 
 	// Worktree display (refreshed on poll results).
 	showWorktrees bool
@@ -250,6 +255,7 @@ func (m Model) Init() tea.Cmd {
 		listenForEvents(m.poller),
 		tickEvery(),
 		m.spinner.Tick,
+		func() tea.Msg { return tea.RequestBackgroundColor() },
 	}
 	if m.project.IdlePauseSec > 0 {
 		cmds = append(cmds, idleCheckTick())
@@ -292,9 +298,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateTrack(msg)
 		case "filter":
 			return m.updateFilter(msg)
+		case "settings":
+			return m.updateSettings(msg)
 		default:
 			return m.updateNormal(msg)
 		}
+
+	case tea.BackgroundColorMsg:
+		if msg.IsDark() {
+			setThemeByName("dark")
+		} else {
+			setThemeByName("light")
+		}
+		m.applyTextareaTheme()
+		m.rebuildAnalysisContent()
+		m.rebuildEventLogContent()
+		return m, nil
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -494,6 +513,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filterStatus = ""
 		return m, nil
 
+	case settingsSavedMsg:
+		if msg.err != nil {
+			m.settingsStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			m.settingsStatus = fmt.Sprintf("%s updated", msg.field)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearSettingsStatusMsg{}
+		})
+
+	case clearSettingsStatusMsg:
+		m.settingsStatus = ""
+		return m, nil
+
 	case idleCheckMsg:
 		threshold := m.project.IdlePauseDuration()
 		if threshold > 0 && !m.autoPaused && !m.poller.IsPaused() && time.Since(m.lastUserInput) >= threshold {
@@ -519,6 +552,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 type clearBroadcastStatusMsg struct{}
 type clearOnboardStatusMsg struct{}
 type clearFilterStatusMsg struct{}
+type clearSettingsStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
@@ -609,6 +643,20 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "x":
 		m.trackedExpanded = !m.trackedExpanded
+		m.resizeViewports()
+		return m, nil
+	case "c":
+		m.concernsExpanded = !m.concernsExpanded
+		m.resizeViewports()
+		return m, nil
+	case "s":
+		pollMinutes := m.project.RefreshIntervalSec / 60
+		if pollMinutes < 1 {
+			pollMinutes = 1
+		}
+		m.settingsState = newSettingsState(pollMinutes)
+		m.settingsStatus = ""
+		m.mode = "settings"
 		m.resizeViewports()
 		return m, nil
 	case "d":

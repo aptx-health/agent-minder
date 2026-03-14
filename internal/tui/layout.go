@@ -50,8 +50,11 @@ func (m Model) View() tea.View {
 		}
 	}
 
-	// Main content area: filter/track-preview modes replace analysis+event log.
-	if m.mode == "filter" {
+	// Main content area: modal modes replace analysis+event log.
+	if m.mode == "settings" {
+		b.WriteString(m.renderSettingsView())
+		b.WriteString("\n")
+	} else if m.mode == "filter" {
 		b.WriteString(m.renderFilterView())
 		b.WriteString("\n")
 	} else if (m.mode == "track" || m.mode == "untrack") && m.trackStep == trackStepPreview {
@@ -166,6 +169,7 @@ func (m Model) renderInfoDetail() string {
 
 // renderConcerns returns wrapped concerns, capped at maxConcernLines total.
 // If the wrapped output exceeds the cap, concerns are truncated to fit.
+// When concernsExpanded is true, all concerns are shown without caps.
 func (m Model) renderConcerns() string {
 	concerns, _ := m.store.ActiveConcerns(m.project.ID)
 	if len(concerns) == 0 {
@@ -176,11 +180,17 @@ func (m Model) renderConcerns() string {
 	maxConcerns := 5
 
 	var b strings.Builder
+	toggleHint := "[c: expand]"
+	if m.concernsExpanded {
+		toggleHint = "[c: collapse]"
+	}
 	b.WriteString(headerStyle().Render(fmt.Sprintf("Active Concerns (%d)", len(concerns))))
+	b.WriteString(" ")
+	b.WriteString(mutedStyle().Render(toggleHint))
 	b.WriteString("\n")
 
 	shown := concerns
-	if len(shown) > maxConcerns {
+	if !m.concernsExpanded && len(shown) > maxConcerns {
 		shown = shown[:maxConcerns]
 	}
 
@@ -201,7 +211,7 @@ func (m Model) renderConcerns() string {
 		rendered := style.Width(m.width - 2).Render(fmt.Sprintf("  [%s] %s", prefix, c.Message))
 		lineCount := strings.Count(rendered, "\n") + 1
 
-		if linesUsed+lineCount > maxConcernLines && concertsShown > 0 {
+		if !m.concernsExpanded && linesUsed+lineCount > maxConcernLines && concertsShown > 0 {
 			remaining := len(concerns) - concertsShown
 			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more", remaining)))
 			b.WriteString("\n")
@@ -214,7 +224,7 @@ func (m Model) renderConcerns() string {
 		concertsShown++
 	}
 
-	if len(concerns) > maxConcerns {
+	if !m.concernsExpanded && len(concerns) > maxConcerns {
 		b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more", len(concerns)-maxConcerns)))
 		b.WriteString("\n")
 	}
@@ -676,6 +686,18 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render(help))
 			b.WriteString("\n")
 		}
+	case "settings":
+		if m.settingsStatus != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.settingsStatus)))
+		} else if m.settingsState != nil {
+			switch m.settingsState.step {
+			case settingsStepSelectField:
+				b.WriteString(helpStyle().Render("up/down: select \u2022 enter: edit \u2022 esc: close"))
+			case settingsStepEditValue:
+				b.WriteString(helpStyle().Render("enter: save \u2022 esc: cancel"))
+			}
+		}
+		b.WriteString("\n\n")
 	case "filter":
 		if m.filterStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.filterStatus)))
@@ -766,6 +788,8 @@ func allHelpHints() []struct{ key, desc string } {
 		{"e", "expand/collapse analysis"},
 		{"w", "toggle worktrees"},
 		{"x", "expand/collapse tracked"},
+		{"c", "expand/collapse concerns"},
+		{"s", "settings"},
 		{"i", "track issues"},
 		{"I", "untrack issues"},
 		{"f", "filter & bulk track"},

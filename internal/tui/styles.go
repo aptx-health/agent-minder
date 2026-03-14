@@ -60,6 +60,15 @@ func cycleTheme() Theme {
 	return currentTheme()
 }
 
+func setThemeByName(name string) {
+	for i, t := range themes {
+		if t.Name == name {
+			themeIndex = i
+			return
+		}
+	}
+}
+
 // Style builders that read from current theme.
 
 func titleStyle() lipgloss.Style {

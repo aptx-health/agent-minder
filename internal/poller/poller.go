@@ -138,20 +138,22 @@ type Poller struct {
 	publisher *msgbus.Publisher
 	events    chan Event
 
-	mu      sync.Mutex
-	paused  bool
-	cancel  context.CancelFunc
-	stopped chan struct{}
+	mu              sync.Mutex
+	paused          bool
+	cancel          context.CancelFunc
+	stopped         chan struct{}
+	intervalChanged chan time.Duration // signals run loop to reset ticker
 }
 
 // New creates a new Poller. Publisher may be nil if bus publishing is not available.
 func New(store *db.Store, project *db.Project, provider llm.Provider, publisher *msgbus.Publisher) *Poller {
 	return &Poller{
-		store:     store,
-		project:   project,
-		provider:  provider,
-		publisher: publisher,
-		events:    make(chan Event, 64),
+		store:           store,
+		project:         project,
+		provider:        provider,
+		publisher:       publisher,
+		events:          make(chan Event, 64),
+		intervalChanged: make(chan time.Duration, 1),
 	}
 }
 
@@ -163,6 +165,19 @@ func (p *Poller) Events() <-chan Event {
 // Project returns the poller's project.
 func (p *Poller) Project() *db.Project {
 	return p.project
+}
+
+// SetRefreshInterval updates the poll interval at runtime.
+// The change takes effect on the next tick cycle.
+func (p *Poller) SetRefreshInterval(d time.Duration) {
+	p.mu.Lock()
+	p.project.RefreshIntervalSec = int(d.Seconds())
+	p.mu.Unlock()
+	// Non-blocking send to signal the run loop.
+	select {
+	case p.intervalChanged <- d:
+	default:
+	}
 }
 
 // Start begins the polling loop in a goroutine.
@@ -470,6 +485,8 @@ func (p *Poller) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case d := <-p.intervalChanged:
+			ticker.Reset(d)
 		case <-ticker.C:
 			if p.IsPaused() {
 				continue
