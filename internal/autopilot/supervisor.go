@@ -742,13 +742,18 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	status := s.inspectOutcome(ctx, task, exitCode)
 	s.store.UpdateAutopilotTaskStatus(task.ID, status)
 
+	ghClient := ghpkg.NewClient(s.ghToken)
+
 	if status == "review" {
 		// Swap in-progress → needs-review label on the issue.
-		ghClient := ghpkg.NewClient(s.ghToken)
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
 		ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
 		s.emitEvent("completed", fmt.Sprintf("Agent completed #%d — PR opened, awaiting review & merge", task.IssueNumber), task)
 	} else {
+		// Agent bailed — always remove in-progress as safety net.
+		// The agent may have already removed it per prompt instructions,
+		// but RemoveLabel is idempotent.
+		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
 	}
 
