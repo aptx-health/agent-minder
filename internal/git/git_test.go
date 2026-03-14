@@ -191,6 +191,21 @@ func TestWorktreeAddRemove(t *testing.T) {
 	}
 }
 
+func TestBranchExists(t *testing.T) {
+	dir := setupTestRepo(t)
+
+	// Current branch should exist.
+	branch, _ := CurrentBranch(dir)
+	if !BranchExists(dir, branch) {
+		t.Errorf("BranchExists(%q) = false, want true", branch)
+	}
+
+	// Non-existent branch should not exist.
+	if BranchExists(dir, "nonexistent-branch-xyz") {
+		t.Error("BranchExists(nonexistent) = true, want false")
+	}
+}
+
 func TestDefaultBranch(t *testing.T) {
 	dir := setupTestRepo(t)
 

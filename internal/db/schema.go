@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 9
+const currentVersion = 10
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	autopilot_max_turns    INTEGER DEFAULT 50,
 	autopilot_max_budget_usd REAL DEFAULT 3.00,
 	autopilot_skip_label   TEXT DEFAULT 'no-agent',
+	autopilot_base_branch  TEXT DEFAULT '',
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -222,6 +223,12 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
+	if version < 10 {
+		if err := migrateV10(db); err != nil {
+			return fmt.Errorf("apply migration v10: %w", err)
+		}
+	}
+
 	_, err = db.Exec("UPDATE schema_version SET version = ?", currentVersion)
 	return err
 }
@@ -405,6 +412,17 @@ func migrateV9(db *sqlx.DB) error {
 		if _, err := db.Exec(fmt.Sprintf(`UPDATE projects SET %s = '' WHERE %s IS NULL`, col, col)); err != nil {
 			return fmt.Errorf("null-fill %s: %w", col, err)
 		}
+	}
+	return nil
+}
+
+func migrateV10(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN autopilot_base_branch TEXT DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add autopilot_base_branch: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE projects SET autopilot_base_branch = '' WHERE autopilot_base_branch IS NULL`); err != nil {
+		return fmt.Errorf("null-fill autopilot_base_branch: %w", err)
 	}
 	return nil
 }
