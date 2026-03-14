@@ -713,7 +713,7 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		"-p",
 		"--max-turns", strconv.Itoa(maxTurns),
 		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
-		"--dangerously-skip-permissions",
+		"--allowedTools", allowedToolsArg(),
 		prompt,
 	)
 	cmd.Dir = task.WorktreePath
