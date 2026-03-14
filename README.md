@@ -1,2 +1,1 @@
-# myapp
-A test repo.
+# Test
