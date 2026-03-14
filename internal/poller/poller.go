@@ -143,6 +143,8 @@ type Poller struct {
 	cancel          context.CancelFunc
 	stopped         chan struct{}
 	intervalChanged chan time.Duration // signals run loop to reset ticker
+
+	autopilotStatus func() string // optional callback for autopilot status injection
 }
 
 // New creates a new Poller. Publisher may be nil if bus publishing is not available.
@@ -165,6 +167,19 @@ func (p *Poller) Events() <-chan Event {
 // Project returns the poller's project.
 func (p *Poller) Project() *db.Project {
 	return p.project
+}
+
+// Provider returns the poller's LLM provider.
+func (p *Poller) Provider() llm.Provider {
+	return p.provider
+}
+
+// SetAutopilotStatusFunc sets a callback that returns autopilot status text
+// for injection into the tier 2 analyzer prompt.
+func (p *Poller) SetAutopilotStatusFunc(fn func() string) {
+	p.mu.Lock()
+	p.autopilotStatus = fn
+	p.mu.Unlock()
 }
 
 // SetRefreshInterval updates the poll interval at runtime.
@@ -1092,6 +1107,17 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 			}
 		}
 		b.WriteString("\n")
+	}
+
+	// Autopilot status injection (mechanical, from supervisor callback).
+	p.mu.Lock()
+	autopilotFn := p.autopilotStatus
+	p.mu.Unlock()
+	if autopilotFn != nil {
+		if statusBlock := autopilotFn(); statusBlock != "" {
+			b.WriteString(statusBlock)
+			b.WriteString("\n")
+		}
 	}
 
 	b.WriteString("## Active Concerns\n")

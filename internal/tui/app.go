@@ -13,6 +13,8 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
+	"github.com/dustinlange/agent-minder/internal/autopilot"
+	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/poller"
@@ -98,6 +100,20 @@ type trackFetchResultMsg struct {
 // clearTrackStatusMsg clears the track status after a delay.
 type clearTrackStatusMsg struct{}
 
+// autopilotPrepareResultMsg is sent when autopilot issue fetch completes.
+type autopilotPrepareResultMsg struct {
+	total     int
+	unblocked int
+	err       error
+}
+
+// autopilotEventMsg wraps an autopilot supervisor event.
+type autopilotEventMsg autopilot.Event
+
+// clearAutopilotStatusMsg clears a temporary autopilot status message.
+type clearAutopilotStatusMsg struct{}
+
+
 // idleCheckMsg triggers periodic idle timeout checking.
 type idleCheckMsg time.Time
 
@@ -162,6 +178,14 @@ type Model struct {
 	// Filter mode (bulk add tracked items).
 	filterState  *filterState
 	filterStatus string
+
+	// Autopilot.
+	autopilotSupervisor *autopilot.Supervisor
+	autopilotMode       string // "", "confirm", "running", "stop-confirm"
+	autopilotStatus     string
+	autopilotTotal      int
+	autopilotUnblocked  int
+	origPollInterval    time.Duration // saved to restore after autopilot stops
 
 	// Auto-pause on idle.
 	lastUserInput time.Time
@@ -450,6 +474,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
+	case autopilotPrepareResultMsg:
+		m.polling = false
+		if msg.err != nil {
+			m.autopilotStatus = fmt.Sprintf("Error: %v", msg.err)
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		if msg.total == 0 {
+			m.autopilotStatus = "No issues found matching filter"
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		m.autopilotTotal = msg.total
+		m.autopilotUnblocked = msg.unblocked
+		m.autopilotMode = "confirm"
+		m.autopilotStatus = ""
+		return m, nil
+
+	case autopilotEventMsg:
+		event := autopilot.Event(msg)
+		m.events = append(m.events, poller.Event{
+			Time:    event.Time,
+			Type:    "autopilot",
+			Summary: fmt.Sprintf("[%s] %s", event.Type, event.Summary),
+		})
+		if len(m.events) > 50 {
+			m.events = m.events[len(m.events)-50:]
+		}
+		m.rebuildEventLogContent()
+		if event.Type == "stopped" {
+			m.autopilotMode = ""
+			// Restore poll interval.
+			if m.origPollInterval > 0 {
+				m.poller.SetRefreshInterval(m.origPollInterval)
+				m.origPollInterval = 0
+			}
+			m.poller.SetAutopilotStatusFunc(nil)
+			m.autopilotSupervisor = nil
+		}
+		m.resizeViewports()
+		return m, listenForAutopilotEvents(m.autopilotSupervisor)
+
+	case clearAutopilotStatusMsg:
+		m.autopilotStatus = ""
+		return m, nil
+
 	case filterChoicesMsg:
 		if m.filterState != nil {
 			if msg.err != nil || len(msg.choices) == 0 {
@@ -555,6 +631,30 @@ type clearFilterStatusMsg struct{}
 type clearSettingsStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Autopilot confirm mode intercepts y/n/esc.
+	if m.autopilotMode == "confirm" {
+		switch msg.String() {
+		case "y":
+			return m.confirmAutopilot()
+		case "n", "esc":
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			m.autopilotStatus = ""
+			return m, nil
+		}
+		return m, nil
+	}
+	if m.autopilotMode == "stop-confirm" {
+		switch msg.String() {
+		case "y":
+			return m.confirmStopAutopilot()
+		case "n", "esc":
+			m.autopilotMode = "running"
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "?":
 		m.showHelp = !m.showHelp
@@ -654,7 +754,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if pollMinutes < 1 {
 			pollMinutes = 1
 		}
-		m.settingsState = newSettingsState(pollMinutes, m.project.AnalyzerFocus)
+		m.settingsState = newSettingsState(pollMinutes, m.project.AnalyzerFocus, m.project)
 		// Apply textarea theme to match current theme.
 		var s textarea.Styles
 		if currentTheme().Name == "light" {
@@ -707,6 +807,10 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		cmd := m.onboardInput.Focus()
 		return m, cmd
+	case "a":
+		return m.startAutopilot()
+	case "A":
+		return m.stopAutopilot()
 	case "up", "down", "pgup", "pgdown":
 		var cmd tea.Cmd
 		m.eventLogVP, cmd = m.eventLogVP.Update(msg)
@@ -1169,6 +1273,132 @@ func idleCheckTick() tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(60 * time.Second)
 		return idleCheckMsg(time.Now())
+	}
+}
+
+// startAutopilot begins the autopilot flow: fetch issues and show confirmation.
+func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
+	if m.autopilotMode == "running" {
+		m.autopilotStatus = "Autopilot already running — press A to stop"
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+	}
+
+	// Check prerequisites: need tracked issues.
+	trackedItems, _ := m.store.GetTrackedItems(m.project.ID)
+	hasOpenIssue := false
+	for _, item := range trackedItems {
+		if item.ItemType == "issue" && item.State == "open" {
+			hasOpenIssue = true
+			break
+		}
+	}
+	if !hasOpenIssue {
+		m.autopilotStatus = "No open issues tracked — use 'i' or 'f' to track issues first"
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+	}
+
+	ghRepos := m.poller.GitHubRepos()
+	if len(ghRepos) == 0 {
+		m.autopilotStatus = "No GitHub repos enrolled"
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+	}
+
+	// Get repo info for supervisor.
+	repos, _ := m.store.GetRepos(m.project.ID)
+	if len(repos) == 0 {
+		m.autopilotStatus = "No repos enrolled"
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+	}
+
+	ghToken := config.GetIntegrationToken("github")
+	if ghToken == "" {
+		m.autopilotStatus = "GitHub token required (GITHUB_TOKEN, GH_TOKEN, or keychain)"
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+	}
+
+	sup := autopilot.New(
+		m.store, m.project, m.poller.Provider(),
+		repos[0].Path,
+		ghRepos[0].Owner, ghRepos[0].Repo,
+		ghToken,
+	)
+	m.autopilotSupervisor = sup
+	m.autopilotStatus = "Fetching issues..."
+	m.polling = true
+
+	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+		total, unblocked, err := sup.Prepare(context.Background())
+		return autopilotPrepareResultMsg{total: total, unblocked: unblocked, err: err}
+	})
+}
+
+// confirmAutopilot launches the autopilot after user confirms.
+func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = ""
+		return m, nil
+	}
+
+	m.autopilotMode = "running"
+
+	// Wire autopilot status into poller.
+	m.poller.SetAutopilotStatusFunc(sup.StatusBlock)
+
+	// Bump poll frequency.
+	m.origPollInterval = m.project.RefreshInterval()
+	newInterval := m.origPollInterval / 2
+	if newInterval < 30*time.Second {
+		newInterval = 30 * time.Second
+	}
+	m.poller.SetRefreshInterval(newInterval)
+
+	sup.Launch(context.Background())
+
+	return m, tea.Batch(
+		listenForAutopilotEvents(sup),
+	)
+}
+
+// stopAutopilot stops the running autopilot.
+func (m Model) stopAutopilot() (tea.Model, tea.Cmd) {
+	if m.autopilotMode != "running" || m.autopilotSupervisor == nil {
+		return m, nil
+	}
+	m.autopilotMode = "stop-confirm"
+	return m, nil
+}
+
+func (m Model) confirmStopAutopilot() (tea.Model, tea.Cmd) {
+	m.autopilotMode = "running"
+	sup := m.autopilotSupervisor
+	return m, func() tea.Msg {
+		sup.Stop()
+		return nil
+	}
+}
+
+// listenForAutopilotEvents returns a command that waits for the next autopilot event.
+func listenForAutopilotEvents(sup *autopilot.Supervisor) tea.Cmd {
+	if sup == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		event, ok := <-sup.Events()
+		if !ok {
+			return nil
+		}
+		return autopilotEventMsg(event)
 	}
 }
 

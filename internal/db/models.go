@@ -20,9 +20,15 @@ type Project struct {
 	LLMModel             string `db:"llm_model"`
 	LLMSummarizerModel   string `db:"llm_summarizer_model"`
 	LLMAnalyzerModel     string `db:"llm_analyzer_model"`
-	IdlePauseSec         int    `db:"idle_pause_sec"`
-	AnalyzerFocus        string `db:"analyzer_focus"`
-	CreatedAt            string `db:"created_at"`
+	IdlePauseSec           int     `db:"idle_pause_sec"`
+	AnalyzerFocus          string  `db:"analyzer_focus"`
+	AutopilotFilterType    string  `db:"autopilot_filter_type"`  // deprecated, unused
+	AutopilotFilterValue   string  `db:"autopilot_filter_value"` // deprecated, unused
+	AutopilotMaxAgents     int     `db:"autopilot_max_agents"`
+	AutopilotMaxTurns      int     `db:"autopilot_max_turns"`
+	AutopilotMaxBudgetUSD  float64 `db:"autopilot_max_budget_usd"`
+	AutopilotSkipLabel     string  `db:"autopilot_skip_label"`
+	CreatedAt              string  `db:"created_at"`
 }
 
 // RefreshInterval returns the refresh interval as a time.Duration.
@@ -143,6 +149,23 @@ type CompletedItem struct {
 // DisplayRef returns a compact reference like "owner/repo#123".
 func (c *CompletedItem) DisplayRef() string {
 	return fmt.Sprintf("%s/%s#%d", c.Owner, c.Repo, c.Number)
+}
+
+// AutopilotTask represents an issue being worked on by an autopilot agent.
+type AutopilotTask struct {
+	ID           int64  `db:"id"`
+	ProjectID    int64  `db:"project_id"`
+	IssueNumber  int    `db:"issue_number"`
+	IssueTitle   string `db:"issue_title"`
+	IssueBody    string `db:"issue_body"`
+	Dependencies string `db:"dependencies"` // JSON array of issue numbers
+	Status       string `db:"status"`       // queued, running, done, bailed, blocked
+	WorktreePath string `db:"worktree_path"`
+	Branch       string `db:"branch"`
+	PRNumber     int    `db:"pr_number"`
+	AgentLog     string `db:"agent_log"`
+	StartedAt    string `db:"started_at"`
+	CompletedAt  string `db:"completed_at"`
 }
 
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.

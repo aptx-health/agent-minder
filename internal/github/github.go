@@ -35,6 +35,8 @@ func (s *ItemStatus) CompactStatus() string {
 		return "Appvd"
 	case s.ReviewState == "changes_requested":
 		return "ChReq"
+	case hasLabel(s.Labels, "needs-review"), hasLabel(s.Labels, "needs review"):
+		return "Revew"
 	case hasLabel(s.Labels, "in progress"), hasLabel(s.Labels, "in-progress"), hasLabel(s.Labels, "wip"):
 		return "InProg"
 	default:
@@ -287,6 +289,17 @@ func (c *Client) ListLabels(ctx context.Context, owner, repo string) ([]RepoChoi
 		opts.Page = resp.NextPage
 	}
 	return all, nil
+}
+
+// AddLabel adds a label to an issue/PR. Creates the label if it doesn't exist.
+func (c *Client) AddLabel(ctx context.Context, owner, repo string, number int, label string) error {
+	_, _, err := c.gh.Issues.AddLabelsToIssue(ctx, owner, repo, number, []string{label})
+	return err
+}
+
+// RemoveLabel removes a label from an issue/PR. Ignores errors if label isn't present.
+func (c *Client) RemoveLabel(ctx context.Context, owner, repo string, number int, label string) {
+	c.gh.Issues.RemoveLabelForIssue(ctx, owner, repo, number, label)
 }
 
 // ListMilestones returns open milestones for a repo.

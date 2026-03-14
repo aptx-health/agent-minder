@@ -1298,3 +1298,260 @@ func TestPruneTrackedItems_ArchivesBeforeDelete(t *testing.T) {
 		t.Errorf("archived item number = %d, want 6", completed[0].Number)
 	}
 }
+
+func TestMigrationV9_AutopilotTasks(t *testing.T) {
+	store := openTestDB(t)
+
+	// Verify schema version is 9.
+	var version int
+	if err := store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1"); err != nil {
+		t.Fatalf("get version: %v", err)
+	}
+	if version != 9 {
+		t.Errorf("version = %d, want 9", version)
+	}
+
+	// Create a project with autopilot fields.
+	p := &Project{
+		Name:                  "autopilot-test",
+		GoalType:              "feature",
+		GoalDescription:       "test autopilot",
+		RefreshIntervalSec:    300,
+		MessageTTLSec:         172800,
+		LLMProvider:           "anthropic",
+		LLMModel:              "claude-haiku-4-5",
+		LLMSummarizerModel:    "claude-haiku-4-5",
+		LLMAnalyzerModel:      "claude-sonnet-4-6",
+		AutopilotMaxAgents:    5,
+		AutopilotMaxTurns:     100,
+		AutopilotMaxBudgetUSD: 5.50,
+		AutopilotSkipLabel:    "skip-me",
+	}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Verify autopilot fields persist.
+	got, err := store.GetProject("autopilot-test")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if got.AutopilotMaxAgents != 5 {
+		t.Errorf("AutopilotMaxAgents = %d, want 5", got.AutopilotMaxAgents)
+	}
+	if got.AutopilotMaxTurns != 100 {
+		t.Errorf("AutopilotMaxTurns = %d, want 100", got.AutopilotMaxTurns)
+	}
+	if got.AutopilotMaxBudgetUSD != 5.50 {
+		t.Errorf("AutopilotMaxBudgetUSD = %f, want 5.50", got.AutopilotMaxBudgetUSD)
+	}
+	if got.AutopilotSkipLabel != "skip-me" {
+		t.Errorf("AutopilotSkipLabel = %q, want %q", got.AutopilotSkipLabel, "skip-me")
+	}
+}
+
+func TestAutopilotTasksCRUD(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{
+		Name:               "ap-crud",
+		GoalType:           "feature",
+		GoalDescription:    "test",
+		RefreshIntervalSec: 300,
+		MessageTTLSec:      172800,
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create a task.
+	task := &AutopilotTask{
+		ProjectID:    p.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Add auth",
+		IssueBody:    "Implement OAuth",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+	if task.ID == 0 {
+		t.Fatal("expected non-zero ID")
+	}
+
+	// Get tasks.
+	tasks, err := store.GetAutopilotTasks(p.ID)
+	if err != nil {
+		t.Fatalf("GetAutopilotTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(tasks))
+	}
+	if tasks[0].IssueNumber != 42 {
+		t.Errorf("IssueNumber = %d, want 42", tasks[0].IssueNumber)
+	}
+
+	// Update status.
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "running"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].Status != "running" {
+		t.Errorf("Status = %q, want running", tasks[0].Status)
+	}
+
+	// Update running info.
+	if err := store.UpdateAutopilotTaskRunning(task.ID, "/tmp/wt", "agent/issue-42", "/tmp/log"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskRunning: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].WorktreePath != "/tmp/wt" {
+		t.Errorf("WorktreePath = %q, want /tmp/wt", tasks[0].WorktreePath)
+	}
+
+	// Update PR number.
+	if err := store.UpdateAutopilotTaskPR(task.ID, 99); err != nil {
+		t.Fatalf("UpdateAutopilotTaskPR: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].PRNumber != 99 {
+		t.Errorf("PRNumber = %d, want 99", tasks[0].PRNumber)
+	}
+
+	// Mark done.
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "done"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus done: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].Status != "done" {
+		t.Errorf("Status = %q, want done", tasks[0].Status)
+	}
+	if tasks[0].CompletedAt == "" {
+		t.Error("CompletedAt should be set when done")
+	}
+
+	// Clear.
+	if err := store.ClearAutopilotTasks(p.ID); err != nil {
+		t.Fatalf("ClearAutopilotTasks: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if len(tasks) != 0 {
+		t.Errorf("got %d tasks after clear, want 0", len(tasks))
+	}
+}
+
+func TestBulkCreateAutopilotTasks(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{
+		Name:               "ap-bulk",
+		GoalType:           "feature",
+		GoalDescription:    "test",
+		RefreshIntervalSec: 300,
+		MessageTTLSec:      172800,
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	store.CreateProject(p)
+
+	tasks := []*AutopilotTask{
+		{ProjectID: p.ID, IssueNumber: 1, IssueTitle: "Task 1", Dependencies: "[]", Status: "queued"},
+		{ProjectID: p.ID, IssueNumber: 2, IssueTitle: "Task 2", Dependencies: "[]", Status: "queued"},
+		{ProjectID: p.ID, IssueNumber: 1, IssueTitle: "Task 1 dup", Dependencies: "[]", Status: "queued"}, // duplicate
+	}
+
+	inserted, err := store.BulkCreateAutopilotTasks(tasks)
+	if err != nil {
+		t.Fatalf("BulkCreateAutopilotTasks: %v", err)
+	}
+	if inserted != 2 {
+		t.Errorf("inserted = %d, want 2 (1 duplicate)", inserted)
+	}
+
+	got, _ := store.GetAutopilotTasks(p.ID)
+	if len(got) != 2 {
+		t.Errorf("got %d tasks, want 2", len(got))
+	}
+}
+
+func TestQueuedUnblockedTasks(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{
+		Name:               "ap-deps",
+		GoalType:           "feature",
+		GoalDescription:    "test",
+		RefreshIntervalSec: 300,
+		MessageTTLSec:      172800,
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	store.CreateProject(p)
+
+	// Task 1: no deps (should be unblocked).
+	t1 := &AutopilotTask{ProjectID: p.ID, IssueNumber: 1, IssueTitle: "Base", Dependencies: "[]", Status: "queued"}
+	// Task 2: depends on task 1 (should be blocked).
+	t2 := &AutopilotTask{ProjectID: p.ID, IssueNumber: 2, IssueTitle: "Depends on 1", Dependencies: "[1]", Status: "queued"}
+	// Task 3: no deps (should be unblocked).
+	t3 := &AutopilotTask{ProjectID: p.ID, IssueNumber: 3, IssueTitle: "Independent", Dependencies: "[]", Status: "queued"}
+
+	store.CreateAutopilotTask(t1)
+	store.CreateAutopilotTask(t2)
+	store.CreateAutopilotTask(t3)
+
+	unblocked, err := store.QueuedUnblockedTasks(p.ID)
+	if err != nil {
+		t.Fatalf("QueuedUnblockedTasks: %v", err)
+	}
+	if len(unblocked) != 2 {
+		t.Fatalf("got %d unblocked, want 2", len(unblocked))
+	}
+
+	// Complete task 1.
+	store.UpdateAutopilotTaskStatus(t1.ID, "done")
+
+	// Now task 2 should also be unblocked.
+	unblocked, err = store.QueuedUnblockedTasks(p.ID)
+	if err != nil {
+		t.Fatalf("QueuedUnblockedTasks after done: %v", err)
+	}
+	if len(unblocked) != 2 {
+		t.Fatalf("got %d unblocked after done, want 2 (tasks 2 and 3)", len(unblocked))
+	}
+}
+
+func TestParseDependencies(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []int
+	}{
+		{"[]", nil},
+		{"", nil},
+		{"[1]", []int{1}},
+		{"[1, 2, 3]", []int{1, 2, 3}},
+		{"[42]", []int{42}},
+		{"invalid", nil},
+	}
+
+	for _, tt := range tests {
+		got := parseDependencies(tt.input)
+		if len(got) != len(tt.want) {
+			t.Errorf("parseDependencies(%q) = %v, want %v", tt.input, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("parseDependencies(%q)[%d] = %d, want %d", tt.input, i, got[i], tt.want[i])
+			}
+		}
+	}
+}

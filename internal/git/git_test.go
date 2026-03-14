@@ -140,3 +140,66 @@ func TestWorktrees(t *testing.T) {
 		t.Error("first worktree should be marked as main")
 	}
 }
+
+func TestWorktreeAddRemove(t *testing.T) {
+	dir := setupTestRepo(t)
+
+	// Add a worktree.
+	wtPath := filepath.Join(t.TempDir(), "wt-test")
+	if err := WorktreeAdd(dir, wtPath, "test-branch"); err != nil {
+		t.Fatalf("WorktreeAdd: %v", err)
+	}
+
+	// Verify worktree exists.
+	worktrees, err := Worktrees(dir)
+	if err != nil {
+		t.Fatalf("Worktrees: %v", err)
+	}
+	if len(worktrees) != 2 {
+		t.Fatalf("expected 2 worktrees, got %d", len(worktrees))
+	}
+
+	// Find the new worktree.
+	found := false
+	for _, wt := range worktrees {
+		if wt.Branch == "test-branch" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("new worktree with branch 'test-branch' not found")
+	}
+
+	// Remove worktree.
+	if err := WorktreeRemove(dir, wtPath); err != nil {
+		t.Fatalf("WorktreeRemove: %v", err)
+	}
+
+	// Verify worktree is gone.
+	worktrees, err = Worktrees(dir)
+	if err != nil {
+		t.Fatalf("Worktrees after remove: %v", err)
+	}
+	if len(worktrees) != 1 {
+		t.Fatalf("expected 1 worktree after remove, got %d", len(worktrees))
+	}
+
+	// Delete branch.
+	if err := DeleteBranch(dir, "test-branch"); err != nil {
+		t.Fatalf("DeleteBranch: %v", err)
+	}
+}
+
+func TestDefaultBranch(t *testing.T) {
+	dir := setupTestRepo(t)
+
+	// Without origin, should fall back to "main".
+	branch, err := DefaultBranch(dir)
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if branch != "main" {
+		t.Errorf("DefaultBranch = %q, want 'main'", branch)
+	}
+}

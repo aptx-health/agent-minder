@@ -41,25 +41,54 @@ Each poll cycle with new activity runs two sequential LLM calls:
 
 ### TUI (internal/tui)
 
-Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `u` user msg, `m` broadcast, `o` onboard, `t` theme, `q` quit.
+Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `u` user msg, `m` broadcast, `o` onboard, `a` autopilot, `A` stop autopilot (with confirmation), `t` theme, `q` quit.
 
 - Spinner (bubbles/v2/spinner MiniDot) shown during manual poll (`r`), broadcast, and onboard generation
 - Concerns capped at 5 displayed with "+N more" indicator; color-coded by severity (info=muted, warning=amber, danger=bold red)
 - Event log dynamically sized to remaining terminal height
 - Broadcast mode: `m` opens textarea, ctrl+d sends through tier 2 LLM → publishes to bus
 - Onboard mode: `o` opens textarea for optional guidance, ctrl+d generates onboarding message via tier 2 LLM → publishes to `<project>/onboarding` with replace semantics
+- Autopilot modes: `""` (normal) → `"confirm"` (y/n to launch) → `"running"` (slot status displayed) → `"stop-confirm"` (y/n to stop)
+- During autopilot, poll frequency is halved (min 30s) and `StatusBlock()` is injected into tier 2 analyzer input
 
-### DB schema (internal/db) — currently v7
+### Autopilot (internal/autopilot)
 
-**projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model, llm_summarizer_model, llm_analyzer_model
+Supervisor manages N concurrent Claude Code agents working on GitHub issues in isolated worktrees.
+
+**Flow:** `a` in TUI → `Prepare()` (clears old tasks, converts tracked items, builds dep graph) → user confirms → `Launch()` fills slots with unblocked tasks → agents run `claude -p` → inspect outcome → clean up → refill slots.
+
+**Task lifecycle:** `queued` → `running` → `review` (PR opened) → `done` (PR merged) | `bailed` (no PR, agent gave up)
+
+**Key behaviors:**
+- `Prepare()` always starts fresh — clears old tasks, cleans orphaned worktrees, fetches live GitHub status (not cached labels)
+- Issues with the skip label (default `no-agent`, configurable via `project.AutopilotSkipLabel`) are excluded
+- Dependency graph built via one LLM call using analyzer model; includes all tracked items as context for cross-repo deps
+- External dependency blocking: `QueuedUnblockedTasks()` cross-references `tracked_items` — if a dep is tracked and open, it blocks
+- Dynamic task discovery: every 60s when idle slots exist, checks for new tracked items not yet in autopilot_tasks
+- Review check: every 30s, checks if PRs for `review` tasks have been merged → promotes to `done`
+- Label management: agent adds `in-progress` on start; supervisor swaps to `needs-review` when PR detected; removes `needs-review` when merged
+- On restart, `Prepare()` clears all tasks and rebuilds — no resume of stale state
+- Stop confirmation: `A` → "Stop all running agents? (y/n)" — waits for agent processes to exit naturally
+
+**Paths:**
+- Worktree: `~/.agent-minder/worktrees/<project>/issue-<N>`, branch: `agent/issue-<N>`
+- Agent logs: `~/.agent-minder/agents/<project>-issue-<N>.log`
+
+**Agent command:** `claude -p --max-turns <N> --max-budget-usd <B> --dangerously-skip-permissions "<prompt>"` with `GITHUB_TOKEN` env var
+
+### DB schema (internal/db) — currently v9
+
+**projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model, llm_summarizer_model, llm_analyzer_model, autopilot_max_agents, autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label
 
 **polls**: project_id, new_commits, new_messages, concerns_raised, llm_response (legacy), tier1_response, tier2_response, bus_message_sent, polled_at
+
+**autopilot_tasks**: project_id, issue_number, issue_title, issue_body, dependencies (JSON), status (queued/running/done/bailed/blocked), worktree_path, branch, pr_number, agent_log, started_at, completed_at — UNIQUE on project_id+issue_number
 
 **completed_items**: project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at — archived from tracked_items when they reach terminal state (only if progress_summary was non-empty)
 
 **Also**: repos, worktrees, topics, concerns (see `schema.go` for full DDL)
 
-Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items).
+Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns).
 
 `Poll.LLMResponse()` accessor returns tier2 > tier1 > raw (backward compat).
 
@@ -67,6 +96,7 @@ Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash
 
 | Package | Purpose | Notes |
 |---------|---------|-------|
+| `internal/autopilot` | Autopilot supervisor | Manages concurrent Claude Code agents on GitHub issues |
 | `cmd/` | Cobra commands | init, start, status, enroll, pause, resume |
 | `internal/db` | SQLite schema + CRUD | `Store` wraps sqlx.DB, migrations in `schema.go` |
 | `internal/llm` | LLM provider interface | Anthropic + OpenAI adapters, `Provider.Complete()` |

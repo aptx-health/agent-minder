@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -28,10 +29,14 @@ func (s *Store) CreateProject(p *Project) error {
 	result, err := s.db.NamedExec(`
 		INSERT INTO projects (name, goal_type, goal_description, refresh_interval_sec,
 			message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model,
-			llm_summarizer_model, llm_analyzer_model, idle_pause_sec, analyzer_focus)
+			llm_summarizer_model, llm_analyzer_model, idle_pause_sec, analyzer_focus,
+			autopilot_filter_type, autopilot_filter_value, autopilot_max_agents,
+			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
-			:llm_summarizer_model, :llm_analyzer_model, :idle_pause_sec, :analyzer_focus)
+			:llm_summarizer_model, :llm_analyzer_model, :idle_pause_sec, :analyzer_focus,
+			:autopilot_filter_type, :autopilot_filter_value, :autopilot_max_agents,
+			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -86,7 +91,13 @@ func (s *Store) UpdateProject(p *Project) error {
 			llm_summarizer_model = :llm_summarizer_model,
 			llm_analyzer_model = :llm_analyzer_model,
 			idle_pause_sec = :idle_pause_sec,
-			analyzer_focus = :analyzer_focus
+			analyzer_focus = :analyzer_focus,
+			autopilot_filter_type = :autopilot_filter_type,
+			autopilot_filter_value = :autopilot_filter_value,
+			autopilot_max_agents = :autopilot_max_agents,
+			autopilot_max_turns = :autopilot_max_turns,
+			autopilot_max_budget_usd = :autopilot_max_budget_usd,
+			autopilot_skip_label = :autopilot_skip_label
 		WHERE id = :id
 	`, p)
 	return err
@@ -591,6 +602,228 @@ func (s *Store) PruneCompletedItems(projectID int64, maxAgeSec int) (int, error)
 	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
+}
+
+// --- Autopilot Tasks ---
+
+// CreateAutopilotTask inserts a new autopilot task.
+func (s *Store) CreateAutopilotTask(task *AutopilotTask) error {
+	result, err := s.db.NamedExec(`
+		INSERT INTO autopilot_tasks (project_id, issue_number, issue_title, issue_body, dependencies, status)
+		VALUES (:project_id, :issue_number, :issue_title, :issue_body, :dependencies, :status)
+	`, task)
+	if err != nil {
+		return fmt.Errorf("insert autopilot task: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("last insert id: %w", err)
+	}
+	task.ID = id
+	return nil
+}
+
+// BulkCreateAutopilotTasks inserts multiple autopilot tasks in a transaction.
+// Uses INSERT OR IGNORE to skip duplicates.
+func (s *Store) BulkCreateAutopilotTasks(tasks []*AutopilotTask) (int, error) {
+	if len(tasks) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	inserted := 0
+	for _, task := range tasks {
+		result, err := tx.Exec(`
+			INSERT OR IGNORE INTO autopilot_tasks (project_id, issue_number, issue_title, issue_body, dependencies, status)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, task.ProjectID, task.IssueNumber, task.IssueTitle, task.IssueBody, task.Dependencies, task.Status)
+		if err != nil {
+			return inserted, fmt.Errorf("insert autopilot task: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		if n > 0 {
+			id, _ := result.LastInsertId()
+			task.ID = id
+			inserted++
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return inserted, nil
+}
+
+// GetAutopilotTasks returns all autopilot tasks for a project.
+func (s *Store) GetAutopilotTasks(projectID int64) ([]AutopilotTask, error) {
+	var tasks []AutopilotTask
+	if err := s.db.Select(&tasks, `
+		SELECT * FROM autopilot_tasks WHERE project_id = ? ORDER BY issue_number
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("get autopilot tasks: %w", err)
+	}
+	return tasks, nil
+}
+
+// UpdateAutopilotTaskStatus updates only the status and completed_at of an autopilot task.
+func (s *Store) UpdateAutopilotTaskStatus(id int64, status string) error {
+	completedAt := ""
+	if status == "done" || status == "bailed" {
+		completedAt = "datetime('now')"
+		_, err := s.db.Exec(`
+			UPDATE autopilot_tasks SET status = ?, completed_at = datetime('now') WHERE id = ?
+		`, status, id)
+		return err
+	}
+	_ = completedAt
+	_, err := s.db.Exec(`UPDATE autopilot_tasks SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
+// UpdateAutopilotTaskRunning sets a task to running with its worktree info.
+func (s *Store) UpdateAutopilotTaskRunning(id int64, worktreePath, branch, agentLog string) error {
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks SET status = 'running', worktree_path = ?, branch = ?, agent_log = ?, started_at = datetime('now')
+		WHERE id = ?
+	`, worktreePath, branch, agentLog, id)
+	return err
+}
+
+// UpdateAutopilotTaskPR sets the PR number for a completed task.
+func (s *Store) UpdateAutopilotTaskPR(id int64, prNumber int) error {
+	_, err := s.db.Exec(`UPDATE autopilot_tasks SET pr_number = ? WHERE id = ?`, prNumber, id)
+	return err
+}
+
+// UpdateAutopilotTaskDeps updates the dependencies JSON for a task.
+func (s *Store) UpdateAutopilotTaskDeps(id int64, deps string) error {
+	_, err := s.db.Exec(`UPDATE autopilot_tasks SET dependencies = ? WHERE id = ?`, deps, id)
+	return err
+}
+
+// QueuedUnblockedTasks returns queued tasks where all dependencies are done.
+func (s *Store) QueuedUnblockedTasks(projectID int64) ([]AutopilotTask, error) {
+	// Get all tasks for the project.
+	allTasks, err := s.GetAutopilotTasks(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build a map of issue number → status.
+	statusMap := make(map[int]string, len(allTasks))
+	for _, t := range allTasks {
+		statusMap[t.IssueNumber] = t.Status
+	}
+
+	// Build a map of tracked item number → state for external dep checks.
+	// If a dep isn't an autopilot task but IS a tracked open issue, it blocks.
+	trackedItems, _ := s.GetTrackedItems(projectID)
+	trackedState := make(map[int]string, len(trackedItems))
+	for _, item := range trackedItems {
+		trackedState[item.Number] = item.State
+	}
+
+	// Filter queued tasks where all deps are done.
+	var unblocked []AutopilotTask
+	for _, t := range allTasks {
+		if t.Status != "queued" {
+			continue
+		}
+		deps := parseDependencies(t.Dependencies)
+		allDone := true
+		for _, dep := range deps {
+			if taskStatus, ok := statusMap[dep]; ok {
+				// Dep is an autopilot task — must be done.
+				if taskStatus != "done" {
+					allDone = false
+					break
+				}
+			} else if state, ok := trackedState[dep]; ok {
+				// Dep is a tracked item but not an autopilot task (e.g., skipped via no-agent).
+				// Block unless the issue is closed/merged.
+				if state == "open" {
+					allDone = false
+					break
+				}
+			}
+			// If dep isn't tracked at all, treat as non-blocking.
+		}
+		if allDone {
+			unblocked = append(unblocked, t)
+		}
+	}
+	return unblocked, nil
+}
+
+// RunningAutopilotTasks returns all running autopilot tasks for a project.
+func (s *Store) RunningAutopilotTasks(projectID int64) ([]AutopilotTask, error) {
+	var tasks []AutopilotTask
+	if err := s.db.Select(&tasks, `
+		SELECT * FROM autopilot_tasks WHERE project_id = ? AND status = 'running' ORDER BY issue_number
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("running autopilot tasks: %w", err)
+	}
+	return tasks, nil
+}
+
+// ClearAutopilotTasks removes all autopilot tasks for a project.
+func (s *Store) ClearAutopilotTasks(projectID int64) error {
+	_, err := s.db.Exec(`DELETE FROM autopilot_tasks WHERE project_id = ?`, projectID)
+	return err
+}
+
+// ResetStaleAutopilotTasks resets interrupted tasks back to "queued".
+// "running" tasks are always reset (the process is gone).
+// "bailed" tasks are only reset if completed_at is NULL (interrupted before finishing).
+// Bailed tasks WITH completed_at were legitimate failures — the agent ran and gave up.
+// Returns the number of tasks reset.
+func (s *Store) ResetStaleAutopilotTasks(projectID int64) (int, error) {
+	result, err := s.db.Exec(`
+		UPDATE autopilot_tasks
+		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
+		    started_at = NULL, completed_at = NULL
+		WHERE project_id = ? AND (
+			status = 'running'
+			OR (status = 'bailed' AND completed_at IS NULL)
+		)
+	`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("reset stale tasks: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
+// parseDependencies parses a JSON array of issue numbers.
+func parseDependencies(deps string) []int {
+	if deps == "" || deps == "[]" {
+		return nil
+	}
+	// Simple parser for JSON int arrays like [42, 38].
+	deps = strings.TrimSpace(deps)
+	if len(deps) < 2 || deps[0] != '[' || deps[len(deps)-1] != ']' {
+		return nil
+	}
+	inner := deps[1 : len(deps)-1]
+	if strings.TrimSpace(inner) == "" {
+		return nil
+	}
+	parts := strings.Split(inner, ",")
+	var result []int
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(p, "%d", &n); err == nil {
+			result = append(result, n)
+		}
+	}
+	return result
 }
 
 // LastPoll returns the most recent poll for a project, or nil if none.

@@ -50,6 +50,15 @@ func (m Model) View() tea.View {
 		}
 	}
 
+	// Autopilot slot status (when running).
+	if m.autopilotMode == "running" && m.autopilotSupervisor != nil {
+		ap := m.renderAutopilotSlots()
+		if ap != "" {
+			b.WriteString(ap)
+			b.WriteString("\n")
+		}
+	}
+
 	// Main content area: modal modes replace analysis+event log.
 	if m.mode == "settings" {
 		b.WriteString(m.renderSettingsView())
@@ -517,6 +526,14 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 		}
 	}
 
+	if m.autopilotMode == "running" && m.autopilotSupervisor != nil {
+		apContent := m.renderAutopilotSlots()
+		if apContent != "" {
+			fixed += strings.Count(apContent, "\n")
+			fixed += 1 // blank line after autopilot slots
+		}
+	}
+
 	fixed += 1 // analysis header
 	fixed += 1 // event log header
 	fixed += 3 // blank lines (after analysis VP, after event log VP, before bottom bar)
@@ -725,6 +742,22 @@ func (m Model) renderBottomBar() string {
 		}
 		b.WriteString("\n\n")
 	default:
+		if m.autopilotMode == "confirm" {
+			b.WriteString(headerStyle().Render(
+				fmt.Sprintf("  %d issues found, %d unblocked. Launch %d agents? (y/n)",
+					m.autopilotTotal, m.autopilotUnblocked, m.project.AutopilotMaxAgents)))
+			b.WriteString("\n")
+			b.WriteString(helpStyle().Render("y: launch • n: cancel"))
+			b.WriteString("\n")
+		} else if m.autopilotMode == "stop-confirm" {
+			b.WriteString(concernDangerStyle().Render("  Stop all running agents? (y/n)"))
+			b.WriteString("\n")
+			b.WriteString(helpStyle().Render("y: stop • n: cancel"))
+			b.WriteString("\n")
+		} else if m.autopilotStatus != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
+			b.WriteString("\n")
+		}
 		if m.broadcastStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.broadcastStatus)))
 			b.WriteString("\n")
@@ -798,6 +831,8 @@ func allHelpHints() []struct{ key, desc string } {
 		{"u", "post user message"},
 		{"m", "broadcast to agents"},
 		{"o", "generate onboarding"},
+		{"a", "launch autopilot"},
+		{"A", "stop autopilot"},
 		{"d", "toggle repo/topic details"},
 		{"t", "cycle theme"},
 		{"\u2191/\u2193", "scroll event log"},
@@ -827,6 +862,38 @@ func renderHelpOverlay(width int) string {
 	return b.String()
 }
 
+// renderAutopilotSlots returns a display of autopilot agent slot status.
+func (m Model) renderAutopilotSlots() string {
+	if m.autopilotSupervisor == nil {
+		return ""
+	}
+
+	slots := m.autopilotSupervisor.SlotStatus()
+	var b strings.Builder
+	b.WriteString(headerStyle().Render("Autopilot Agents"))
+	b.WriteString("  ")
+	b.WriteString(mutedStyle().Render("[A: stop]"))
+	b.WriteString("\n")
+
+	for _, slot := range slots {
+		if slot.Status == "idle" {
+			b.WriteString(mutedStyle().Render(fmt.Sprintf("  Slot %d: idle", slot.SlotNum)))
+		} else {
+			elapsed := slot.RunningFor.Round(time.Second)
+			title := slot.IssueTitle
+			if len(title) > 40 {
+				title = title[:37] + "..."
+			}
+			b.WriteString(statusRunningStyle().Render(fmt.Sprintf("  Slot %d: #%d %s (%s)",
+				slot.SlotNum, slot.IssueNumber, title, elapsed)))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// renderAgentLogPreview shows the last N lines of the active agent's log.
 // truncateLine truncates a string to maxWidth characters, adding "..." if truncated.
 func truncateLine(s string, maxWidth int) string {
 	if maxWidth <= 0 {
