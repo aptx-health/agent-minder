@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/dustinlange/agent-minder/internal/sqliteutil"
 	"github.com/jmoiron/sqlx"
@@ -434,7 +435,10 @@ func migrateV10(db *sqlx.DB) error {
 	return nil
 }
 
-// DefaultDBPath returns the default path for the agent-minder database.
+// DefaultDBPath returns the agent-minder database path, respecting MINDER_DB env var.
 func DefaultDBPath() string {
+	if p := os.Getenv("MINDER_DB"); p != "" {
+		return ExpandHome(p)
+	}
 	return ExpandHome("~/.agent-minder/minder.db")
 }
