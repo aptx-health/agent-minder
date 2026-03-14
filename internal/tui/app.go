@@ -654,7 +654,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if pollMinutes < 1 {
 			pollMinutes = 1
 		}
-		m.settingsState = newSettingsState(pollMinutes)
+		m.settingsState = newSettingsState(pollMinutes, m.project.AnalyzerFocus)
+		// Apply textarea theme to match current theme.
+		var s textarea.Styles
+		if currentTheme().Name == "light" {
+			s = textarea.DefaultLightStyles()
+		} else {
+			s = textarea.DefaultDarkStyles()
+		}
+		m.settingsState.textarea.SetStyles(s)
 		m.settingsStatus = ""
 		m.mode = "settings"
 		m.resizeViewports()

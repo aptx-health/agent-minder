@@ -695,6 +695,8 @@ func (m Model) renderBottomBar() string {
 				b.WriteString(helpStyle().Render("up/down: select \u2022 enter: edit \u2022 esc: close"))
 			case settingsStepEditValue:
 				b.WriteString(helpStyle().Render("enter: save \u2022 esc: cancel"))
+			case settingsStepEditTextarea:
+				b.WriteString(helpStyle().Render("ctrl+d: save \u2022 esc: cancel"))
 			}
 		}
 		b.WriteString("\n\n")

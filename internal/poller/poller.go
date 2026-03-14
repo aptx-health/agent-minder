@@ -811,11 +811,11 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, prStatusSection, concerns, trackedItems, completedItems)
-	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model, "system_prompt", tier2SystemPrompt(p.project.Name), "user_prompt", tier2Prompt)
+	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model, "system_prompt", tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus), "user_prompt", tier2Prompt)
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     tier2Model,
-		System:    tier2SystemPrompt(p.project.Name),
+		System:    tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus),
 		Messages:  []llm.Message{{Role: "user", Content: tier2Prompt}},
 		MaxTokens: 1024,
 	})
@@ -973,8 +973,8 @@ func buildBusSummaryPrompt(project *db.Project, msgActivity string) string {
 
 // --- Tier 2 System Prompt (Opus analyzer) ---
 
-func tier2SystemPrompt(projectName string) string {
-	return fmt.Sprintf(`You are an AI project analyzer for %q. You receive focused summaries of recent git activity and bus messages (from separate summarizer agents), plus full tracked issue/PR context from sweep agents. Produce a structured analysis.
+func tier2SystemPrompt(projectName, analyzerFocus string) string {
+	base := fmt.Sprintf(`You are an AI project analyzer for %q. You receive focused summaries of recent git activity and bus messages (from separate summarizer agents), plus full tracked issue/PR context from sweep agents. Produce a structured analysis.
 
 Respond with a JSON object (no markdown fences):
 {
@@ -1016,7 +1016,19 @@ Evidence standards:
 - "Worktree PR Status" is authoritative for branch-to-PR association. Cross-reference it against every existing concern that mentions branches or PRs. A branch with an open PR means work has been submitted for review — you MUST remove or rewrite any concern claiming that branch has no PR, is stalled, or has unclear status. Use the PR review state (approved, changes_requested, pending) to assess readiness.
 
 Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
+
+	focus := analyzerFocus
+	if focus == "" {
+		focus = DefaultAnalyzerFocus
+	}
+	base += fmt.Sprintf("\n\n## Analyzer Focus\nThe user has configured the following focus for your analysis. This shapes how you interpret data, what you pay attention to, and how you communicate:\n\n%s", focus)
+
+	return base
 }
+
+// DefaultAnalyzerFocus is the default analyzer focus used when none is configured.
+// It reflects the analyzer's built-in engineering coordinator persona.
+const DefaultAnalyzerFocus = `Focus on cross-repo coordination and engineering progress. Be concise, evidence-based, and actionable. Prioritize blockers and coordination needs. Use direct, professional language.`
 
 func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStatus string, concerns []db.Concern, trackedItems []db.TrackedItem, completedItems []db.CompletedItem) string {
 	var b strings.Builder
