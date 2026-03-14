@@ -188,9 +188,12 @@ type Model struct {
 	filterState  *filterState
 	filterStatus string
 
+	// Poll confirm (R key).
+	pollConfirm bool
+
 	// Autopilot.
 	autopilotSupervisor *autopilot.Supervisor
-	autopilotMode       string // "", "confirm", "running", "stop-confirm"
+	autopilotMode       string // "", "scan-confirm", "confirm", "running", "stop-confirm"
 	autopilotStatus     string
 	autopilotTotal      int
 	autopilotUnblocked  int
@@ -645,6 +648,38 @@ type clearFilterStatusMsg struct{}
 type clearSettingsStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Poll confirm mode: confirm before expensive comprehensive analysis.
+	if m.pollConfirm {
+		switch msg.String() {
+		case "y":
+			m.pollConfirm = false
+			m.activeTab = tabAnalysis
+			m.analysisHasNew = false
+			m.resizeViewports()
+			p := m.poller
+			return m, func() tea.Msg {
+				p.PollNow(context.Background())
+				return nil
+			}
+		case "n", "esc":
+			m.pollConfirm = false
+			return m, nil
+		}
+		return m, nil
+	}
+	// Autopilot scan-confirm mode: confirm before expensive LLM scan.
+	if m.autopilotMode == "scan-confirm" {
+		switch msg.String() {
+		case "y":
+			return m.prepareAutopilot()
+		case "n", "esc":
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			m.autopilotStatus = ""
+			return m, nil
+		}
+		return m, nil
+	}
 	// Autopilot confirm mode intercepts y/n/esc.
 	if m.autopilotMode == "confirm" {
 		switch msg.String() {
@@ -717,14 +752,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return nil
 		}
 	case "R":
-		m.activeTab = tabAnalysis
-		m.analysisHasNew = false
-		m.resizeViewports()
-		p := m.poller
-		return m, func() tea.Msg {
-			p.PollNow(context.Background())
-			return nil
-		}
+		m.pollConfirm = true
+		return m, nil
 	case "e":
 		if m.activeTab != tabAnalysis {
 			return m, nil
@@ -1338,7 +1367,7 @@ func idleCheckTick() tea.Cmd {
 	}
 }
 
-// startAutopilot begins the autopilot flow: fetch issues and show confirmation.
+// startAutopilot begins the autopilot flow: show scan confirmation before expensive LLM call.
 func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 	if m.autopilotMode == "running" {
 		m.autopilotStatus = "Autopilot already running — press A to stop"
@@ -1388,6 +1417,7 @@ func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 		})
 	}
 
+	// All prerequisites met — ask for confirmation before expensive LLM scan.
 	sup := autopilot.New(
 		m.store, m.project, m.poller.Provider(),
 		repos[0].Path,
@@ -1395,7 +1425,19 @@ func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 		ghToken,
 	)
 	m.autopilotSupervisor = sup
-	m.autopilotStatus = "Fetching issues..."
+	m.autopilotMode = "scan-confirm"
+	return m, nil
+}
+
+// prepareAutopilot runs the expensive LLM-based issue analysis after user confirms.
+func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = ""
+		return m, nil
+	}
+
+	m.autopilotStatus = "Analyzing tracked items..."
 	m.polling = true
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
