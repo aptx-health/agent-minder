@@ -224,47 +224,83 @@ func (m Model) renderConcerns() string {
 
 // renderTrackedStrip returns a compact tracked items display.
 // Shows status tag and dot per item, wrapping to multiple lines for >5 items.
+// When trackedExpanded is true, shows one item per line with title.
 func (m Model) renderTrackedStrip() string {
 	if len(m.trackedItems) == 0 {
 		return ""
 	}
 
 	var b strings.Builder
-	b.WriteString(headerStyle().Render(fmt.Sprintf("Tracked (%d)", len(m.trackedItems))))
-	b.WriteString("\n")
-
-	lineWidth := 2 // indent
-	var line strings.Builder
-	line.WriteString("  ")
-
-	for i, item := range m.trackedItems {
-		entry := fmt.Sprintf("#%d[%s]", item.Number, item.LastStatus)
-		dot := statusDot(item.LastStatus)
-		entryLen := len(entry) + 2 // +2 for dot + space
-		// Build GitHub URL for OSC 8 hyperlink.
-		ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
-
-		// Wrap to next line if needed (allow ~5 items per line).
-		if i > 0 && lineWidth+entryLen+2 > m.width-2 {
-			b.WriteString(line.String())
-			b.WriteString("\n")
-			line.Reset()
-			line.WriteString("  ")
-			lineWidth = 2
-		}
-
-		if lineWidth > 2 {
-			line.WriteString("  ")
-			lineWidth += 2
-		}
-		line.WriteString(dot)
-		line.WriteString(fmt.Sprintf("\033]8;;%s\033\\", ghURL))
-		line.WriteString(mutedStyle().Render(entry))
-		line.WriteString("\033]8;;\033\\")
-		lineWidth += entryLen
+	toggleHint := "[x: expand]"
+	if m.trackedExpanded {
+		toggleHint = "[x: collapse]"
 	}
-	b.WriteString(line.String())
+	b.WriteString(headerStyle().Render(fmt.Sprintf("Tracked (%d)", len(m.trackedItems))))
+	b.WriteString("  ")
+	b.WriteString(mutedStyle().Render(toggleHint))
 	b.WriteString("\n")
+
+	if m.trackedExpanded {
+		for _, item := range m.trackedItems {
+			dot := statusDot(item.LastStatus)
+			ref := fmt.Sprintf("#%d", item.Number)
+			status := fmt.Sprintf("[%s]", item.LastStatus)
+			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
+
+			// Truncate title to fit available width.
+			// Format: "  ● #123[Status] Title..."
+			prefixLen := 2 + 2 + len(ref) + len(status) + 1 // indent + dot + ref + status + space
+			maxTitle := m.width - prefixLen - 2
+			title := item.Title
+			if maxTitle > 0 && len(title) > maxTitle {
+				title = title[:maxTitle-3] + "..."
+			}
+
+			b.WriteString("  ")
+			b.WriteString(dot)
+			b.WriteString(fmt.Sprintf("\033]8;;%s\033\\", ghURL))
+			b.WriteString(mutedStyle().Render(ref + status))
+			b.WriteString("\033]8;;\033\\")
+			if title != "" {
+				b.WriteString(" ")
+				b.WriteString(title)
+			}
+			b.WriteString("\n")
+		}
+	} else {
+		lineWidth := 2 // indent
+		var line strings.Builder
+		line.WriteString("  ")
+
+		for i, item := range m.trackedItems {
+			entry := fmt.Sprintf("#%d[%s]", item.Number, item.LastStatus)
+			dot := statusDot(item.LastStatus)
+			entryLen := len(entry) + 2 // +2 for dot + space
+			// Build GitHub URL for OSC 8 hyperlink.
+			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
+
+			// Wrap to next line if needed (allow ~5 items per line).
+			if i > 0 && lineWidth+entryLen+2 > m.width-2 {
+				b.WriteString(line.String())
+				b.WriteString("\n")
+				line.Reset()
+				line.WriteString("  ")
+				lineWidth = 2
+			}
+
+			if lineWidth > 2 {
+				line.WriteString("  ")
+				lineWidth += 2
+			}
+			line.WriteString(dot)
+			line.WriteString(fmt.Sprintf("\033]8;;%s\033\\", ghURL))
+			line.WriteString(mutedStyle().Render(entry))
+			line.WriteString("\033]8;;\033\\")
+			lineWidth += entryLen
+		}
+		b.WriteString(line.String())
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }
@@ -729,6 +765,7 @@ func allHelpHints() []struct{ key, desc string } {
 		{"r", "poll now"},
 		{"e", "expand/collapse analysis"},
 		{"w", "toggle worktrees"},
+		{"x", "expand/collapse tracked"},
 		{"i", "track issues"},
 		{"I", "untrack issues"},
 		{"f", "filter & bulk track"},
