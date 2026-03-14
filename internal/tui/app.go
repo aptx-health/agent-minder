@@ -511,9 +511,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildEventLogContent()
 		if event.Type == "stopped" {
 			m.autopilotMode = ""
-			// Restore poll interval.
+			// Restore status interval.
 			if m.origPollInterval > 0 {
-				m.poller.SetRefreshInterval(m.origPollInterval)
+				m.poller.SetStatusInterval(m.origPollInterval)
 				m.origPollInterval = 0
 			}
 			m.poller.SetAutopilotStatusFunc(nil)
@@ -675,6 +675,12 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			p.PollNow(context.Background())
 			return nil
 		}
+	case "R":
+		p := m.poller
+		return m, func() tea.Msg {
+			p.StatusNow(context.Background())
+			return nil
+		}
 	case "e":
 		m.analysisExpanded = !m.analysisExpanded
 		m.resizeViewports()
@@ -750,11 +756,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	case "s":
-		pollMinutes := m.project.RefreshIntervalSec / 60
-		if pollMinutes < 1 {
-			pollMinutes = 1
-		}
-		m.settingsState = newSettingsState(pollMinutes, m.project.AnalyzerFocus, m.project)
+		m.settingsState = newSettingsState(m.project)
 		// Apply textarea theme to match current theme.
 		var s textarea.Styles
 		if currentTheme().Name == "light" {
@@ -1355,13 +1357,13 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 	// Wire autopilot status into poller.
 	m.poller.SetAutopilotStatusFunc(sup.StatusBlock)
 
-	// Bump poll frequency.
-	m.origPollInterval = m.project.RefreshInterval()
+	// Halve status check frequency during autopilot for faster review gate checks.
+	m.origPollInterval = m.project.StatusInterval()
 	newInterval := m.origPollInterval / 2
-	if newInterval < 30*time.Second {
-		newInterval = 30 * time.Second
+	if newInterval < 15*time.Second {
+		newInterval = 15 * time.Second
 	}
-	m.poller.SetRefreshInterval(newInterval)
+	m.poller.SetStatusInterval(newInterval)
 
 	sup.Launch(context.Background())
 

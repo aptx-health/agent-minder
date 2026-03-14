@@ -8,7 +8,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 9
+const currentVersion = 10
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS projects (
 	analyzer_focus        TEXT DEFAULT '',
 	autopilot_filter_type  TEXT DEFAULT '',
 	autopilot_filter_value TEXT DEFAULT '',
+	status_interval_sec    INTEGER DEFAULT 30,
+	analysis_interval_sec  INTEGER DEFAULT 300,
 	autopilot_max_agents   INTEGER DEFAULT 3,
 	autopilot_max_turns    INTEGER DEFAULT 50,
 	autopilot_max_budget_usd REAL DEFAULT 3.00,
@@ -222,6 +224,12 @@ func migrate(db *sqlx.DB) error {
 		}
 	}
 
+	if version < 10 {
+		if err := migrateV10(db); err != nil {
+			return fmt.Errorf("apply migration v10: %w", err)
+		}
+	}
+
 	_, err = db.Exec("UPDATE schema_version SET version = ?", currentVersion)
 	return err
 }
@@ -405,6 +413,23 @@ func migrateV9(db *sqlx.DB) error {
 		if _, err := db.Exec(fmt.Sprintf(`UPDATE projects SET %s = '' WHERE %s IS NULL`, col, col)); err != nil {
 			return fmt.Errorf("null-fill %s: %w", col, err)
 		}
+	}
+	return nil
+}
+
+func migrateV10(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN status_interval_sec INTEGER DEFAULT 30`,
+		`ALTER TABLE projects ADD COLUMN analysis_interval_sec INTEGER DEFAULT 300`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	// Copy existing refresh_interval_sec into analysis_interval_sec for migration continuity.
+	if _, err := db.Exec(`UPDATE projects SET analysis_interval_sec = refresh_interval_sec WHERE refresh_interval_sec > 0`); err != nil {
+		return fmt.Errorf("copy refresh_interval to analysis_interval: %w", err)
 	}
 	return nil
 }

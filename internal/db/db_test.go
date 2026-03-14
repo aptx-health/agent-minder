@@ -1302,13 +1302,13 @@ func TestPruneTrackedItems_ArchivesBeforeDelete(t *testing.T) {
 func TestMigrationV9_AutopilotTasks(t *testing.T) {
 	store := openTestDB(t)
 
-	// Verify schema version is 9.
+	// Verify schema version is current.
 	var version int
 	if err := store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1"); err != nil {
 		t.Fatalf("get version: %v", err)
 	}
-	if version != 9 {
-		t.Errorf("version = %d, want 9", version)
+	if version != currentVersion {
+		t.Errorf("version = %d, want %d", version, currentVersion)
 	}
 
 	// Create a project with autopilot fields.

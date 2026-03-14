@@ -20,6 +20,8 @@ type Project struct {
 	LLMModel             string `db:"llm_model"`
 	LLMSummarizerModel   string `db:"llm_summarizer_model"`
 	LLMAnalyzerModel     string `db:"llm_analyzer_model"`
+	StatusIntervalSec      int     `db:"status_interval_sec"`
+	AnalysisIntervalSec    int     `db:"analysis_interval_sec"`
 	IdlePauseSec           int     `db:"idle_pause_sec"`
 	AnalyzerFocus          string  `db:"analyzer_focus"`
 	AutopilotFilterType    string  `db:"autopilot_filter_type"`  // deprecated, unused
@@ -39,6 +41,24 @@ func (p *Project) RefreshInterval() time.Duration {
 // MessageTTL returns the message TTL as a time.Duration.
 func (p *Project) MessageTTL() time.Duration {
 	return time.Duration(p.MessageTTLSec) * time.Second
+}
+
+// StatusInterval returns the status poll interval as a time.Duration.
+// Defaults to 30s if not set.
+func (p *Project) StatusInterval() time.Duration {
+	if p.StatusIntervalSec <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(p.StatusIntervalSec) * time.Second
+}
+
+// AnalysisInterval returns the analysis poll interval as a time.Duration.
+// Defaults to 5 minutes if not set.
+func (p *Project) AnalysisInterval() time.Duration {
+	if p.AnalysisIntervalSec <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(p.AnalysisIntervalSec) * time.Second
 }
 
 // IdlePauseDuration returns the idle pause threshold as a time.Duration.
