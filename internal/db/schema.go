@@ -33,8 +33,8 @@ CREATE TABLE IF NOT EXISTS projects (
 	analyzer_focus        TEXT DEFAULT '',
 	autopilot_filter_type  TEXT DEFAULT '',
 	autopilot_filter_value TEXT DEFAULT '',
-	status_interval_sec    INTEGER DEFAULT 30,
-	analysis_interval_sec  INTEGER DEFAULT 300,
+	status_interval_sec    INTEGER DEFAULT 300,
+	analysis_interval_sec  INTEGER DEFAULT 1800,
 	autopilot_max_agents   INTEGER DEFAULT 3,
 	autopilot_max_turns    INTEGER DEFAULT 50,
 	autopilot_max_budget_usd REAL DEFAULT 3.00,
@@ -420,8 +420,8 @@ func migrateV9(db *sqlx.DB) error {
 
 func migrateV10(db *sqlx.DB) error {
 	stmts := []string{
-		`ALTER TABLE projects ADD COLUMN status_interval_sec INTEGER DEFAULT 30`,
-		`ALTER TABLE projects ADD COLUMN analysis_interval_sec INTEGER DEFAULT 300`,
+		`ALTER TABLE projects ADD COLUMN status_interval_sec INTEGER DEFAULT 300`,
+		`ALTER TABLE projects ADD COLUMN analysis_interval_sec INTEGER DEFAULT 1800`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

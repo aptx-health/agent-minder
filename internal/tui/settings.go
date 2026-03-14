@@ -71,11 +71,11 @@ func newSettingsState(project *db.Project) *settingsState {
 
 	statusSec := project.StatusIntervalSec
 	if statusSec <= 0 {
-		statusSec = 30
+		statusSec = 300
 	}
 	analysisSec := project.AnalysisIntervalSec
 	if analysisSec <= 0 {
-		analysisSec = 300
+		analysisSec = 1800
 	}
 
 	return &settingsState{
@@ -86,8 +86,8 @@ func newSettingsState(project *db.Project) *settingsState {
 			{
 				label:       "Status interval",
 				description: "How often to run mechanical status checks",
-				value:       strconv.Itoa(statusSec),
-				unit:        "sec",
+				value:       strconv.Itoa(statusSec / 60),
+				unit:        "min",
 			},
 			{
 				label:       "Analysis interval",
@@ -206,13 +206,13 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 
 		switch field.label {
 		case "Status interval":
-			sec, err := strconv.Atoi(raw)
-			if err != nil || sec < 10 {
-				ss.err = "Enter a number >= 10"
+			minutes, err := strconv.Atoi(raw)
+			if err != nil || minutes < 1 {
+				ss.err = "Enter a number >= 1"
 				return m, nil
 			}
-			m.project.StatusIntervalSec = sec
-			ss.fields[ss.fieldIdx].value = strconv.Itoa(sec)
+			m.project.StatusIntervalSec = minutes * 60
+			ss.fields[ss.fieldIdx].value = strconv.Itoa(minutes)
 			ss.input.Blur()
 			ss.step = settingsStepSelectField
 			ss.err = ""

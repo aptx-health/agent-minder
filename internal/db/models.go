@@ -44,19 +44,19 @@ func (p *Project) MessageTTL() time.Duration {
 }
 
 // StatusInterval returns the status poll interval as a time.Duration.
-// Defaults to 30s if not set.
+// Defaults to 5 minutes if not set.
 func (p *Project) StatusInterval() time.Duration {
 	if p.StatusIntervalSec <= 0 {
-		return 30 * time.Second
+		return 5 * time.Minute
 	}
 	return time.Duration(p.StatusIntervalSec) * time.Second
 }
 
 // AnalysisInterval returns the analysis poll interval as a time.Duration.
-// Defaults to 5 minutes if not set.
+// Defaults to 30 minutes if not set.
 func (p *Project) AnalysisInterval() time.Duration {
 	if p.AnalysisIntervalSec <= 0 {
-		return 5 * time.Minute
+		return 30 * time.Minute
 	}
 	return time.Duration(p.AnalysisIntervalSec) * time.Second
 }

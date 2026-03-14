@@ -672,13 +672,13 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		p := m.poller
 		return m, func() tea.Msg {
-			p.PollNow(context.Background())
+			p.StatusNow(context.Background())
 			return nil
 		}
 	case "R":
 		p := m.poller
 		return m, func() tea.Msg {
-			p.StatusNow(context.Background())
+			p.PollNow(context.Background())
 			return nil
 		}
 	case "e":
