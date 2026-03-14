@@ -143,8 +143,7 @@ type Poller struct {
 	paused          bool
 	cancel          context.CancelFunc
 	stopped         chan struct{}
-	intervalChanged chan time.Duration // signals run loop to reset analysis ticker (legacy)
-	statusIntervalChanged  chan time.Duration
+	statusIntervalChanged   chan time.Duration
 	analysisIntervalChanged chan time.Duration
 
 	autopilotStatus func() string // optional callback for autopilot status injection
@@ -158,7 +157,6 @@ func New(store *db.Store, project *db.Project, provider llm.Provider, publisher 
 		provider:                provider,
 		publisher:               publisher,
 		events:                  make(chan Event, 64),
-		intervalChanged:         make(chan time.Duration, 1),
 		statusIntervalChanged:   make(chan time.Duration, 1),
 		analysisIntervalChanged: make(chan time.Duration, 1),
 	}
@@ -185,12 +183,6 @@ func (p *Poller) SetAutopilotStatusFunc(fn func() string) {
 	p.mu.Lock()
 	p.autopilotStatus = fn
 	p.mu.Unlock()
-}
-
-// SetRefreshInterval updates the analysis interval at runtime (legacy compat).
-// The change takes effect on the next tick cycle.
-func (p *Poller) SetRefreshInterval(d time.Duration) {
-	p.SetAnalysisInterval(d)
 }
 
 // SetStatusInterval updates the status poll interval at runtime.
@@ -535,9 +527,6 @@ func (p *Poller) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case d := <-p.intervalChanged:
-			// Legacy compat: reset analysis ticker.
-			analysisTicker.Reset(d)
 		case d := <-p.statusIntervalChanged:
 			statusTicker.Reset(d)
 		case d := <-p.analysisIntervalChanged:
@@ -809,6 +798,9 @@ func (p *Poller) doStatusPoll(ctx context.Context) (*PollResult, error) {
 	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates && gathered.prStatusSection == "" {
 		result.Tier1Summary = "No new activity."
 		debugLog("status poll skip", "stage", "status", "step", "skip", "project", p.project.Name)
+	} else {
+		// Build a brief summary so the event log isn't blank.
+		result.Tier1Summary = "Status: " + p.summarize(result)
 	}
 
 	debugLog("status poll complete", "stage", "status", "step", "complete", "project", p.project.Name, "duration_ms", result.Duration.Milliseconds())
