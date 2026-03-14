@@ -6,8 +6,9 @@ pre-commit:
     vet:
       run: go vet ./...
     fmt:
+      glob: "*.go"
       run: |
-        UNFMTED=$(gofmt -l . 2>&1)
+        UNFMTED=$(gofmt -l {staged_files} 2>&1)
         if [ -n "$UNFMTED" ]; then
           echo "Files not formatted:"
           echo "$UNFMTED"
