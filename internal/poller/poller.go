@@ -114,16 +114,16 @@ type TrackedItemChange struct {
 
 // PollResult holds the outcome of a single poll cycle.
 type PollResult struct {
-	NewCommits          int
-	NewMessages         int
-	NewWorktrees        int
-	TrackedItemChanges  []TrackedItemChange
-	Tier1Summary        string
-	Tier2Analysis       string
-	BusMessageSent      string
-	Concerns            []string
-	Duration            time.Duration
-	StatusOnly          bool // true for status-only polls (no LLM analysis)
+	NewCommits         int
+	NewMessages        int
+	NewWorktrees       int
+	TrackedItemChanges []TrackedItemChange
+	Tier1Summary       string
+	Tier2Analysis      string
+	BusMessageSent     string
+	Concerns           []string
+	Duration           time.Duration
+	StatusOnly         bool // true for status-only polls (no LLM analysis)
 }
 
 // LLMResponse returns the best available response for display.
@@ -142,12 +142,11 @@ type Poller struct {
 	publisher *msgbus.Publisher
 	events    chan Event
 
-	mu              sync.Mutex
-	paused          bool
-	cancel          context.CancelFunc
-	stopped         chan struct{}
-	statusIntervalChanged   chan time.Duration
-	analysisIntervalChanged chan time.Duration
+	mu                    sync.Mutex
+	paused                bool
+	cancel                context.CancelFunc
+	stopped               chan struct{}
+	statusIntervalChanged chan time.Duration
 
 	autopilotStatus func() string // optional callback for autopilot status injection
 }
@@ -155,13 +154,12 @@ type Poller struct {
 // New creates a new Poller. Publisher may be nil if bus publishing is not available.
 func New(store *db.Store, project *db.Project, provider llm.Provider, publisher *msgbus.Publisher) *Poller {
 	return &Poller{
-		store:                   store,
-		project:                 project,
-		provider:                provider,
-		publisher:               publisher,
-		events:                  make(chan Event, 64),
-		statusIntervalChanged:   make(chan time.Duration, 1),
-		analysisIntervalChanged: make(chan time.Duration, 1),
+		store:                 store,
+		project:               project,
+		provider:              provider,
+		publisher:             publisher,
+		events:                make(chan Event, 64),
+		statusIntervalChanged: make(chan time.Duration, 1),
 	}
 }
 
@@ -195,17 +193,6 @@ func (p *Poller) SetStatusInterval(d time.Duration) {
 	p.mu.Unlock()
 	select {
 	case p.statusIntervalChanged <- d:
-	default:
-	}
-}
-
-// SetAnalysisInterval updates the analysis poll interval at runtime.
-func (p *Poller) SetAnalysisInterval(d time.Duration) {
-	p.mu.Lock()
-	p.project.AnalysisIntervalSec = int(d.Seconds())
-	p.mu.Unlock()
-	select {
-	case p.analysisIntervalChanged <- d:
 	default:
 	}
 }
@@ -516,15 +503,12 @@ func (p *Poller) PostUserMessage(ctx context.Context, message string) error {
 func (p *Poller) run(ctx context.Context) {
 	defer close(p.stopped)
 
-	// Do an initial full poll immediately.
-	p.PollNow(ctx)
+	// Initial status-only check (no LLM analysis) to avoid spending tokens on startup.
+	p.StatusNow(ctx)
 
-	// Two independent tickers: fast status checks, slow analysis.
+	// Status ticker for mechanical checks. Analysis is user-initiated only (R key).
 	statusTicker := time.NewTicker(p.project.StatusInterval())
 	defer statusTicker.Stop()
-
-	analysisTicker := time.NewTicker(p.project.AnalysisInterval())
-	defer analysisTicker.Stop()
 
 	for {
 		select {
@@ -532,18 +516,11 @@ func (p *Poller) run(ctx context.Context) {
 			return
 		case d := <-p.statusIntervalChanged:
 			statusTicker.Reset(d)
-		case d := <-p.analysisIntervalChanged:
-			analysisTicker.Reset(d)
 		case <-statusTicker.C:
 			if p.IsPaused() {
 				continue
 			}
 			p.StatusNow(ctx)
-		case <-analysisTicker.C:
-			if p.IsPaused() {
-				continue
-			}
-			p.PollNow(ctx)
 		}
 	}
 }

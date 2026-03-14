@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/dustinlange/agent-minder/internal/autopilot"
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
@@ -79,9 +79,9 @@ type trackStep int
 
 const (
 	trackStepInput          trackStep = iota // entering issue numbers
-	trackStepFetching                       // fetching item details from GitHub
-	trackStepPreview                        // showing items for confirmation
-	trackStepCleanupConfirm                 // confirming cleanup of terminal items
+	trackStepFetching                        // fetching item details from GitHub
+	trackStepPreview                         // showing items for confirmation
+	trackStepCleanupConfirm                  // confirming cleanup of terminal items
 )
 
 // trackPreviewItem holds resolved item info for the confirmation preview.
@@ -113,9 +113,14 @@ type autopilotEventMsg autopilot.Event
 // clearAutopilotStatusMsg clears a temporary autopilot status message.
 type clearAutopilotStatusMsg struct{}
 
-
 // idleCheckMsg triggers periodic idle timeout checking.
 type idleCheckMsg time.Time
+
+// Tab constants.
+const (
+	tabOperations = 0
+	tabAnalysis   = 1
+)
 
 // Model is the root bubbletea model for the dashboard.
 type Model struct {
@@ -124,6 +129,10 @@ type Model struct {
 	poller  *poller.Poller
 	width   int
 	height  int
+
+	// Tab state.
+	activeTab      int  // tabOperations or tabAnalysis
+	analysisHasNew bool // true when new analysis arrived while on Ops tab
 
 	// State.
 	events   []poller.Event
@@ -248,12 +257,13 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		poller:         p,
 		events:         make([]poller.Event, 0, 64),
 		mode:           "normal",
+		activeTab:      tabOperations,
 		broadcastInput: bi,
 		userMsgInput:   ta,
 		onboardInput:   oi,
-		spinner:    sp,
-		polling:    true, // initial poll starts immediately
-		analysisVP: aVP,
+		spinner:        sp,
+		polling:        true, // initial status check starts immediately
+		analysisVP:     aVP,
 		eventLogVP:     eVP,
 		lastUserInput:  time.Now(),
 	}
@@ -264,7 +274,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 // applyTextareaTheme sets textarea styles to match the current theme.
 func (m *Model) applyTextareaTheme() {
 	var s textarea.Styles
-	if currentTheme().Name == "light" {
+	if currentTheme().Name == "latte" {
 		s = textarea.DefaultLightStyles()
 	} else {
 		s = textarea.DefaultDarkStyles()
@@ -330,9 +340,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.BackgroundColorMsg:
 		if msg.IsDark() {
-			setThemeByName("dark")
+			setThemeByName("mocha")
 		} else {
-			setThemeByName("light")
+			setThemeByName("latte")
 		}
 		m.applyTextareaTheme()
 		m.rebuildAnalysisContent()
@@ -358,6 +368,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.polling = false
 			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
+			// Flag new analysis if user is on Ops tab and this was an analysis result.
+			if m.activeTab == tabOperations && event.PollResult.Tier2Analysis != "" {
+				m.analysisHasNew = true
+			}
 		}
 		m.rebuildEventLogContent()
 		m.rebuildAnalysisContent()
@@ -656,6 +670,33 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "1":
+		m.activeTab = tabOperations
+		m.resizeViewports()
+		return m, nil
+	case "2":
+		m.activeTab = tabAnalysis
+		m.analysisHasNew = false
+		m.resizeViewports()
+		return m, nil
+	case "tab":
+		if m.activeTab == tabOperations {
+			m.activeTab = tabAnalysis
+			m.analysisHasNew = false
+		} else {
+			m.activeTab = tabOperations
+		}
+		m.resizeViewports()
+		return m, nil
+	case "shift+tab":
+		if m.activeTab == tabAnalysis {
+			m.activeTab = tabOperations
+		} else {
+			m.activeTab = tabAnalysis
+			m.analysisHasNew = false
+		}
+		m.resizeViewports()
+		return m, nil
 	case "?":
 		m.showHelp = !m.showHelp
 		m.resizeViewports()
@@ -676,12 +717,18 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return nil
 		}
 	case "R":
+		m.activeTab = tabAnalysis
+		m.analysisHasNew = false
+		m.resizeViewports()
 		p := m.poller
 		return m, func() tea.Msg {
 			p.PollNow(context.Background())
 			return nil
 		}
 	case "e":
+		if m.activeTab != tabAnalysis {
+			return m, nil
+		}
 		m.analysisExpanded = !m.analysisExpanded
 		m.resizeViewports()
 		return m, nil
@@ -703,7 +750,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.trackRows[0].input.Focus()
 		m.resizeViewports()
 		return m, cmd
-	case "f":
+	case "b":
 		repos := m.poller.GitHubRepos()
 		if len(repos) == 0 {
 			m.trackStatus = "No GitHub repos enrolled"
@@ -741,6 +788,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, cmd
 	case "w":
+		if m.activeTab != tabOperations {
+			return m, nil
+		}
 		m.showWorktrees = !m.showWorktrees
 		if m.showWorktrees && len(m.worktrees) == 0 {
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
@@ -748,10 +798,16 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	case "x":
+		if m.activeTab != tabOperations {
+			return m, nil
+		}
 		m.trackedExpanded = !m.trackedExpanded
 		m.resizeViewports()
 		return m, nil
 	case "c":
+		if m.activeTab != tabAnalysis {
+			return m, nil
+		}
 		m.concernsExpanded = !m.concernsExpanded
 		m.resizeViewports()
 		return m, nil
@@ -759,7 +815,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.settingsState = newSettingsState(m.project)
 		// Apply textarea theme to match current theme.
 		var s textarea.Styles
-		if currentTheme().Name == "light" {
+		if currentTheme().Name == "latte" {
 			s = textarea.DefaultLightStyles()
 		} else {
 			s = textarea.DefaultDarkStyles()
@@ -815,7 +871,11 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.stopAutopilot()
 	case "up", "down", "pgup", "pgdown":
 		var cmd tea.Cmd
-		m.eventLogVP, cmd = m.eventLogVP.Update(msg)
+		if m.activeTab == tabAnalysis {
+			m.analysisVP, cmd = m.analysisVP.Update(msg)
+		} else {
+			m.eventLogVP, cmd = m.eventLogVP.Update(msg)
+		}
 		return m, cmd
 	}
 	return m, nil
