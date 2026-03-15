@@ -210,21 +210,7 @@ func dimTimestamp(line string, dimStyle lipgloss.Style) string {
 	return line
 }
 
-// jsonlEvent represents a parsed JSONL log event from stream-json output.
-type jsonlEvent struct {
-	Type      string  `json:"type"`       // "assistant", "result", "system", etc.
-	Subtype   string  `json:"subtype"`    // "tool_use", "text", etc.
-	Tool      string  `json:"tool"`       // tool name for tool_use events
-	Input     string  `json:"input"`      // tool input summary
-	Text      string  `json:"text"`       // text content
-	Turns     int     `json:"num_turns"`  // for result events
-	Cost      float64 `json:"total_cost"` // for result events
-	Duration  int     `json:"duration_s"` // for result events
-	Timestamp string  `json:"timestamp"`  // ISO timestamp
-	Error     string  `json:"error"`      // error message
-}
-
-// renderJSONL renders JSONL log content with formatted, color-coded display.
+// renderJSONL renders JSONL log content (stream-json format) with formatted, color-coded display.
 func renderJSONL(content string) string {
 	lines := strings.Split(content, "\n")
 	theme := currentTheme()
@@ -245,81 +231,121 @@ func renderJSONL(content string) string {
 			continue
 		}
 
-		var evt jsonlEvent
-		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
 			// Malformed line — render dimmed.
 			b.WriteString(dimStyle.Render(truncateLine(line, 120)))
 			b.WriteString("\n")
 			continue
 		}
 
-		ts := formatTimestamp(evt.Timestamp)
+		evtType, _ := raw["type"].(string)
 
-		switch evt.Type {
+		switch evtType {
 		case "assistant":
-			if evt.Subtype == "tool_use" || evt.Tool != "" {
-				turnNum++
-				toolName := evt.Tool
-				if toolName == "" {
-					toolName = "tool"
-				}
-				detail := evt.Input
-				if len(detail) > 80 {
-					detail = detail[:77] + "..."
-				}
-				fmt.Fprintf(&b, "%s  %s  %s  %s\n",
-					dimStyle.Render(ts),
-					turnStyle.Render(fmt.Sprintf("%d", turnNum)),
-					toolStyle.Render(fmt.Sprintf("%-12s", toolName)),
-					textStyle.Render(detail))
-			} else if evt.Text != "" {
-				text := evt.Text
-				if len(text) > 80 {
-					text = text[:77] + "..."
-				}
-				fmt.Fprintf(&b, "%s       %s\n",
-					dimStyle.Render(ts),
-					textStyle.Render(text))
+			msg, _ := raw["message"].(map[string]any)
+			if msg == nil {
+				continue
 			}
+			contentArr, _ := msg["content"].([]any)
+			hasOutput := false
+			for _, item := range contentArr {
+				block, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				blockType, _ := block["type"].(string)
+				switch blockType {
+				case "tool_use":
+					turnNum++
+					toolName, _ := block["name"].(string)
+					if toolName == "" {
+						toolName = "tool"
+					}
+					detail := extractLogToolInput(block["input"])
+					if len(detail) > 80 {
+						detail = detail[:77] + "..."
+					}
+					fmt.Fprintf(&b, "  %s  %s  %s\n",
+						turnStyle.Render(fmt.Sprintf("%d", turnNum)),
+						toolStyle.Render(fmt.Sprintf("%-12s", toolName)),
+						textStyle.Render(detail))
+					hasOutput = true
+				case "text":
+					text, _ := block["text"].(string)
+					if text != "" {
+						if len(text) > 80 {
+							text = text[:77] + "..."
+						}
+						fmt.Fprintf(&b, "       %s\n", textStyle.Render(text))
+						hasOutput = true
+					}
+				}
+			}
+			_ = hasOutput
 
 		case "result":
-			fmt.Fprintf(&b, "%s       %s\n",
-				dimStyle.Render(ts),
-				resultStyle.Render(fmt.Sprintf("✓ Completed — %d turns, $%.2f, %ds",
-					evt.Turns, evt.Cost, evt.Duration)))
+			turns, _ := raw["num_turns"].(float64)
+			cost, _ := raw["total_cost_usd"].(float64)
+			durationMs, _ := raw["duration_ms"].(float64)
+			isError, _ := raw["is_error"].(bool)
+			stopReason, _ := raw["stop_reason"].(string)
 
-		case "error":
-			msg := evt.Error
-			if msg == "" {
-				msg = evt.Text
+			durationSec := int(durationMs / 1000)
+			if isError {
+				resultText, _ := raw["result"].(string)
+				if resultText == "" {
+					resultText = "unknown error"
+				}
+				fmt.Fprintf(&b, "       %s\n",
+					errorStyle.Render(fmt.Sprintf("✗ Failed — %s", truncateLine(resultText, 80))))
+			} else {
+				extra := ""
+				if stopReason != "" && stopReason != "end_turn" {
+					extra = fmt.Sprintf(" (%s)", stopReason)
+				}
+				fmt.Fprintf(&b, "       %s\n",
+					resultStyle.Render(fmt.Sprintf("✓ Completed — %d turns, $%.2f, %ds%s",
+						int(turns), cost, durationSec, extra)))
 			}
-			if msg == "" {
-				msg = "unknown error"
+
+		case "system":
+			subtype, _ := raw["subtype"].(string)
+			// Skip noisy system events (hooks, init) — only show errors.
+			if subtype == "error" {
+				msg, _ := raw["error"].(string)
+				if msg == "" {
+					msg = "system error"
+				}
+				fmt.Fprintf(&b, "       %s\n", errorStyle.Render("✗ "+msg))
 			}
-			fmt.Fprintf(&b, "%s       %s\n",
-				dimStyle.Render(ts),
-				errorStyle.Render("✗ "+msg))
+			// init, hook_started, hook_response are silently skipped.
 
 		default:
-			// Other event types — single dim line.
-			summary := evt.Type
-			if evt.Subtype != "" {
-				summary += "/" + evt.Subtype
-			}
-			if evt.Text != "" {
-				text := evt.Text
-				if len(text) > 60 {
-					text = text[:57] + "..."
-				}
-				summary += ": " + text
-			}
-			fmt.Fprintf(&b, "%s       %s\n",
-				dimStyle.Render(ts),
-				dimStyle.Render(summary))
+			// Other event types (rate_limit_event, etc.) — skip for clean display.
 		}
 	}
 
 	return b.String()
+}
+
+// extractLogToolInput extracts a displayable summary from a tool input map.
+func extractLogToolInput(input any) string {
+	obj, ok := input.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"command", "file_path", "pattern", "prompt", "query", "description"} {
+		if val, ok := obj[key].(string); ok && val != "" {
+			return val
+		}
+	}
+	// Fallback: marshal to JSON.
+	data, err := json.Marshal(input)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // formatTimestamp extracts a compact time from an ISO timestamp.

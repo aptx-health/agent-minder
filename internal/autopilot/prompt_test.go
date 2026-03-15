@@ -204,6 +204,14 @@ func TestBuildClaudeArgs(t *testing.T) {
 			t.Error("should not have --agent flag without agent definition")
 		}
 
+		// Should include stream-json flags.
+		if !strings.Contains(joined, "--output-format stream-json") {
+			t.Error("should include --output-format stream-json")
+		}
+		if !strings.Contains(joined, "--verbose") {
+			t.Error("should include --verbose")
+		}
+
 		// Full prompt should contain behavioral instructions.
 		prompt := args[len(args)-1]
 		if !strings.Contains(prompt, "Pre-check") {
