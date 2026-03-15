@@ -65,11 +65,12 @@ func TestRenderPlainLog(t *testing.T) {
 }
 
 func TestRenderJSONL(t *testing.T) {
+	// Use real stream-json format from Claude Code.
 	lines := []string{
-		`{"type":"assistant","subtype":"tool_use","tool":"Read","input":"internal/foo.go","timestamp":"2024-01-15T10:30:00Z"}`,
-		`{"type":"assistant","text":"Looking at the code...","timestamp":"2024-01-15T10:30:05Z"}`,
-		`{"type":"result","num_turns":12,"total_cost":0.08,"duration_s":180,"timestamp":"2024-01-15T10:35:00Z"}`,
-		`{"type":"error","error":"rate limited","timestamp":"2024-01-15T10:36:00Z"}`,
+		`{"type":"system","subtype":"init","session_id":"abc","tools":["Bash","Read"]}`,
+		`{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"tool_use","name":"Read","input":{"file_path":"internal/foo.go"}}]}}`,
+		`{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"Looking at the code..."}]}}`,
+		`{"type":"result","subtype":"success","num_turns":12,"total_cost_usd":0.08,"duration_ms":180000,"stop_reason":"end_turn"}`,
 		`not json at all`,
 	}
 	content := strings.Join(lines, "\n")
@@ -85,6 +86,36 @@ func TestRenderJSONL(t *testing.T) {
 	if !strings.Contains(result, "Completed") {
 		t.Error("expected result line in output")
 	}
+	// Malformed line should be rendered dimmed.
+	if !strings.Contains(result, "not json at all") {
+		t.Error("expected malformed line in output")
+	}
+}
+
+func TestRenderJSONL_ErrorResult(t *testing.T) {
+	lines := []string{
+		`{"type":"result","subtype":"error","is_error":true,"result":"API error","num_turns":3,"total_cost_usd":0.02,"duration_ms":5000}`,
+	}
+	content := strings.Join(lines, "\n")
+
+	result := renderJSONL(content)
+
+	if !strings.Contains(result, "Failed") {
+		t.Error("expected 'Failed' in error result output")
+	}
+	if !strings.Contains(result, "API error") {
+		t.Error("expected error message in output")
+	}
+}
+
+func TestRenderJSONL_SystemError(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"error","error":"rate limited"}`,
+	}
+	content := strings.Join(lines, "\n")
+
+	result := renderJSONL(content)
+
 	if !strings.Contains(result, "rate limited") {
 		t.Error("expected error message in output")
 	}

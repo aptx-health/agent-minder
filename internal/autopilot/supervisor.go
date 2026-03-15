@@ -36,6 +36,14 @@ type SlotInfo struct {
 	RunningFor  time.Duration
 	Status      string // "running" or "idle"
 	Paused      bool   // true when slot filling is paused (idle slots show "(paused)")
+
+	// Live status from stream-json parsing.
+	CurrentTool string
+	ToolInput   string
+	TurnCount   int
+	MaxTurns    int
+	CostUSD     float64
+	MaxBudget   float64
 }
 
 type slotState struct {
@@ -44,6 +52,7 @@ type slotState struct {
 	cmd           *exec.Cmd
 	cancelFunc    context.CancelFunc // per-slot cancel; nil before launch
 	stoppedByUser bool               // set by StopAgent before cancelling
+	liveStatus    LiveStatus         // updated by scanner goroutine
 }
 
 // Supervisor manages concurrent autopilot agents working on GitHub issues.
@@ -392,6 +401,14 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 				Paused:  s.paused,
 			}
 		} else {
+			maxTurns := s.project.AutopilotMaxTurns
+			if maxTurns < 1 {
+				maxTurns = 50
+			}
+			maxBudget := s.project.AutopilotMaxBudgetUSD
+			if maxBudget <= 0 {
+				maxBudget = 3.00
+			}
 			infos[i] = SlotInfo{
 				SlotNum:     i + 1,
 				IssueNumber: slot.task.IssueNumber,
@@ -399,6 +416,12 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 				Branch:      slot.task.Branch,
 				RunningFor:  time.Since(slot.startedAt),
 				Status:      "running",
+				CurrentTool: slot.liveStatus.CurrentTool,
+				ToolInput:   slot.liveStatus.ToolInput,
+				TurnCount:   slot.liveStatus.TurnCount,
+				MaxTurns:    maxTurns,
+				CostUSD:     slot.liveStatus.CostUSD,
+				MaxBudget:   maxBudget,
 			}
 		}
 	}
@@ -422,8 +445,13 @@ func (s *Supervisor) StatusBlock() string {
 			fmt.Fprintf(&b, "- Slot %d: idle\n", i+1)
 		} else {
 			elapsed := time.Since(slot.startedAt).Round(time.Second)
-			fmt.Fprintf(&b, "- Slot %d: #%d %s (%s, running %s)\n",
-				i+1, slot.task.IssueNumber, slot.task.IssueTitle, slot.task.Branch, elapsed)
+			toolInfo := ""
+			if slot.liveStatus.CurrentTool != "" {
+				toolInfo = fmt.Sprintf(", using %s", slot.liveStatus.CurrentTool)
+			}
+			fmt.Fprintf(&b, "- Slot %d: #%d %s (%s, running %s, turn %d, $%.2f%s)\n",
+				i+1, slot.task.IssueNumber, slot.task.IssueTitle, slot.task.Branch,
+				elapsed, slot.liveStatus.TurnCount, slot.liveStatus.CostUSD, toolInfo)
 		}
 	}
 
@@ -904,17 +932,27 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 
 	cmd := exec.CommandContext(ctx, "claude",
 		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
 		"--max-turns", strconv.Itoa(maxTurns),
 		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
 		"--dangerously-skip-permissions",
 		prompt,
 	)
 	cmd.Dir = task.WorktreePath
-	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
 	// Set GITHUB_TOKEN for gh CLI calls within the agent.
 	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+
+	// Get stdout pipe for stream-json parsing.
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to get stdout pipe for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		s.cleanup(task, true)
+		return
+	}
 
 	s.mu.Lock()
 	if s.slots[slotIdx] != nil {
@@ -922,8 +960,25 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	}
 	s.mu.Unlock()
 
-	// Run the agent.
-	err = cmd.Run()
+	// Start the agent process.
+	if err := cmd.Start(); err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to start agent for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		s.cleanup(task, true)
+		return
+	}
+
+	// Scanner goroutine: reads stdout, writes to log, updates live status.
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanStream(stdout, logFile, slotIdx, s)
+	}()
+
+	// Wait for process to finish.
+	err = cmd.Wait()
+	<-scanDone // ensure all output is processed before inspecting outcome
+
 	exitCode := 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
