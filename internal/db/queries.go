@@ -830,6 +830,35 @@ func parseDependencies(deps string) []int {
 	return result
 }
 
+// GetProjectByRepoPath finds the project that owns a repo or worktree at the given path.
+func (s *Store) GetProjectByRepoPath(path string) (*Project, error) {
+	// Try repos first.
+	var p Project
+	err := s.db.Get(&p, `
+		SELECT p.* FROM projects p
+		JOIN repos r ON r.project_id = p.id
+		WHERE r.path = ?
+		LIMIT 1
+	`, path)
+	if err == nil {
+		return &p, nil
+	}
+
+	// Try worktrees.
+	err = s.db.Get(&p, `
+		SELECT p.* FROM projects p
+		JOIN repos r ON r.project_id = p.id
+		JOIN worktrees w ON w.repo_id = r.id
+		WHERE w.path = ?
+		LIMIT 1
+	`, path)
+	if err == nil {
+		return &p, nil
+	}
+
+	return nil, fmt.Errorf("no project found for path %q", path)
+}
+
 // LastPoll returns the most recent poll for a project, or nil if none.
 func (s *Store) LastPoll(projectID int64) (*Poll, error) {
 	polls, err := s.RecentPolls(projectID, 1)
