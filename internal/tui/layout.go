@@ -428,6 +428,11 @@ func (m Model) renderHeader() string {
 	b.WriteString(mutedStyle().Render(" \u2022 "))
 	b.WriteString(mutedStyle().Render(fmt.Sprintf("%d topics", len(topics))))
 
+	if m.autopilotMode == "running" {
+		b.WriteString("  ")
+		b.WriteString(statusRunningStyle().Render("\u2708 AUTOPILOT"))
+	}
+
 	if m.polling {
 		b.WriteString("  ")
 		b.WriteString(m.spinner.View())
