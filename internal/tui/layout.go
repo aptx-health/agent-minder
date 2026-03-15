@@ -428,7 +428,12 @@ func (m *Model) rebuildAutopilotTaskContent() {
 		}
 
 		statusStr := m.taskStatusDisplay(t.Status)
-		line := fmt.Sprintf("%s#%-5d %s  %s", cursor, t.IssueNumber, statusStr, title)
+		issueRef := fmt.Sprintf("#%-5d", t.IssueNumber)
+		if t.Owner != "" && t.Repo != "" {
+			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", t.Owner, t.Repo, t.IssueNumber)
+			issueRef = fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", ghURL, issueRef)
+		}
+		line := fmt.Sprintf("%s%s %s  %s", cursor, issueRef, statusStr, title)
 		if extra != "" {
 			line += "  " + mutedStyle().Render(extra)
 		}
@@ -449,8 +454,13 @@ func (m Model) renderTaskDetail() string {
 	b.WriteString(headerStyle().Render("Detail"))
 	b.WriteString("\n")
 
-	// Issue number + full title.
-	b.WriteString(textStyle().Render(fmt.Sprintf("  #%d  %s", task.IssueNumber, task.IssueTitle)))
+	// Issue number + full title (clickable link if owner/repo available).
+	issueLabel := fmt.Sprintf("#%d", task.IssueNumber)
+	if task.Owner != "" && task.Repo != "" {
+		ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", task.Owner, task.Repo, task.IssueNumber)
+		issueLabel = fmt.Sprintf("\033]8;;%s\033\\#%d\033]8;;\033\\", ghURL, task.IssueNumber)
+	}
+	b.WriteString(textStyle().Render(fmt.Sprintf("  %s  %s", issueLabel, task.IssueTitle)))
 	b.WriteString("\n")
 
 	// Status.

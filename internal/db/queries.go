@@ -616,8 +616,8 @@ func (s *Store) PruneCompletedItems(projectID int64, maxAgeSec int) (int, error)
 // CreateAutopilotTask inserts a new autopilot task.
 func (s *Store) CreateAutopilotTask(task *AutopilotTask) error {
 	result, err := s.db.NamedExec(`
-		INSERT INTO autopilot_tasks (project_id, issue_number, issue_title, issue_body, dependencies, status)
-		VALUES (:project_id, :issue_number, :issue_title, :issue_body, :dependencies, :status)
+		INSERT INTO autopilot_tasks (project_id, owner, repo, issue_number, issue_title, issue_body, dependencies, status)
+		VALUES (:project_id, :owner, :repo, :issue_number, :issue_title, :issue_body, :dependencies, :status)
 	`, task)
 	if err != nil {
 		return fmt.Errorf("insert autopilot task: %w", err)
@@ -645,9 +645,9 @@ func (s *Store) BulkCreateAutopilotTasks(tasks []*AutopilotTask) (int, error) {
 	inserted := 0
 	for _, task := range tasks {
 		result, err := tx.Exec(`
-			INSERT OR IGNORE INTO autopilot_tasks (project_id, issue_number, issue_title, issue_body, dependencies, status)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, task.ProjectID, task.IssueNumber, task.IssueTitle, task.IssueBody, task.Dependencies, task.Status)
+			INSERT OR IGNORE INTO autopilot_tasks (project_id, owner, repo, issue_number, issue_title, issue_body, dependencies, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, task.ProjectID, task.Owner, task.Repo, task.IssueNumber, task.IssueTitle, task.IssueBody, task.Dependencies, task.Status)
 		if err != nil {
 			return inserted, fmt.Errorf("insert autopilot task: %w", err)
 		}
