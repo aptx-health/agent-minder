@@ -126,7 +126,7 @@ func TestSearchIssuesQueryConstruction(t *testing.T) {
 					IncompleteResults: github.Ptr(false),
 					Issues:            []*github.Issue{},
 				}
-				json.NewEncoder(w).Encode(result)
+				_ = json.NewEncoder(w).Encode(result)
 			}))
 			defer srv.Close()
 
@@ -165,7 +165,7 @@ func TestSearchIssuesResultMapping(t *testing.T) {
 				},
 			},
 		}
-		json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(result)
 	}))
 	defer srv.Close()
 

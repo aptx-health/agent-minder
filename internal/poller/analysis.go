@@ -96,13 +96,13 @@ func reconcileConcerns(store *db.Store, projectID int64, existing []db.Concern, 
 	// Resolve all existing concerns — the analyzer returns the full desired
 	// list each cycle, so we replace rather than diff.
 	for _, e := range existing {
-		store.ResolveConcern(e.ID)
+		_ = store.ResolveConcern(e.ID)
 	}
 
 	// Insert the analyzer's current concerns fresh.
 	for _, d := range desired {
 		severity := validSeverity(d.Severity)
-		store.AddConcern(&db.Concern{
+		_ = store.AddConcern(&db.Concern{
 			ProjectID: projectID,
 			Severity:  severity,
 			Message:   d.Message,

@@ -118,7 +118,9 @@ func TestExists(t *testing.T) {
 		t.Error("expected false for nonexistent project")
 	}
 
-	Save("testproj", "content")
+	if err = Save("testproj", "content"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	exists, err = Exists("testproj")
 	if err != nil {
 		t.Fatalf("Exists: %v", err)

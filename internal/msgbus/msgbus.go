@@ -235,7 +235,7 @@ func (p *Publisher) PublishReplace(topic, sender, message string) error {
 	if err != nil {
 		return fmt.Errorf("begin tx for replace on %s: %w", topic, err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.Exec(`DELETE FROM messages WHERE topic = ?`, topic); err != nil {
 		return fmt.Errorf("delete existing messages on %s: %w", topic, err)

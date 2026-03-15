@@ -55,7 +55,7 @@ func initDebugLog() {
 // closeDebugLog closes the debug log file.
 func closeDebugLog() {
 	if debugLogFile != nil {
-		debugLogFile.Close()
+		_ = debugLogFile.Close()
 	}
 }
 
@@ -658,7 +658,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	dbPath := msgbus.DefaultDBPath()
 	client, err := msgbus.Open(dbPath)
 	if err == nil {
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 		msgs, _ := client.RecentMessages(p.project.RefreshInterval()*2, p.project.Name)
 		// Filter out our own messages so the minder only sees other agents.
 		filtered := msgs[:0]
@@ -869,7 +869,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 }
 
 func (p *Poller) recordPollResult(result *PollResult) {
-	p.store.RecordPoll(&db.Poll{
+	_ = p.store.RecordPoll(&db.Poll{
 		ProjectID:      p.project.ID,
 		NewCommits:     result.NewCommits,
 		NewMessages:    result.NewMessages,

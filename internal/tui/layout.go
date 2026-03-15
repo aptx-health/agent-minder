@@ -277,7 +277,7 @@ func (m Model) renderTrackedStrip() string {
 
 			b.WriteString("  ")
 			b.WriteString(dot)
-			b.WriteString(fmt.Sprintf("\033]8;;%s\033\\", ghURL))
+			fmt.Fprintf(&b, "\033]8;;%s\033\\", ghURL)
 			b.WriteString(mutedStyle().Render(ref + status))
 			b.WriteString("\033]8;;\033\\")
 			if title != "" {
@@ -312,7 +312,7 @@ func (m Model) renderTrackedStrip() string {
 				lineWidth += 2
 			}
 			line.WriteString(dot)
-			line.WriteString(fmt.Sprintf("\033]8;;%s\033\\", ghURL))
+			fmt.Fprintf(&line, "\033]8;;%s\033\\", ghURL)
 			line.WriteString(mutedStyle().Render(entry))
 			line.WriteString("\033]8;;\033\\")
 			lineWidth += entryLen
@@ -409,10 +409,10 @@ func (m Model) renderTrackPreview() string {
 		if len(title) > 60 {
 			title = title[:57] + "..."
 		}
-		b.WriteString(fmt.Sprintf("  %s %s/%s#%d %s",
+		fmt.Fprintf(&b, "  %s %s/%s#%d %s",
 			dot,
 			item.ref.Owner, item.ref.Repo, item.ref.Number,
-			mutedStyle().Render(title)))
+			mutedStyle().Render(title))
 		b.WriteString("\n")
 	}
 
@@ -692,7 +692,7 @@ func (m Model) renderBottomBar() string {
 				if i == m.trackFocus {
 					cursor = "\u25b8"
 				}
-				b.WriteString(fmt.Sprintf("  %s %s: ", cursor, mutedStyle().Render(row.ownerRepo)))
+				fmt.Fprintf(&b, "  %s %s: ", cursor, mutedStyle().Render(row.ownerRepo))
 				b.WriteString(row.input.View())
 				b.WriteString("\n")
 			}
@@ -851,9 +851,9 @@ func renderHelpOverlay(width int) string {
 	b.WriteString(headerStyle().Render("Keybindings"))
 	b.WriteString("\n")
 	for _, h := range hints {
-		b.WriteString(fmt.Sprintf("  %s %s\n",
+		fmt.Fprintf(&b, "  %s %s\n",
 			keyStyle.Render(fmt.Sprintf("%3s", h.key)),
-			descStyle.Render(h.desc)))
+			descStyle.Render(h.desc))
 	}
 	b.WriteString(mutedStyle().Render("  press ? to close"))
 	b.WriteString("\n")

@@ -276,6 +276,6 @@ func CommitsSince(dir, ref string) (int, error) {
 		return 0, err
 	}
 	var count int
-	fmt.Sscanf(out, "%d", &count)
+	_, _ = fmt.Sscanf(out, "%d", &count)
 	return count, nil
 }

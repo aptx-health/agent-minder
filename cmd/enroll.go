@@ -28,7 +28,7 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	store := db.NewStore(conn)
 
 	project, err := store.GetProject(projectName)
@@ -69,12 +69,16 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 		})
 	}
 	if len(wts) > 0 {
-		store.ReplaceWorktrees(repo.ID, wts)
+		if err := store.ReplaceWorktrees(repo.ID, wts); err != nil {
+			return fmt.Errorf("replacing worktrees: %w", err)
+		}
 	}
 
 	// Add a topic.
 	newTopic := project.Name + "/" + info.ShortName
-	store.AddTopic(&db.Topic{ProjectID: project.ID, Name: newTopic})
+	if err := store.AddTopic(&db.Topic{ProjectID: project.ID, Name: newTopic}); err != nil {
+		return fmt.Errorf("adding topic: %w", err)
+	}
 
 	fmt.Printf("Enrolled %s as %q in project %q\n", info.Path, info.ShortName, projectName)
 	fmt.Printf("  Branch: %s\n", info.Branch)

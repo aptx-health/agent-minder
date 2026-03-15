@@ -16,7 +16,7 @@ func openTestDB(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { conn.Close() })
+	t.Cleanup(func() { _ = conn.Close() })
 	return NewStore(conn)
 }
 
@@ -41,13 +41,13 @@ func TestOpenIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	conn1.Close()
+	_ = conn1.Close()
 
 	conn2, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
-	conn2.Close()
+	_ = conn2.Close()
 }
 
 func TestProjectCRUD(t *testing.T) {
@@ -136,7 +136,9 @@ func TestRepoAndWorktrees(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "rtest", MinderIdentity: "rtest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	r := &Repo{ProjectID: p.ID, Path: "/tmp/myapp", ShortName: "app"}
 	if err := store.AddRepo(r); err != nil {
@@ -163,14 +165,18 @@ func TestRepoAndWorktrees(t *testing.T) {
 	}
 
 	// Replace again with fewer.
-	store.ReplaceWorktrees(r.ID, []Worktree{{Path: "/tmp/myapp", Branch: "main"}})
+	if err := store.ReplaceWorktrees(r.ID, []Worktree{{Path: "/tmp/myapp", Branch: "main"}}); err != nil {
+		t.Fatalf("ReplaceWorktrees: %v", err)
+	}
 	got, _ = store.GetWorktrees(r.ID)
 	if len(got) != 1 {
 		t.Errorf("after replace GetWorktrees len = %d, want 1", len(got))
 	}
 
 	// Cascade delete.
-	store.DeleteProject(p.ID)
+	if err := store.DeleteProject(p.ID); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
 	repos, _ = store.GetRepos(p.ID)
 	if len(repos) != 0 {
 		t.Error("repos should be deleted with project")
@@ -181,20 +187,30 @@ func TestGetWorktreesForProject(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "wtp", MinderIdentity: "wtp/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	r1 := &Repo{ProjectID: p.ID, Path: "/tmp/app", ShortName: "app"}
-	store.AddRepo(r1)
+	if err := store.AddRepo(r1); err != nil {
+		t.Fatalf("AddRepo r1: %v", err)
+	}
 	r2 := &Repo{ProjectID: p.ID, Path: "/tmp/lib", ShortName: "lib"}
-	store.AddRepo(r2)
+	if err := store.AddRepo(r2); err != nil {
+		t.Fatalf("AddRepo r2: %v", err)
+	}
 
-	store.ReplaceWorktrees(r1.ID, []Worktree{
+	if err := store.ReplaceWorktrees(r1.ID, []Worktree{
 		{Path: "/tmp/app", Branch: "main"},
 		{Path: "/tmp/app-feat", Branch: "feature/auth"},
-	})
-	store.ReplaceWorktrees(r2.ID, []Worktree{
+	}); err != nil {
+		t.Fatalf("ReplaceWorktrees r1: %v", err)
+	}
+	if err := store.ReplaceWorktrees(r2.ID, []Worktree{
 		{Path: "/tmp/lib", Branch: "main"},
-	})
+	}); err != nil {
+		t.Fatalf("ReplaceWorktrees r2: %v", err)
+	}
 
 	got, err := store.GetWorktreesForProject(p.ID)
 	if err != nil {
@@ -218,7 +234,9 @@ func TestGetWorktreesForProject(t *testing.T) {
 
 	// Empty project should return empty slice.
 	p2 := &Project{Name: "empty", MinderIdentity: "e/m", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p2)
+	if err := store.CreateProject(p2); err != nil {
+		t.Fatalf("CreateProject p2: %v", err)
+	}
 	got2, err := store.GetWorktreesForProject(p2.ID)
 	if err != nil {
 		t.Fatalf("empty project: %v", err)
@@ -232,10 +250,14 @@ func TestTopics(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "ttest", MinderIdentity: "ttest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	for _, name := range []string{"ttest/app", "ttest/infra", "ttest/coord"} {
-		store.AddTopic(&Topic{ProjectID: p.ID, Name: name})
+		if err := store.AddTopic(&Topic{ProjectID: p.ID, Name: name}); err != nil {
+			t.Fatalf("AddTopic %s: %v", name, err)
+		}
 	}
 
 	topics, _ := store.GetTopics(p.ID)
@@ -248,17 +270,23 @@ func TestConcerns(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "ctest", MinderIdentity: "ctest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	c := &Concern{ProjectID: p.ID, Severity: "warning", Message: "Schema drift detected"}
-	store.AddConcern(c)
+	if err := store.AddConcern(c); err != nil {
+		t.Fatalf("AddConcern: %v", err)
+	}
 
 	active, _ := store.ActiveConcerns(p.ID)
 	if len(active) != 1 {
 		t.Fatalf("ActiveConcerns len = %d, want 1", len(active))
 	}
 
-	store.ResolveConcern(c.ID)
+	if err := store.ResolveConcern(c.ID); err != nil {
+		t.Fatalf("ResolveConcern: %v", err)
+	}
 	active, _ = store.ActiveConcerns(p.ID)
 	if len(active) != 0 {
 		t.Errorf("after resolve ActiveConcerns len = %d, want 0", len(active))
@@ -269,10 +297,16 @@ func TestPolls(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "ptest", MinderIdentity: "ptest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
-	store.RecordPoll(&Poll{ProjectID: p.ID, NewCommits: 3, NewMessages: 1, LLMResponseRaw: "All good", Tier1Response: "Summary", Tier2Response: "Analysis"})
-	store.RecordPoll(&Poll{ProjectID: p.ID, NewCommits: 0, NewMessages: 0, LLMResponseRaw: "Nothing new", Tier1Response: "No activity"})
+	if err := store.RecordPoll(&Poll{ProjectID: p.ID, NewCommits: 3, NewMessages: 1, LLMResponseRaw: "All good", Tier1Response: "Summary", Tier2Response: "Analysis"}); err != nil {
+		t.Fatalf("RecordPoll 1: %v", err)
+	}
+	if err := store.RecordPoll(&Poll{ProjectID: p.ID, NewCommits: 0, NewMessages: 0, LLMResponseRaw: "Nothing new", Tier1Response: "No activity"}); err != nil {
+		t.Fatalf("RecordPoll 2: %v", err)
+	}
 
 	polls, _ := store.RecentPolls(p.ID, 5)
 	if len(polls) != 2 {
@@ -331,19 +365,21 @@ func TestMigrationV1ToV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert v1 poll: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Re-open with current migration code — should migrate to v2.
 	conn2, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open after v1: %v", err)
 	}
-	defer conn2.Close()
+	defer func() { _ = conn2.Close() }()
 	store := NewStore(conn2)
 
 	// Check schema version.
 	var version int
-	store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1")
+	if err := store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1"); err != nil {
+		t.Fatalf("get version: %v", err)
+	}
 	if version != currentVersion {
 		t.Errorf("version = %d, want %d", version, currentVersion)
 	}
@@ -377,15 +413,15 @@ func openRawV1(path string) (*sqlx.DB, error) {
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec(schemaV1_only); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec("INSERT INTO schema_version (version) VALUES (1)"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
@@ -395,7 +431,9 @@ func TestTrackedItemsCRUD(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "titest", MinderIdentity: "titest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	item := &TrackedItem{
 		ProjectID:  p.ID,
@@ -476,7 +514,9 @@ func TestTrackedItemsCap(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "captest", MinderIdentity: "captest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Add 20 items.
 	for i := 1; i <= 20; i++ {
@@ -497,12 +537,18 @@ func TestTrackedItemCascadeDelete(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "cascade", MinderIdentity: "cascade/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "o", Repo: "r", Number: 1, LastStatus: "Open"})
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "o", Repo: "r", Number: 1, LastStatus: "Open"}); err != nil {
+		t.Fatalf("AddTrackedItem: %v", err)
+	}
 
 	// Delete project should cascade.
-	store.DeleteProject(p.ID)
+	if err := store.DeleteProject(p.ID); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
 	items, _ := store.GetTrackedItems(p.ID)
 	if len(items) != 0 {
 		t.Error("tracked items should be deleted with project")
@@ -513,7 +559,9 @@ func TestBulkAddTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "bulktest", MinderIdentity: "bulktest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Bulk add 5 items.
 	items := make([]*TrackedItem, 5)
@@ -548,11 +596,15 @@ func TestBulkAddTrackedItemsCap(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "bulkcap", MinderIdentity: "bulkcap/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Add 18 items individually.
 	for i := 1; i <= 18; i++ {
-		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+		if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
 	}
 
 	// Bulk add 5 more — only 2 should fit (cap 20).
@@ -578,10 +630,14 @@ func TestClearTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 
 	p := &Project{Name: "cleartest", MinderIdentity: "cleartest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	for i := 1; i <= 5; i++ {
-		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+		if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
 	}
 
 	if err := store.ClearTrackedItems(p.ID); err != nil {
@@ -614,19 +670,21 @@ func TestMigrationV3ToV4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert v3 tracked item: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Re-open with current migration code — should migrate to v4.
 	conn2, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open after v3: %v", err)
 	}
-	defer conn2.Close()
+	defer func() { _ = conn2.Close() }()
 	store := NewStore(conn2)
 
 	// Check schema version.
 	var version int
-	store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1")
+	if err := store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1"); err != nil {
+		t.Fatalf("get version: %v", err)
+	}
 	if version != currentVersion {
 		t.Errorf("version = %d, want %d", version, currentVersion)
 	}
@@ -677,19 +735,21 @@ func TestMigrationV4ToV5(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert v4 project: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Re-open with current migration code — should migrate to v5.
 	conn2, err := Open(dbPath)
 	if err != nil {
 		t.Fatalf("Open after v4: %v", err)
 	}
-	defer conn2.Close()
+	defer func() { _ = conn2.Close() }()
 	store := NewStore(conn2)
 
 	// Check schema version.
 	var version int
-	store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1")
+	if err := store.DB().Get(&version, "SELECT version FROM schema_version LIMIT 1"); err != nil {
+		t.Fatalf("get version: %v", err)
+	}
 	if version != currentVersion {
 		t.Errorf("version = %d, want %d", version, currentVersion)
 	}
@@ -721,15 +781,15 @@ func openRawV4(path string) (*sqlx.DB, error) {
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec(schemaV4_only); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec("INSERT INTO schema_version (version) VALUES (4)"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
@@ -824,15 +884,15 @@ func openRawV3(path string) (*sqlx.DB, error) {
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec(schemaV3_only); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if _, err := db.Exec("INSERT INTO schema_version (version) VALUES (3)"); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
@@ -978,7 +1038,9 @@ CREATE TABLE IF NOT EXISTS polls (
 func TestPruneTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "prunetest", MinderIdentity: "prunetest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Add 10 items: 5 open, 5 closed with staggered timestamps.
 	for i := 1; i <= 5; i++ {
@@ -1021,11 +1083,15 @@ func TestPruneTrackedItems(t *testing.T) {
 func TestPruneTrackedItems_UnderThreshold(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "pruneskip", MinderIdentity: "pruneskip/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	for i := 1; i <= 5; i++ {
 		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Closd"}
-		store.AddTrackedItem(item)
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem: %v", err)
+		}
 	}
 
 	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
@@ -1040,11 +1106,15 @@ func TestPruneTrackedItems_UnderThreshold(t *testing.T) {
 func TestPruneTrackedItems_AllOpen(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "pruneopen", MinderIdentity: "pruneopen/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	for i := 1; i <= 10; i++ {
 		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}
-		store.AddTrackedItem(item)
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem: %v", err)
+		}
 	}
 
 	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
@@ -1059,16 +1129,22 @@ func TestPruneTrackedItems_AllOpen(t *testing.T) {
 func TestPruneTrackedItems_RespectsKeepTerminal(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "prunekeep", MinderIdentity: "prunekeep/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// 8 open + 2 terminal = 10 total. keepTerminal=2 means 0 removable.
 	for i := 1; i <= 8; i++ {
 		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}
-		store.AddTrackedItem(item)
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem: %v", err)
+		}
 	}
 	for i := 9; i <= 10; i++ {
 		item := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Mrgd"}
-		store.AddTrackedItem(item)
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem: %v", err)
+		}
 	}
 
 	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
@@ -1083,16 +1159,28 @@ func TestPruneTrackedItems_RespectsKeepTerminal(t *testing.T) {
 func TestRemoveTerminalTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "cleanuptest", MinderIdentity: "cleanuptest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Add 3 open, 2 closed, 1 merged, 1 not-planned.
 	for i := 1; i <= 3; i++ {
-		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+		if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
 	}
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 4, LastStatus: "Closd"})
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 5, LastStatus: "Mrgd"})
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 6, LastStatus: "Closd"})
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 7, LastStatus: "NotPl"})
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 4, LastStatus: "Closd"}); err != nil {
+		t.Fatalf("AddTrackedItem 4: %v", err)
+	}
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 5, LastStatus: "Mrgd"}); err != nil {
+		t.Fatalf("AddTrackedItem 5: %v", err)
+	}
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 6, LastStatus: "Closd"}); err != nil {
+		t.Fatalf("AddTrackedItem 6: %v", err)
+	}
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 7, LastStatus: "NotPl"}); err != nil {
+		t.Fatalf("AddTrackedItem 7: %v", err)
+	}
 
 	// Count terminal items.
 	count, err := store.CountTerminalTrackedItems(p.ID)
@@ -1133,7 +1221,9 @@ func TestRemoveTerminalTrackedItems(t *testing.T) {
 func TestArchiveTrackedItem(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "archivetest", MinderIdentity: "archivetest/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Item with progress summary should be archived.
 	item := &TrackedItem{
@@ -1142,7 +1232,9 @@ func TestArchiveTrackedItem(t *testing.T) {
 		ObjectiveSummary: "Implement OAuth2 flow",
 		ProgressSummary:  "OAuth2 flow implemented and merged",
 	}
-	store.AddTrackedItem(item)
+	if err := store.AddTrackedItem(item); err != nil {
+		t.Fatalf("AddTrackedItem: %v", err)
+	}
 
 	err := store.ArchiveTrackedItem(item)
 	if err != nil {
@@ -1167,7 +1259,9 @@ func TestArchiveTrackedItem(t *testing.T) {
 func TestArchiveTrackedItem_SkipsNoProgress(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "archiveskip", MinderIdentity: "archiveskip/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Item with no progress summary should NOT be archived.
 	item := &TrackedItem{
@@ -1175,7 +1269,9 @@ func TestArchiveTrackedItem_SkipsNoProgress(t *testing.T) {
 		ItemType: "issue", Title: "Accidental add", LastStatus: "Closd",
 		ProgressSummary: "",
 	}
-	store.AddTrackedItem(item)
+	if err := store.AddTrackedItem(item); err != nil {
+		t.Fatalf("AddTrackedItem: %v", err)
+	}
 
 	err := store.ArchiveTrackedItem(item)
 	if err != nil {
@@ -1191,16 +1287,28 @@ func TestArchiveTrackedItem_SkipsNoProgress(t *testing.T) {
 func TestArchiveTerminalTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "archiveterminal", MinderIdentity: "archiveterminal/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// 2 open, 2 terminal (1 with progress, 1 without).
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 1, LastStatus: "Open"})
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 2, LastStatus: "Open"})
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 1, LastStatus: "Open"}); err != nil {
+		t.Fatalf("AddTrackedItem 1: %v", err)
+	}
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 2, LastStatus: "Open"}); err != nil {
+		t.Fatalf("AddTrackedItem 2: %v", err)
+	}
 	item3 := &TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 3, LastStatus: "Mrgd"}
-	store.AddTrackedItem(item3)
+	if err := store.AddTrackedItem(item3); err != nil {
+		t.Fatalf("AddTrackedItem 3: %v", err)
+	}
 	item3.ProgressSummary = "Feature shipped"
-	store.UpdateTrackedItem(item3)
-	store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 4, LastStatus: "Closd"}) // no progress
+	if err := store.UpdateTrackedItem(item3); err != nil {
+		t.Fatalf("UpdateTrackedItem item3: %v", err)
+	}
+	if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: 4, LastStatus: "Closd"}); err != nil {
+		t.Fatalf("AddTrackedItem 4: %v", err)
+	} // no progress
 
 	removed, err := store.ArchiveTerminalTrackedItems(p.ID)
 	if err != nil {
@@ -1229,19 +1337,25 @@ func TestArchiveTerminalTrackedItems(t *testing.T) {
 func TestPruneCompletedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "prunecompleted", MinderIdentity: "prunecompleted/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Insert a completed item with an old timestamp.
-	store.db.Exec(`
+	if _, err := store.db.Exec(`
 		INSERT INTO completed_items (project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at)
 		VALUES (?, 'github', 'org', 'repo', 1, 'issue', 'Old item', 'Closd', 'Done long ago', datetime('now', '-30 days'))
-	`, p.ID)
+	`, p.ID); err != nil {
+		t.Fatalf("insert old completed item: %v", err)
+	}
 
 	// Insert a recent one.
-	store.db.Exec(`
+	if _, err := store.db.Exec(`
 		INSERT INTO completed_items (project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at)
 		VALUES (?, 'github', 'org', 'repo', 2, 'issue', 'Recent item', 'Mrgd', 'Just done', datetime('now'))
-	`, p.ID)
+	`, p.ID); err != nil {
+		t.Fatalf("insert recent completed item: %v", err)
+	}
 
 	// Prune items older than 14 days.
 	pruned, err := store.PruneCompletedItems(p.ID, 14*24*3600)
@@ -1265,20 +1379,28 @@ func TestPruneCompletedItems(t *testing.T) {
 func TestPruneTrackedItems_ArchivesBeforeDelete(t *testing.T) {
 	store := openTestDB(t)
 	p := &Project{Name: "prunearchive", MinderIdentity: "prunearchive/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// 5 open + 5 terminal (with progress summaries).
 	for i := 1; i <= 5; i++ {
-		store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"})
+		if err := store.AddTrackedItem(&TrackedItem{ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i, LastStatus: "Open"}); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
 	}
 	for i := 6; i <= 10; i++ {
 		item := &TrackedItem{
 			ProjectID: p.ID, Source: "github", Owner: "org", Repo: "repo", Number: i,
 			LastStatus: "Closd", LastCheckedAt: fmt.Sprintf("2026-01-%02dT00:00:00Z", i),
 		}
-		store.AddTrackedItem(item)
+		if err := store.AddTrackedItem(item); err != nil {
+			t.Fatalf("AddTrackedItem %d: %v", i, err)
+		}
 		item.ProgressSummary = fmt.Sprintf("Work done on item %d", i)
-		store.UpdateTrackedItem(item)
+		if err := store.UpdateTrackedItem(item); err != nil {
+			t.Fatalf("UpdateTrackedItem %d: %v", i, err)
+		}
 	}
 
 	pruned, err := store.PruneTrackedItems(p.ID, 10, 2)
@@ -1459,7 +1581,9 @@ func TestBulkCreateAutopilotTasks(t *testing.T) {
 		LLMSummarizerModel: "claude-haiku-4-5",
 		LLMAnalyzerModel:   "claude-sonnet-4-6",
 	}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	tasks := []*AutopilotTask{
 		{ProjectID: p.ID, IssueNumber: 1, IssueTitle: "Task 1", Dependencies: "[]", Status: "queued"},
@@ -1495,7 +1619,9 @@ func TestQueuedUnblockedTasks(t *testing.T) {
 		LLMSummarizerModel: "claude-haiku-4-5",
 		LLMAnalyzerModel:   "claude-sonnet-4-6",
 	}
-	store.CreateProject(p)
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
 
 	// Task 1: no deps (should be unblocked).
 	t1 := &AutopilotTask{ProjectID: p.ID, IssueNumber: 1, IssueTitle: "Base", Dependencies: "[]", Status: "queued"}
@@ -1504,9 +1630,15 @@ func TestQueuedUnblockedTasks(t *testing.T) {
 	// Task 3: no deps (should be unblocked).
 	t3 := &AutopilotTask{ProjectID: p.ID, IssueNumber: 3, IssueTitle: "Independent", Dependencies: "[]", Status: "queued"}
 
-	store.CreateAutopilotTask(t1)
-	store.CreateAutopilotTask(t2)
-	store.CreateAutopilotTask(t3)
+	if err := store.CreateAutopilotTask(t1); err != nil {
+		t.Fatalf("CreateAutopilotTask t1: %v", err)
+	}
+	if err := store.CreateAutopilotTask(t2); err != nil {
+		t.Fatalf("CreateAutopilotTask t2: %v", err)
+	}
+	if err := store.CreateAutopilotTask(t3); err != nil {
+		t.Fatalf("CreateAutopilotTask t3: %v", err)
+	}
 
 	unblocked, err := store.QueuedUnblockedTasks(p.ID)
 	if err != nil {
@@ -1517,7 +1649,9 @@ func TestQueuedUnblockedTasks(t *testing.T) {
 	}
 
 	// Complete task 1.
-	store.UpdateAutopilotTaskStatus(t1.ID, "done")
+	if err := store.UpdateAutopilotTaskStatus(t1.ID, "done"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus: %v", err)
+	}
 
 	// Now task 2 should also be unblocked.
 	unblocked, err = store.QueuedUnblockedTasks(p.ID)

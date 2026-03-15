@@ -177,7 +177,7 @@ func (s *Store) ReplaceWorktrees(repoID int64, wts []Worktree) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.Exec("DELETE FROM worktrees WHERE repo_id = ?", repoID); err != nil {
 		return err
@@ -400,7 +400,7 @@ func (s *Store) BulkAddTrackedItems(items []*TrackedItem) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	projectID := items[0].ProjectID
 
@@ -633,7 +633,7 @@ func (s *Store) BulkCreateAutopilotTasks(tasks []*AutopilotTask) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	inserted := 0
 	for _, task := range tasks {
@@ -670,15 +670,12 @@ func (s *Store) GetAutopilotTasks(projectID int64) ([]AutopilotTask, error) {
 
 // UpdateAutopilotTaskStatus updates only the status and completed_at of an autopilot task.
 func (s *Store) UpdateAutopilotTaskStatus(id int64, status string) error {
-	completedAt := ""
 	if status == "done" || status == "bailed" {
-		completedAt = "datetime('now')"
 		_, err := s.db.Exec(`
 			UPDATE autopilot_tasks SET status = ?, completed_at = datetime('now') WHERE id = ?
 		`, status, id)
 		return err
 	}
-	_ = completedAt
 	_, err := s.db.Exec(`UPDATE autopilot_tasks SET status = ? WHERE id = ?`, status, id)
 	return err
 }

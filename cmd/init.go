@@ -77,7 +77,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	store := db.NewStore(conn)
 
 	// Check if project already exists.
@@ -89,7 +89,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 		if !strings.HasPrefix(strings.ToLower(answer), "y") {
 			return fmt.Errorf("aborted")
 		}
-		store.DeleteProject(existing.ID)
+		if err := store.DeleteProject(existing.ID); err != nil {
+			return fmt.Errorf("deleting existing project: %w", err)
+		}
 	}
 
 	// 3. Goal selection.
@@ -222,7 +224,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Add topics.
 	for _, name := range topics {
-		store.AddTopic(&db.Topic{ProjectID: project.ID, Name: name})
+		if err := store.AddTopic(&db.Topic{ProjectID: project.ID, Name: name}); err != nil {
+			return fmt.Errorf("adding topic %s: %w", name, err)
+		}
 	}
 
 	fmt.Printf("\nProject %q initialized!\n", projectName)

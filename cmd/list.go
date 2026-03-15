@@ -24,7 +24,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	store := db.NewStore(conn)
 
 	projects, err := store.ListProjects()

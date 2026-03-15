@@ -128,7 +128,6 @@ type Model struct {
 	// State.
 	events   []poller.Event
 	lastPoll *poller.PollResult
-	err      error
 
 	// Viewports for scrollable sections.
 	analysisVP       viewport.Model

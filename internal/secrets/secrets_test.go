@@ -42,8 +42,8 @@ func TestMapKeyring_ErrNotFound(t *testing.T) {
 func TestMapKeyring_Overwrite(t *testing.T) {
 	kr := NewMapKeyring()
 
-	kr.Set("svc", "key", "v1")
-	kr.Set("svc", "key", "v2")
+	_ = kr.Set("svc", "key", "v1")
+	_ = kr.Set("svc", "key", "v2")
 
 	got, _ := kr.Get("svc", "key")
 	if got != "v2" {

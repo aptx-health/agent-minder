@@ -53,7 +53,9 @@ func TestGetProviderAPIKey_KeychainOverridesAll(t *testing.T) {
 	mk := setupTestKeyring(t)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-env")
 	viper.Set("providers.anthropic.api_key", "sk-config")
-	mk.Set("agent-minder", "provider/anthropic", "sk-keychain")
+	if err := mk.Set("agent-minder", "provider/anthropic", "sk-keychain"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
 
 	got := GetProviderAPIKey("anthropic")
 	if got != "sk-keychain" {
@@ -100,7 +102,9 @@ func TestGetIntegrationToken_KeychainFirst(t *testing.T) {
 	mk := setupTestKeyring(t)
 	t.Setenv("GITHUB_TOKEN", "ghp-env")
 	viper.Set("integrations.github.token", "ghp-config")
-	mk.Set("agent-minder", "integration/github", "ghp-keychain")
+	if err := mk.Set("agent-minder", "integration/github", "ghp-keychain"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
 
 	got := GetIntegrationToken("github")
 	if got != "ghp-keychain" {
@@ -212,7 +216,9 @@ func TestGetProviderBaseURL(t *testing.T) {
 func TestTokenSource_Keychain(t *testing.T) {
 	resetViper(t)
 	mk := setupTestKeyring(t)
-	mk.Set("agent-minder", "provider/anthropic", "sk-keychain")
+	if err := mk.Set("agent-minder", "provider/anthropic", "sk-keychain"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
 
 	src := TokenSource("provider", "anthropic")
 	if src != "keychain" {
@@ -257,7 +263,9 @@ func TestTokenSource_NotFound(t *testing.T) {
 func TestTokenSource_Integration(t *testing.T) {
 	resetViper(t)
 	mk := setupTestKeyring(t)
-	mk.Set("agent-minder", "integration/github", "ghp-keychain")
+	if err := mk.Set("agent-minder", "integration/github", "ghp-keychain"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
 
 	src := TokenSource("integration", "github")
 	if src != "keychain" {

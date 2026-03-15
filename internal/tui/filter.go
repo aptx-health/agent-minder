@@ -512,10 +512,6 @@ func (m Model) renderFilterView() string {
 			b.WriteString(mutedStyle().Render("  No matching issues found."))
 			b.WriteString("\n")
 		} else {
-			count := len(fs.results.Items)
-			if count > 20 {
-				count = 20
-			}
 			b.WriteString(textStyle().Render(fmt.Sprintf("  Found %d issues", fs.results.TotalCount)))
 			if fs.results.TotalCount > 20 {
 				b.WriteString(mutedStyle().Render(" (showing first 20)"))
@@ -531,7 +527,7 @@ func (m Model) renderFilterView() string {
 				if len(title) > 60 {
 					title = title[:57] + "..."
 				}
-				b.WriteString(fmt.Sprintf("  %s #%d %s", dot, item.Number, mutedStyle().Render(title)))
+				fmt.Fprintf(&b, "  %s #%d %s", dot, item.Number, mutedStyle().Render(title))
 				b.WriteString("\n")
 			}
 		}

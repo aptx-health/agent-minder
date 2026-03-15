@@ -75,7 +75,7 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	store := db.NewStore(conn)
 
 	project, err := store.GetProject(projectName)

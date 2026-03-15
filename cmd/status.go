@@ -29,7 +29,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	store := db.NewStore(conn)
 
 	project, err := store.GetProject(projectName)
@@ -85,7 +85,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	dbPath := msgbus.DefaultDBPath()
 	client, err := msgbus.Open(dbPath)
 	if err == nil {
-		defer client.Close()
+		defer func() { _ = client.Close() }()
 		ttl := time.Duration(project.MessageTTLSec) * time.Second
 		msgs, _ := client.RecentMessages(ttl, project.Name)
 		if len(msgs) > 0 {
@@ -104,7 +104,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Tracked items.
 	trackedItems, err := store.GetTrackedItems(project.ID)
 	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: loading tracked items: %v\n", err)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: loading tracked items: %v\n", err)
 	}
 	if len(trackedItems) > 0 {
 		fmt.Printf("Tracked Items (%d):\n", len(trackedItems))
