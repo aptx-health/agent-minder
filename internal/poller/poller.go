@@ -43,7 +43,10 @@ func initDebugLog() {
 	if err != nil {
 		return
 	}
-	logPath := filepath.Join(home, ".agent-minder", "debug.log")
+	logPath := os.Getenv("MINDER_LOG")
+	if logPath == "" {
+		logPath = filepath.Join(home, ".agent-minder", "debug.log")
+	}
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return
@@ -111,15 +114,16 @@ type TrackedItemChange struct {
 
 // PollResult holds the outcome of a single poll cycle.
 type PollResult struct {
-	NewCommits          int
-	NewMessages         int
-	NewWorktrees        int
-	TrackedItemChanges  []TrackedItemChange
-	Tier1Summary        string
-	Tier2Analysis       string
-	BusMessageSent      string
-	Concerns            []string
-	Duration            time.Duration
+	NewCommits         int
+	NewMessages        int
+	NewWorktrees       int
+	TrackedItemChanges []TrackedItemChange
+	Tier1Summary       string
+	Tier2Analysis      string
+	BusMessageSent     string
+	Concerns           []string
+	Duration           time.Duration
+	StatusOnly         bool // true for status-only polls (no LLM analysis)
 }
 
 // LLMResponse returns the best available response for display.
@@ -130,7 +134,7 @@ func (r *PollResult) LLMResponse() string {
 	return r.Tier1Summary
 }
 
-// Poller runs the monitoring loop.
+// Poller runs the monitoring loop with separate status and analysis tickers.
 type Poller struct {
 	store     *db.Store
 	project   *db.Project
@@ -138,11 +142,11 @@ type Poller struct {
 	publisher *msgbus.Publisher
 	events    chan Event
 
-	mu              sync.Mutex
-	paused          bool
-	cancel          context.CancelFunc
-	stopped         chan struct{}
-	intervalChanged chan time.Duration // signals run loop to reset ticker
+	mu                    sync.Mutex
+	paused                bool
+	cancel                context.CancelFunc
+	stopped               chan struct{}
+	statusIntervalChanged chan time.Duration
 
 	autopilotStatus func() string // optional callback for autopilot status injection
 }
@@ -150,12 +154,12 @@ type Poller struct {
 // New creates a new Poller. Publisher may be nil if bus publishing is not available.
 func New(store *db.Store, project *db.Project, provider llm.Provider, publisher *msgbus.Publisher) *Poller {
 	return &Poller{
-		store:           store,
-		project:         project,
-		provider:        provider,
-		publisher:       publisher,
-		events:          make(chan Event, 64),
-		intervalChanged: make(chan time.Duration, 1),
+		store:                 store,
+		project:               project,
+		provider:              provider,
+		publisher:             publisher,
+		events:                make(chan Event, 64),
+		statusIntervalChanged: make(chan time.Duration, 1),
 	}
 }
 
@@ -182,15 +186,13 @@ func (p *Poller) SetAutopilotStatusFunc(fn func() string) {
 	p.mu.Unlock()
 }
 
-// SetRefreshInterval updates the poll interval at runtime.
-// The change takes effect on the next tick cycle.
-func (p *Poller) SetRefreshInterval(d time.Duration) {
+// SetStatusInterval updates the status poll interval at runtime.
+func (p *Poller) SetStatusInterval(d time.Duration) {
 	p.mu.Lock()
-	p.project.RefreshIntervalSec = int(d.Seconds())
+	p.project.StatusIntervalSec = int(d.Seconds())
 	p.mu.Unlock()
-	// Non-blocking send to signal the run loop.
 	select {
-	case p.intervalChanged <- d:
+	case p.statusIntervalChanged <- d:
 	default:
 	}
 }
@@ -238,10 +240,21 @@ func (p *Poller) IsPaused() bool {
 	return p.paused
 }
 
-// PollNow triggers an immediate poll cycle.
+// PollNow triggers an immediate full poll cycle (status + analysis).
 func (p *Poller) PollNow(ctx context.Context) {
 	p.emit("polling", "Polling...", nil)
 	result, err := p.doPoll(ctx)
+	if err != nil {
+		p.emit("error", err.Error(), nil)
+		return
+	}
+	p.emit("poll", p.summarize(result), result)
+}
+
+// StatusNow triggers an immediate status-only poll cycle (no LLM analysis).
+func (p *Poller) StatusNow(ctx context.Context) {
+	p.emit("polling", "Status check...", nil)
+	result, err := p.doStatusPoll(ctx)
 	if err != nil {
 		p.emit("error", err.Error(), nil)
 		return
@@ -490,29 +503,44 @@ func (p *Poller) PostUserMessage(ctx context.Context, message string) error {
 func (p *Poller) run(ctx context.Context) {
 	defer close(p.stopped)
 
-	// Do an initial poll immediately.
-	p.PollNow(ctx)
+	// Initial status-only check (no LLM analysis) to avoid spending tokens on startup.
+	p.StatusNow(ctx)
 
-	ticker := time.NewTicker(p.project.RefreshInterval())
-	defer ticker.Stop()
+	// Status ticker for mechanical checks. Analysis is user-initiated only (R key).
+	statusTicker := time.NewTicker(p.project.StatusInterval())
+	defer statusTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case d := <-p.intervalChanged:
-			ticker.Reset(d)
-		case <-ticker.C:
+		case d := <-p.statusIntervalChanged:
+			statusTicker.Reset(d)
+		case <-statusTicker.C:
 			if p.IsPaused() {
 				continue
 			}
-			p.PollNow(ctx)
+			p.StatusNow(ctx)
 		}
 	}
 }
 
-func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
-	start := time.Now()
+// gatherResult holds the output of the gather phase, shared between status and analysis polls.
+type gatherResult struct {
+	result             *PollResult
+	repos              []db.Repo
+	gitSummary         string
+	msgSummary         string
+	trackedItems       []db.TrackedItem
+	trackedChanges     string
+	sweepResults       []SweepResult
+	sweepHadUpdates    bool
+	prStatusSection    string
+	worktreeBranchData []repoWorktreeBranches
+}
+
+// gatherActivity runs the mechanical status checks: git, bus, tracked items, PR status.
+func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 	result := &PollResult{}
 	debugLog("poll start", "stage", "gather", "step", "start", "project", p.project.Name)
 
@@ -523,9 +551,9 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 
 	// Gather git activity and sync worktrees.
 	// Use last poll time as the lookback boundary so commits aren't double-counted.
-	// Fall back to 2x refresh interval on first poll (no prior poll exists).
+	// Fall back to 2x analysis interval on first poll (no prior poll exists).
 	var gitSummary strings.Builder
-	since := time.Now().Add(-p.project.RefreshInterval() * 2)
+	since := time.Now().Add(-p.project.AnalysisInterval() * 2)
 	if lastPoll, err := p.store.LastPoll(p.project.ID); err == nil && lastPoll != nil {
 		if t, err := time.Parse("2006-01-02 15:04:05", lastPoll.PolledAt); err == nil {
 			since = t
@@ -659,7 +687,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	client, err := msgbus.Open(dbPath)
 	if err == nil {
 		defer func() { _ = client.Close() }()
-		msgs, _ := client.RecentMessages(p.project.RefreshInterval()*2, p.project.Name)
+		msgs, _ := client.RecentMessages(p.project.AnalysisInterval()*2, p.project.Name)
 		// Filter out our own messages so the minder only sees other agents.
 		filtered := msgs[:0]
 		for _, m := range msgs {
@@ -716,12 +744,61 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		}
 	}
 
-	// Gather worktree PR status (mechanical, no LLM) — must run before
-	// the early return so PR state changes can trigger analysis.
+	// Gather worktree PR status (mechanical, no LLM).
 	prStatusSection := p.gatherWorktreePRStatus(ctx, worktreeBranchData)
 
+	return &gatherResult{
+		result:             result,
+		repos:              repos,
+		gitSummary:         gitSummary.String(),
+		msgSummary:         msgSummary.String(),
+		trackedItems:       trackedItems,
+		trackedChanges:     trackedChanges,
+		sweepResults:       sweepResults,
+		sweepHadUpdates:    sweepHadUpdates,
+		prStatusSection:    prStatusSection,
+		worktreeBranchData: worktreeBranchData,
+	}, nil
+}
+
+// doStatusPoll runs a status-only poll: gather activity without LLM analysis.
+func (p *Poller) doStatusPoll(ctx context.Context) (*PollResult, error) {
+	start := time.Now()
+	debugLog("status poll start", "stage", "status", "step", "start", "project", p.project.Name)
+
+	gathered, err := p.gatherActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := gathered.result
+	result.StatusOnly = true
+	result.Duration = time.Since(start)
+
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates && gathered.prStatusSection == "" {
+		result.Tier1Summary = "No new activity."
+		debugLog("status poll skip", "stage", "status", "step", "skip", "project", p.project.Name)
+	} else {
+		// Build a brief summary so the event log isn't blank.
+		result.Tier1Summary = "Status: " + p.summarize(result)
+	}
+
+	debugLog("status poll complete", "stage", "status", "step", "complete", "project", p.project.Name, "duration_ms", result.Duration.Milliseconds())
+	return result, nil
+}
+
+func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
+	start := time.Now()
+
+	gathered, err := p.gatherActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := gathered.result
+
 	// If nothing happened, skip LLM calls.
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !sweepHadUpdates && prStatusSection == "" {
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates && gathered.prStatusSection == "" {
 		result.Duration = time.Since(start)
 		result.Tier1Summary = "No new activity."
 		debugLog("poll skip", "stage", "gather", "step", "skip", "project", p.project.Name)
@@ -746,7 +823,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		tier1WG.Add(1)
 		go func() {
 			defer tier1WG.Done()
-			prompt := buildGitSummaryPrompt(p.project, repos, gitSummary.String())
+			prompt := buildGitSummaryPrompt(p.project, gathered.repos, gathered.gitSummary)
 			debugLog("llm call", "stage", "tier1", "step", "input", "component", "git_summarizer", "model", tier1Model, "system_prompt", gitSummarizerSystemPrompt(), "user_prompt", prompt)
 			resp, err := p.provider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
@@ -769,7 +846,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		tier1WG.Add(1)
 		go func() {
 			defer tier1WG.Done()
-			prompt := buildBusSummaryPrompt(p.project, msgSummary.String())
+			prompt := buildBusSummaryPrompt(p.project, gathered.msgSummary)
 			debugLog("llm call", "stage", "tier1", "step", "input", "component", "bus_summarizer", "model", tier1Model, "system_prompt", busSummarizerSystemPrompt(), "user_prompt", prompt)
 			resp, err := p.provider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
@@ -801,8 +878,8 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	} else if busTier1 != "" {
 		tier1Parts = append(tier1Parts, busTier1)
 	}
-	if trackedChanges != "" {
-		tier1Parts = append(tier1Parts, "Tracked item status changes: "+trackedChanges)
+	if gathered.trackedChanges != "" {
+		tier1Parts = append(tier1Parts, "Tracked item status changes: "+gathered.trackedChanges)
 	}
 	if len(tier1Parts) == 0 {
 		tier1Parts = append(tier1Parts, "Activity detected but no summaries produced.")
@@ -825,7 +902,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		p.emit("error", fmt.Sprintf("fetching completed items: %v", err), nil)
 	}
 
-	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, trackedChanges, prStatusSection, concerns, trackedItems, completedItems)
+	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, gathered.trackedChanges, gathered.prStatusSection, concerns, gathered.trackedItems, completedItems)
 	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model, "system_prompt", tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus), "user_prompt", tier2Prompt)
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{

@@ -29,14 +29,18 @@ func (s *Store) CreateProject(p *Project) error {
 	result, err := s.db.NamedExec(`
 		INSERT INTO projects (name, goal_type, goal_description, refresh_interval_sec,
 			message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model,
-			llm_summarizer_model, llm_analyzer_model, idle_pause_sec, analyzer_focus,
+			llm_summarizer_model, llm_analyzer_model, status_interval_sec, analysis_interval_sec,
+			idle_pause_sec, analyzer_focus,
 			autopilot_filter_type, autopilot_filter_value, autopilot_max_agents,
-			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label)
+			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label,
+			autopilot_base_branch)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
-			:llm_summarizer_model, :llm_analyzer_model, :idle_pause_sec, :analyzer_focus,
+			:llm_summarizer_model, :llm_analyzer_model, :status_interval_sec, :analysis_interval_sec,
+			:idle_pause_sec, :analyzer_focus,
 			:autopilot_filter_type, :autopilot_filter_value, :autopilot_max_agents,
-			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label)
+			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label,
+			:autopilot_base_branch)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -90,6 +94,8 @@ func (s *Store) UpdateProject(p *Project) error {
 			llm_model = :llm_model,
 			llm_summarizer_model = :llm_summarizer_model,
 			llm_analyzer_model = :llm_analyzer_model,
+			status_interval_sec = :status_interval_sec,
+			analysis_interval_sec = :analysis_interval_sec,
 			idle_pause_sec = :idle_pause_sec,
 			analyzer_focus = :analyzer_focus,
 			autopilot_filter_type = :autopilot_filter_type,
@@ -97,7 +103,8 @@ func (s *Store) UpdateProject(p *Project) error {
 			autopilot_max_agents = :autopilot_max_agents,
 			autopilot_max_turns = :autopilot_max_turns,
 			autopilot_max_budget_usd = :autopilot_max_budget_usd,
-			autopilot_skip_label = :autopilot_skip_label
+			autopilot_skip_label = :autopilot_skip_label,
+			autopilot_base_branch = :autopilot_base_branch
 		WHERE id = :id
 	`, p)
 	return err

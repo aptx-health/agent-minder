@@ -5,10 +5,11 @@ import (
 	"strconv"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"github.com/dustinlange/agent-minder/internal/db"
+	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
 
@@ -47,7 +48,7 @@ type settingsSavedMsg struct {
 }
 
 // newSettingsState initializes the settings dialog.
-func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project) *settingsState {
+func newSettingsState(project *db.Project) *settingsState {
 	ti := textinput.New()
 	ti.Placeholder = "value..."
 	ti.CharLimit = 10
@@ -60,7 +61,7 @@ func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project
 	ta.SetWidth(80)
 
 	// Show the effective focus (default if empty) truncated for the field list.
-	effectiveFocus := analyzerFocus
+	effectiveFocus := project.AnalyzerFocus
 	if effectiveFocus == "" {
 		effectiveFocus = poller.DefaultAnalyzerFocus
 	}
@@ -69,15 +70,20 @@ func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project
 		displayFocus = displayFocus[:57] + "..."
 	}
 
+	statusSec := project.StatusIntervalSec
+	if statusSec <= 0 {
+		statusSec = 300
+	}
+
 	return &settingsState{
 		step:     settingsStepSelectField,
 		input:    ti,
 		textarea: ta,
 		fields: []settingsField{
 			{
-				label:       "Poll interval",
-				description: "How often to poll for changes",
-				value:       strconv.Itoa(pollMinutes),
+				label:       "Sync interval",
+				description: "How often to run status checks",
+				value:       strconv.Itoa(statusSec / 60),
 				unit:        "min",
 			},
 			{
@@ -106,6 +112,11 @@ func newSettingsState(pollMinutes int, analyzerFocus string, project *db.Project
 				label:       "Autopilot skip label",
 				description: "Issues with this label are excluded",
 				value:       project.AutopilotSkipLabel,
+			},
+			{
+				label:       "Autopilot base branch",
+				description: "Base branch for worktrees and PRs (empty = auto-detect)",
+				value:       project.AutopilotBaseBranch,
 			},
 		},
 	}
@@ -190,14 +201,13 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		field := ss.fields[ss.fieldIdx]
 
 		switch field.label {
-		case "Poll interval":
+		case "Sync interval":
 			minutes, err := strconv.Atoi(raw)
 			if err != nil || minutes < 1 {
 				ss.err = "Enter a number >= 1"
 				return m, nil
 			}
-			newSec := minutes * 60
-			m.project.RefreshIntervalSec = newSec
+			m.project.StatusIntervalSec = minutes * 60
 			ss.fields[ss.fieldIdx].value = strconv.Itoa(minutes)
 			ss.input.Blur()
 			ss.step = settingsStepSelectField
@@ -206,9 +216,9 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 			return m, func() tea.Msg {
 				err := m.store.UpdateProject(m.project)
 				if err == nil {
-					m.poller.SetRefreshInterval(m.project.RefreshInterval())
+					m.poller.SetStatusInterval(m.project.StatusInterval())
 				}
-				return settingsSavedMsg{field: "Poll interval", err: err}
+				return settingsSavedMsg{field: "Sync interval", err: err}
 			}
 		case "Autopilot max agents":
 			n, err := strconv.Atoi(raw)
@@ -237,6 +247,29 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 		case "Autopilot skip label":
 			m.project.AutopilotSkipLabel = strings.TrimSpace(raw)
 			return m.saveSettingsField(ss, field.label, strings.TrimSpace(raw))
+		case "Autopilot base branch":
+			branch := strings.TrimSpace(raw)
+			if branch != "" {
+				// Validate that the branch exists in at least one enrolled repo.
+				repos, err := m.store.GetRepos(m.project.ID)
+				if err != nil || len(repos) == 0 {
+					ss.err = "No enrolled repos to validate against"
+					return m, nil
+				}
+				found := false
+				for _, r := range repos {
+					if gitpkg.BranchExists(r.Path, branch) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					ss.err = fmt.Sprintf("Branch '%s' not found in enrolled repos", branch)
+					return m, nil
+				}
+			}
+			m.project.AutopilotBaseBranch = branch
+			return m.saveSettingsField(ss, field.label, branch)
 		}
 
 		return m, nil

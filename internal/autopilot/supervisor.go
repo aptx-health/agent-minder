@@ -68,15 +68,15 @@ func New(store *db.Store, project *db.Project, provider llm.Provider, repoDir, o
 		maxAgents = 3
 	}
 	return &Supervisor{
-		store:   store,
-		project: project,
+		store:    store,
+		project:  project,
 		provider: provider,
-		repoDir: repoDir,
-		owner:   owner,
-		repo:    repo,
-		ghToken: ghToken,
-		slots:   make([]*slotState, maxAgents),
-		events:  make(chan Event, 64),
+		repoDir:  repoDir,
+		owner:    owner,
+		repo:     repo,
+		ghToken:  ghToken,
+		slots:    make([]*slotState, maxAgents),
+		events:   make(chan Event, 64),
 	}
 }
 
@@ -95,6 +95,24 @@ func (s *Supervisor) IsActive() bool {
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
 // Always starts fresh — clears previous tasks, cleans up orphaned worktrees.
 func (s *Supervisor) Prepare(ctx context.Context) (total, unblocked int, err error) {
+	// Validate configured base branch exists in at least one enrolled repo.
+	if s.project.AutopilotBaseBranch != "" {
+		repos, err := s.store.GetRepos(s.project.ID)
+		if err != nil {
+			return 0, 0, fmt.Errorf("get enrolled repos: %w", err)
+		}
+		found := false
+		for _, r := range repos {
+			if gitpkg.BranchExists(r.Path, s.project.AutopilotBaseBranch) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return 0, 0, fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
+		}
+	}
+
 	// Clean up any leftovers from a previous run.
 	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
 		return 0, 0, fmt.Errorf("clear autopilot tasks: %w", err)
@@ -685,17 +703,25 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	// Clean up stale branch from previous run if it exists.
 	_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
 
-	// Create worktree.
-	if err := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch); err != nil {
+	// Get base branch: use configured value if set, otherwise auto-detect.
+	baseBranch := s.project.AutopilotBaseBranch
+	if baseBranch == "" {
+		baseBranch, _ = gitpkg.DefaultBranch(s.repoDir)
+	}
+
+	// Fetch latest from origin so the worktree starts from the latest base branch.
+	if err := gitpkg.Fetch(s.repoDir); err != nil {
+		s.emitEvent("warning", fmt.Sprintf("Fetch failed for #%d: %v (using cached ref)", task.IssueNumber, err), task)
+	}
+
+	// Create worktree from the latest remote base branch.
+	if err := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch, "origin/"+baseBranch); err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to create worktree for #%d: %v", task.IssueNumber, err), task)
 		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
 		return
 	}
 
 	s.emitEvent("started", fmt.Sprintf("Agent started on #%d: %s", task.IssueNumber, task.IssueTitle), task)
-
-	// Get base branch.
-	baseBranch, _ := gitpkg.DefaultBranch(s.repoDir)
 
 	// Build prompt.
 	prompt := renderPrompt(task, baseBranch, s.owner, s.repo)

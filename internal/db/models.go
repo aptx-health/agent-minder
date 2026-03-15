@@ -8,27 +8,30 @@ import (
 
 // Project represents a monitored project.
 type Project struct {
-	ID                   int64  `db:"id"`
-	Name                 string `db:"name"`
-	GoalType             string `db:"goal_type"`
-	GoalDescription      string `db:"goal_description"`
-	RefreshIntervalSec   int    `db:"refresh_interval_sec"`
-	MessageTTLSec        int    `db:"message_ttl_sec"`
-	AutoEnrollWorktrees  bool   `db:"auto_enroll_worktrees"`
-	MinderIdentity       string `db:"minder_identity"`
-	LLMProvider          string `db:"llm_provider"`
-	LLMModel             string `db:"llm_model"`
-	LLMSummarizerModel   string `db:"llm_summarizer_model"`
-	LLMAnalyzerModel     string `db:"llm_analyzer_model"`
-	IdlePauseSec           int     `db:"idle_pause_sec"`
-	AnalyzerFocus          string  `db:"analyzer_focus"`
-	AutopilotFilterType    string  `db:"autopilot_filter_type"`  // deprecated, unused
-	AutopilotFilterValue   string  `db:"autopilot_filter_value"` // deprecated, unused
-	AutopilotMaxAgents     int     `db:"autopilot_max_agents"`
-	AutopilotMaxTurns      int     `db:"autopilot_max_turns"`
-	AutopilotMaxBudgetUSD  float64 `db:"autopilot_max_budget_usd"`
-	AutopilotSkipLabel     string  `db:"autopilot_skip_label"`
-	CreatedAt              string  `db:"created_at"`
+	ID                    int64   `db:"id"`
+	Name                  string  `db:"name"`
+	GoalType              string  `db:"goal_type"`
+	GoalDescription       string  `db:"goal_description"`
+	RefreshIntervalSec    int     `db:"refresh_interval_sec"`
+	MessageTTLSec         int     `db:"message_ttl_sec"`
+	AutoEnrollWorktrees   bool    `db:"auto_enroll_worktrees"`
+	MinderIdentity        string  `db:"minder_identity"`
+	LLMProvider           string  `db:"llm_provider"`
+	LLMModel              string  `db:"llm_model"`
+	LLMSummarizerModel    string  `db:"llm_summarizer_model"`
+	LLMAnalyzerModel      string  `db:"llm_analyzer_model"`
+	StatusIntervalSec     int     `db:"status_interval_sec"`
+	AnalysisIntervalSec   int     `db:"analysis_interval_sec"`
+	IdlePauseSec          int     `db:"idle_pause_sec"`
+	AnalyzerFocus         string  `db:"analyzer_focus"`
+	AutopilotFilterType   string  `db:"autopilot_filter_type"`  // deprecated, unused
+	AutopilotFilterValue  string  `db:"autopilot_filter_value"` // deprecated, unused
+	AutopilotMaxAgents    int     `db:"autopilot_max_agents"`
+	AutopilotMaxTurns     int     `db:"autopilot_max_turns"`
+	AutopilotMaxBudgetUSD float64 `db:"autopilot_max_budget_usd"`
+	AutopilotSkipLabel    string  `db:"autopilot_skip_label"`
+	AutopilotBaseBranch   string  `db:"autopilot_base_branch"`
+	CreatedAt             string  `db:"created_at"`
 }
 
 // RefreshInterval returns the refresh interval as a time.Duration.
@@ -39,6 +42,24 @@ func (p *Project) RefreshInterval() time.Duration {
 // MessageTTL returns the message TTL as a time.Duration.
 func (p *Project) MessageTTL() time.Duration {
 	return time.Duration(p.MessageTTLSec) * time.Second
+}
+
+// StatusInterval returns the status poll interval as a time.Duration.
+// Defaults to 5 minutes if not set.
+func (p *Project) StatusInterval() time.Duration {
+	if p.StatusIntervalSec <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(p.StatusIntervalSec) * time.Second
+}
+
+// AnalysisInterval returns the analysis poll interval as a time.Duration.
+// Defaults to 30 minutes if not set.
+func (p *Project) AnalysisInterval() time.Duration {
+	if p.AnalysisIntervalSec <= 0 {
+		return 30 * time.Minute
+	}
+	return time.Duration(p.AnalysisIntervalSec) * time.Second
 }
 
 // IdlePauseDuration returns the idle pause threshold as a time.Duration.
@@ -105,23 +126,23 @@ type Poll struct {
 
 // TrackedItem represents a GitHub issue or PR being tracked for a project.
 type TrackedItem struct {
-	ID            int64  `db:"id"`
-	ProjectID     int64  `db:"project_id"`
-	Source        string `db:"source"`         // "github"
-	Owner         string `db:"owner"`          // repo owner
-	Repo          string `db:"repo"`           // repo name
-	Number        int    `db:"number"`         // issue/PR number
-	ItemType      string `db:"item_type"`      // "issue" or "pull_request"
-	Title         string `db:"title"`          // latest title
-	State         string `db:"state"`          // "open", "closed", "merged"
-	Labels        string `db:"labels"`         // comma-separated
-	IsDraft      bool   `db:"is_draft"`       // PR only: true if draft
-	ReviewState  string `db:"review_state"`   // PR only: "approved", "changes_requested", "pending", ""
-	LastStatus       string `db:"last_status"`        // compact status for TUI: "Open", "InProg", "Closd", "Mrgd", "Blckd", "Draft", "Appvd", "ChReq"
+	ID               int64  `db:"id"`
+	ProjectID        int64  `db:"project_id"`
+	Source           string `db:"source"`       // "github"
+	Owner            string `db:"owner"`        // repo owner
+	Repo             string `db:"repo"`         // repo name
+	Number           int    `db:"number"`       // issue/PR number
+	ItemType         string `db:"item_type"`    // "issue" or "pull_request"
+	Title            string `db:"title"`        // latest title
+	State            string `db:"state"`        // "open", "closed", "merged"
+	Labels           string `db:"labels"`       // comma-separated
+	IsDraft          bool   `db:"is_draft"`     // PR only: true if draft
+	ReviewState      string `db:"review_state"` // PR only: "approved", "changes_requested", "pending", ""
+	LastStatus       string `db:"last_status"`  // compact status for TUI: "Open", "InProg", "Closd", "Mrgd", "Blckd", "Draft", "Appvd", "ChReq"
 	LastCheckedAt    string `db:"last_checked_at"`
-	ContentHash      string `db:"content_hash"`       // SHA-256 of body+comments+state+labels
-	ObjectiveSummary string `db:"objective_summary"`  // Haiku-generated objective summary
-	ProgressSummary  string `db:"progress_summary"`   // Haiku-generated progress summary
+	ContentHash      string `db:"content_hash"`      // SHA-256 of body+comments+state+labels
+	ObjectiveSummary string `db:"objective_summary"` // Haiku-generated objective summary
+	ProgressSummary  string `db:"progress_summary"`  // Haiku-generated progress summary
 	CreatedAt        string `db:"created_at"`
 }
 

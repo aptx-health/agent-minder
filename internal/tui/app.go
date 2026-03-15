@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/dustinlange/agent-minder/internal/autopilot"
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
@@ -79,9 +79,9 @@ type trackStep int
 
 const (
 	trackStepInput          trackStep = iota // entering issue numbers
-	trackStepFetching                       // fetching item details from GitHub
-	trackStepPreview                        // showing items for confirmation
-	trackStepCleanupConfirm                 // confirming cleanup of terminal items
+	trackStepFetching                        // fetching item details from GitHub
+	trackStepPreview                         // showing items for confirmation
+	trackStepCleanupConfirm                  // confirming cleanup of terminal items
 )
 
 // trackPreviewItem holds resolved item info for the confirmation preview.
@@ -113,9 +113,14 @@ type autopilotEventMsg autopilot.Event
 // clearAutopilotStatusMsg clears a temporary autopilot status message.
 type clearAutopilotStatusMsg struct{}
 
-
 // idleCheckMsg triggers periodic idle timeout checking.
 type idleCheckMsg time.Time
+
+// Tab constants.
+const (
+	tabOperations = 0
+	tabAnalysis   = 1
+)
 
 // Model is the root bubbletea model for the dashboard.
 type Model struct {
@@ -124,6 +129,10 @@ type Model struct {
 	poller  *poller.Poller
 	width   int
 	height  int
+
+	// Tab state.
+	activeTab      int  // tabOperations or tabAnalysis
+	analysisHasNew bool // true when new analysis arrived while on Ops tab
 
 	// State.
 	events   []poller.Event
@@ -178,9 +187,12 @@ type Model struct {
 	filterState  *filterState
 	filterStatus string
 
+	// Poll confirm (R key).
+	pollConfirm bool
+
 	// Autopilot.
 	autopilotSupervisor *autopilot.Supervisor
-	autopilotMode       string // "", "confirm", "running", "stop-confirm"
+	autopilotMode       string // "", "scan-confirm", "confirm", "running", "stop-confirm"
 	autopilotStatus     string
 	autopilotTotal      int
 	autopilotUnblocked  int
@@ -247,12 +259,13 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		poller:         p,
 		events:         make([]poller.Event, 0, 64),
 		mode:           "normal",
+		activeTab:      tabOperations,
 		broadcastInput: bi,
 		userMsgInput:   ta,
 		onboardInput:   oi,
-		spinner:    sp,
-		polling:    true, // initial poll starts immediately
-		analysisVP: aVP,
+		spinner:        sp,
+		polling:        true, // initial status check starts immediately
+		analysisVP:     aVP,
 		eventLogVP:     eVP,
 		lastUserInput:  time.Now(),
 	}
@@ -263,7 +276,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 // applyTextareaTheme sets textarea styles to match the current theme.
 func (m *Model) applyTextareaTheme() {
 	var s textarea.Styles
-	if currentTheme().Name == "light" {
+	if currentTheme().Name == "latte" {
 		s = textarea.DefaultLightStyles()
 	} else {
 		s = textarea.DefaultDarkStyles()
@@ -329,9 +342,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.BackgroundColorMsg:
 		if msg.IsDark() {
-			setThemeByName("dark")
+			setThemeByName("mocha")
 		} else {
-			setThemeByName("light")
+			setThemeByName("latte")
 		}
 		m.applyTextareaTheme()
 		m.rebuildAnalysisContent()
@@ -357,6 +370,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.polling = false
 			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
+			// Flag new analysis if user is on Ops tab and this was an analysis result.
+			if m.activeTab == tabOperations && event.PollResult.Tier2Analysis != "" {
+				m.analysisHasNew = true
+			}
 		}
 		m.rebuildEventLogContent()
 		m.rebuildAnalysisContent()
@@ -510,9 +527,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildEventLogContent()
 		if event.Type == "stopped" {
 			m.autopilotMode = ""
-			// Restore poll interval.
+			// Restore status interval.
 			if m.origPollInterval > 0 {
-				m.poller.SetRefreshInterval(m.origPollInterval)
+				m.poller.SetStatusInterval(m.origPollInterval)
 				m.origPollInterval = 0
 			}
 			m.poller.SetAutopilotStatusFunc(nil)
@@ -630,6 +647,38 @@ type clearFilterStatusMsg struct{}
 type clearSettingsStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Poll confirm mode: confirm before expensive comprehensive analysis.
+	if m.pollConfirm {
+		switch msg.String() {
+		case "y":
+			m.pollConfirm = false
+			m.activeTab = tabAnalysis
+			m.analysisHasNew = false
+			m.resizeViewports()
+			p := m.poller
+			return m, func() tea.Msg {
+				p.PollNow(context.Background())
+				return nil
+			}
+		case "n", "esc":
+			m.pollConfirm = false
+			return m, nil
+		}
+		return m, nil
+	}
+	// Autopilot scan-confirm mode: confirm before expensive LLM scan.
+	if m.autopilotMode == "scan-confirm" {
+		switch msg.String() {
+		case "y":
+			return m.prepareAutopilot()
+		case "n", "esc":
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			m.autopilotStatus = ""
+			return m, nil
+		}
+		return m, nil
+	}
 	// Autopilot confirm mode intercepts y/n/esc.
 	if m.autopilotMode == "confirm" {
 		switch msg.String() {
@@ -655,6 +704,33 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "1":
+		m.activeTab = tabOperations
+		m.resizeViewports()
+		return m, nil
+	case "2":
+		m.activeTab = tabAnalysis
+		m.analysisHasNew = false
+		m.resizeViewports()
+		return m, nil
+	case "tab":
+		if m.activeTab == tabOperations {
+			m.activeTab = tabAnalysis
+			m.analysisHasNew = false
+		} else {
+			m.activeTab = tabOperations
+		}
+		m.resizeViewports()
+		return m, nil
+	case "shift+tab":
+		if m.activeTab == tabAnalysis {
+			m.activeTab = tabOperations
+		} else {
+			m.activeTab = tabAnalysis
+			m.analysisHasNew = false
+		}
+		m.resizeViewports()
+		return m, nil
 	case "?":
 		m.showHelp = !m.showHelp
 		m.resizeViewports()
@@ -671,10 +747,16 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		p := m.poller
 		return m, func() tea.Msg {
-			p.PollNow(context.Background())
+			p.StatusNow(context.Background())
 			return nil
 		}
+	case "R":
+		m.pollConfirm = true
+		return m, nil
 	case "e":
+		if m.activeTab != tabAnalysis {
+			return m, nil
+		}
 		m.analysisExpanded = !m.analysisExpanded
 		m.resizeViewports()
 		return m, nil
@@ -696,7 +778,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.trackRows[0].input.Focus()
 		m.resizeViewports()
 		return m, cmd
-	case "f":
+	case "b":
 		repos := m.poller.GitHubRepos()
 		if len(repos) == 0 {
 			m.trackStatus = "No GitHub repos enrolled"
@@ -734,6 +816,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, cmd
 	case "w":
+		if m.activeTab != tabOperations {
+			return m, nil
+		}
 		m.showWorktrees = !m.showWorktrees
 		if m.showWorktrees && len(m.worktrees) == 0 {
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
@@ -741,22 +826,24 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	case "x":
+		if m.activeTab != tabOperations {
+			return m, nil
+		}
 		m.trackedExpanded = !m.trackedExpanded
 		m.resizeViewports()
 		return m, nil
 	case "c":
+		if m.activeTab != tabAnalysis {
+			return m, nil
+		}
 		m.concernsExpanded = !m.concernsExpanded
 		m.resizeViewports()
 		return m, nil
 	case "s":
-		pollMinutes := m.project.RefreshIntervalSec / 60
-		if pollMinutes < 1 {
-			pollMinutes = 1
-		}
-		m.settingsState = newSettingsState(pollMinutes, m.project.AnalyzerFocus, m.project)
+		m.settingsState = newSettingsState(m.project)
 		// Apply textarea theme to match current theme.
 		var s textarea.Styles
-		if currentTheme().Name == "light" {
+		if currentTheme().Name == "latte" {
 			s = textarea.DefaultLightStyles()
 		} else {
 			s = textarea.DefaultDarkStyles()
@@ -812,7 +899,11 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.stopAutopilot()
 	case "up", "down", "pgup", "pgdown":
 		var cmd tea.Cmd
-		m.eventLogVP, cmd = m.eventLogVP.Update(msg)
+		if m.activeTab == tabAnalysis {
+			m.analysisVP, cmd = m.analysisVP.Update(msg)
+		} else {
+			m.eventLogVP, cmd = m.eventLogVP.Update(msg)
+		}
 		return m, cmd
 	}
 	return m, nil
@@ -1275,7 +1366,7 @@ func idleCheckTick() tea.Cmd {
 	}
 }
 
-// startAutopilot begins the autopilot flow: fetch issues and show confirmation.
+// startAutopilot begins the autopilot flow: show scan confirmation before expensive LLM call.
 func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 	if m.autopilotMode == "running" {
 		m.autopilotStatus = "Autopilot already running — press A to stop"
@@ -1325,6 +1416,7 @@ func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 		})
 	}
 
+	// All prerequisites met — ask for confirmation before expensive LLM scan.
 	sup := autopilot.New(
 		m.store, m.project, m.poller.Provider(),
 		repos[0].Path,
@@ -1332,7 +1424,19 @@ func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 		ghToken,
 	)
 	m.autopilotSupervisor = sup
-	m.autopilotStatus = "Fetching issues..."
+	m.autopilotMode = "scan-confirm"
+	return m, nil
+}
+
+// prepareAutopilot runs the expensive LLM-based issue analysis after user confirms.
+func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = ""
+		return m, nil
+	}
+
+	m.autopilotStatus = "Analyzing tracked items..."
 	m.polling = true
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
@@ -1354,13 +1458,13 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 	// Wire autopilot status into poller.
 	m.poller.SetAutopilotStatusFunc(sup.StatusBlock)
 
-	// Bump poll frequency.
-	m.origPollInterval = m.project.RefreshInterval()
+	// Halve status check frequency during autopilot for faster review gate checks.
+	m.origPollInterval = m.project.StatusInterval()
 	newInterval := m.origPollInterval / 2
-	if newInterval < 30*time.Second {
-		newInterval = 30 * time.Second
+	if newInterval < 15*time.Second {
+		newInterval = 15 * time.Second
 	}
-	m.poller.SetRefreshInterval(newInterval)
+	m.poller.SetStatusInterval(newInterval)
 
 	sup.Launch(context.Background())
 

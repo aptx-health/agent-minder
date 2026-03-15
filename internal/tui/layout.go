@@ -27,12 +27,61 @@ func (m Model) View() tea.View {
 		b.WriteString("\n")
 	}
 
-	// Active concerns.
-	concerns := m.renderConcerns()
-	if concerns != "" {
-		b.WriteString(concerns)
+	// Tab bar.
+	b.WriteString(m.renderTabBar())
+	b.WriteString("\n")
+
+	// Tab content: modal modes overlay tab content.
+	if m.mode == "settings" {
+		b.WriteString(m.renderSettingsView())
 		b.WriteString("\n")
+	} else if m.mode == "filter" {
+		b.WriteString(m.renderFilterView())
+		b.WriteString("\n")
+	} else if (m.mode == "track" || m.mode == "untrack") && m.trackStep == trackStepPreview {
+		b.WriteString(m.renderTrackPreview())
+		b.WriteString("\n")
+	} else if m.activeTab == tabOperations {
+		b.WriteString(m.renderOperationsTab())
+	} else {
+		b.WriteString(m.renderAnalysisTab())
 	}
+
+	// Bottom bar: input or help.
+	b.WriteString(m.renderBottomBar())
+
+	v := tea.NewView(b.String())
+	v.AltScreen = true
+	return v
+}
+
+// renderTabBar renders the tab selector bar.
+func (m Model) renderTabBar() string {
+	var b strings.Builder
+	b.WriteString(" ")
+
+	opsLabel := " 1: Operations "
+	analysisLabel := " 2: Analysis "
+	if m.analysisHasNew {
+		analysisLabel = " 2: Analysis \u25cf "
+	}
+
+	if m.activeTab == tabOperations {
+		b.WriteString(tabActiveStyle().Render(opsLabel))
+		b.WriteString("  ")
+		b.WriteString(tabInactiveStyle().Render(analysisLabel))
+	} else {
+		b.WriteString(tabInactiveStyle().Render(opsLabel))
+		b.WriteString("  ")
+		b.WriteString(tabActiveStyle().Render(analysisLabel))
+	}
+
+	return b.String()
+}
+
+// renderOperationsTab renders the Operations tab content.
+func (m Model) renderOperationsTab() string {
+	var b strings.Builder
 
 	// Tracked items strip.
 	tracked := m.renderTrackedStrip()
@@ -59,54 +108,80 @@ func (m Model) View() tea.View {
 		}
 	}
 
-	// Main content area: modal modes replace analysis+event log.
-	if m.mode == "settings" {
-		b.WriteString(m.renderSettingsView())
-		b.WriteString("\n")
-	} else if m.mode == "filter" {
-		b.WriteString(m.renderFilterView())
-		b.WriteString("\n")
-	} else if (m.mode == "track" || m.mode == "untrack") && m.trackStep == trackStepPreview {
-		b.WriteString(m.renderTrackPreview())
-		b.WriteString("\n")
-	} else {
-		// Analysis section.
-		expandHint := "e: expand"
-		if m.analysisExpanded {
-			expandHint = "e: collapse"
-		}
-		b.WriteString(headerStyle().Render("Last Analysis"))
-		b.WriteString("  ")
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
-		if m.lastPoll != nil {
-			b.WriteString("  ")
-			b.WriteString(mutedStyle().Render(m.lastPoll.Duration.Round(time.Millisecond).String()))
-		}
-		b.WriteString("\n")
-		b.WriteString(m.analysisVP.View())
-		b.WriteString("\n\n")
+	// Event log section.
+	b.WriteString(headerStyle().Render("Event Log"))
+	scrollHint := ""
+	if !m.eventLogVP.AtTop() || !m.eventLogVP.AtBottom() {
+		pct := m.eventLogVP.ScrollPercent()
+		scrollHint = fmt.Sprintf("  [%.0f%%]", pct*100)
+	}
+	if scrollHint != "" {
+		b.WriteString(mutedStyle().Render(scrollHint))
+	}
+	b.WriteString("\n")
+	b.WriteString(m.eventLogVP.View())
+	b.WriteString("\n")
 
-		// Event log section.
-		b.WriteString(headerStyle().Render("Event Log"))
-		scrollHint := ""
-		if !m.eventLogVP.AtTop() || !m.eventLogVP.AtBottom() {
-			pct := m.eventLogVP.ScrollPercent()
-			scrollHint = fmt.Sprintf("  [%.0f%%]", pct*100)
-		}
-		if scrollHint != "" {
-			b.WriteString(mutedStyle().Render(scrollHint))
-		}
-		b.WriteString("\n")
-		b.WriteString(m.eventLogVP.View())
+	return b.String()
+}
+
+// hasAnalysis returns true if an LLM analysis result is available.
+func (m Model) hasAnalysis() bool {
+	return m.lastPoll != nil && m.lastPoll.LLMResponse() != ""
+}
+
+// renderAnalysisTab renders the Analysis tab content.
+func (m Model) renderAnalysisTab() string {
+	var b strings.Builder
+
+	// Active concerns.
+	concerns := m.renderConcerns()
+	if concerns != "" {
+		b.WriteString(concerns)
 		b.WriteString("\n")
 	}
 
-	// Bottom bar: input or help.
-	b.WriteString(m.renderBottomBar())
+	if !m.hasAnalysis() {
+		// Prominent call-to-action when no analysis exists yet.
+		b.WriteString("\n")
+		b.WriteString(headerStyle().Render("  Press R to run analysis"))
+		b.WriteString("\n\n")
+		b.WriteString(mutedStyle().Render("  Analysis uses the LLM to review recent activity, identify"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle().Render("  concerns, and optionally publish to the message bus."))
+		b.WriteString("\n")
+		return b.String()
+	}
 
-	v := tea.NewView(b.String())
-	v.AltScreen = true
-	return v
+	// Analysis section with results.
+	expandHint := "e: expand"
+	if m.analysisExpanded {
+		expandHint = "e: collapse"
+	}
+	b.WriteString(headerStyle().Render("Last Analysis"))
+	b.WriteString("  ")
+	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
+	b.WriteString("  ")
+	b.WriteString(mutedStyle().Render("[R: rerun]"))
+	if m.lastPoll != nil {
+		b.WriteString("  ")
+		b.WriteString(mutedStyle().Render(m.lastPoll.Duration.Round(time.Millisecond).String()))
+	}
+	b.WriteString("\n")
+	b.WriteString(m.analysisVP.View())
+	b.WriteString("\n\n")
+
+	// Poll summary.
+	if m.lastPoll != nil {
+		statusParts := fmt.Sprintf("  %d commits, %d messages", m.lastPoll.NewCommits, m.lastPoll.NewMessages)
+		if m.lastPoll.NewWorktrees > 0 {
+			statusParts += fmt.Sprintf(", %d new worktrees", m.lastPoll.NewWorktrees)
+		}
+		b.WriteString(mutedStyle().Render(statusParts))
+		b.WriteString("\n")
+	}
+
+	return b.String()
 }
 
 // renderHeader returns the compact 2-line header with inline repo/topic counts.
@@ -114,10 +189,10 @@ func (m Model) renderHeader() string {
 	var b strings.Builder
 
 	// Line 1: title + status + counts + spinner + theme.
-	status := statusRunningStyle().Render("RUNNING")
+	status := statusRunningStyle().Render("SYNCING")
 	if m.autoPaused {
 		idleDur := formatDuration(time.Since(m.lastUserInput))
-		status = statusPausedStyle().Render(fmt.Sprintf("AUTO-PAUSED (idle %s)", idleDur))
+		status = statusPausedStyle().Render(fmt.Sprintf("IDLE (paused %s)", idleDur))
 	} else if m.poller.IsPaused() {
 		status = statusPausedStyle().Render("PAUSED")
 	}
@@ -455,24 +530,20 @@ func (m *Model) rebuildEventLogContent() {
 // rebuildAnalysisContent sets the analysis viewport content from the last poll.
 func (m *Model) rebuildAnalysisContent() {
 	if m.lastPoll == nil {
-		m.analysisVP.SetContent(mutedStyle().Render("  Waiting for first poll..."))
+		m.analysisVP.SetContent(mutedStyle().Render("  No analysis yet \u2014 press R to run"))
+		return
+	}
+	response := m.lastPoll.LLMResponse()
+	if response == "" {
+		m.analysisVP.SetContent(mutedStyle().Render("  No analysis yet \u2014 press R to run"))
 		return
 	}
 	var b strings.Builder
-	statusParts := fmt.Sprintf("  %d commits, %d messages", m.lastPoll.NewCommits, m.lastPoll.NewMessages)
-	if m.lastPoll.NewWorktrees > 0 {
-		statusParts += fmt.Sprintf(", %d new worktrees", m.lastPoll.NewWorktrees)
-	}
-	b.WriteString(mutedStyle().Render(statusParts))
-	b.WriteString("\n")
 	if m.lastPoll.BusMessageSent != "" {
 		b.WriteString(broadcastStyle().Render(fmt.Sprintf("  >> Bus: %s", m.lastPoll.BusMessageSent)))
 		b.WriteString("\n")
 	}
-	response := m.lastPoll.LLMResponse()
-	if response != "" {
-		b.WriteString(llmResponseStyle().Width(m.width - 2).Render(response))
-	}
+	b.WriteString(llmResponseStyle().Width(m.width - 2).Render(response))
 	m.analysisVP.SetContent(b.String())
 }
 
@@ -491,6 +562,7 @@ func (m *Model) resizeViewports() {
 }
 
 // computeHeightBudget calculates the height for analysis and event log viewports.
+// Only the active tab's viewport gets meaningful space; the other gets a minimum.
 func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 	fixed := 2 // header (title + goal)
 	fixed += 1 // blank line after header
@@ -505,51 +577,69 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 		fixed += 1 // blank line after info
 	}
 
-	// Count actual rendered concern lines (matches renderConcerns logic).
-	concernContent := m.renderConcerns()
-	if concernContent != "" {
-		fixed += strings.Count(concernContent, "\n")
-		fixed += 1 // blank line after concerns
-	}
-
-	trackedContent := m.renderTrackedStrip()
-	if trackedContent != "" {
-		fixed += strings.Count(trackedContent, "\n")
-		fixed += 1 // blank line after tracked
-	}
-
-	if m.showWorktrees {
-		wtContent := m.renderWorktrees()
-		if wtContent != "" {
-			fixed += strings.Count(wtContent, "\n")
-			fixed += 1 // blank line after worktrees
-		}
-	}
-
-	if m.autopilotMode == "running" && m.autopilotSupervisor != nil {
-		apContent := m.renderAutopilotSlots()
-		if apContent != "" {
-			fixed += strings.Count(apContent, "\n")
-			fixed += 1 // blank line after autopilot slots
-		}
-	}
-
-	fixed += 1 // analysis header
-	fixed += 1 // event log header
-	fixed += 3 // blank lines (after analysis VP, after event log VP, before bottom bar)
+	fixed += 1 // tab bar
+	fixed += 1 // blank line after tab bar
 	fixed += m.bottomBarHeight()
 
-	remaining := m.height - fixed
-	if remaining < 6 {
-		remaining = 6
-	}
+	if m.activeTab == tabOperations {
+		// Operations tab: tracked + worktrees + autopilot + event log header + VP
+		trackedContent := m.renderTrackedStrip()
+		if trackedContent != "" {
+			fixed += strings.Count(trackedContent, "\n")
+			fixed += 1
+		}
 
-	if m.analysisExpanded {
-		analysisH = remaining * 60 / 100
-		eventLogH = remaining - analysisH
+		if m.showWorktrees {
+			wtContent := m.renderWorktrees()
+			if wtContent != "" {
+				fixed += strings.Count(wtContent, "\n")
+				fixed += 1
+			}
+		}
+
+		if m.autopilotMode == "running" && m.autopilotSupervisor != nil {
+			apContent := m.renderAutopilotSlots()
+			if apContent != "" {
+				fixed += strings.Count(apContent, "\n")
+				fixed += 1
+			}
+		}
+
+		fixed += 1 // event log header
+		fixed += 1 // trailing newline
+
+		remaining := m.height - fixed
+		if remaining < 4 {
+			remaining = 4
+		}
+		eventLogH = remaining
+		analysisH = 2 // minimal for off-screen tab
 	} else {
-		analysisH = 3
-		eventLogH = remaining - 3
+		// Analysis tab: concerns + analysis header + VP + poll summary
+		concernContent := m.renderConcerns()
+		if concernContent != "" {
+			fixed += strings.Count(concernContent, "\n")
+			fixed += 1
+		}
+
+		fixed += 1 // analysis header
+		fixed += 2 // blank lines around VP
+		fixed += 1 // poll summary line
+
+		remaining := m.height - fixed
+		if remaining < 4 {
+			remaining = 4
+		}
+
+		if m.analysisExpanded {
+			analysisH = remaining
+		} else {
+			analysisH = 5
+			if analysisH > remaining {
+				analysisH = remaining
+			}
+		}
+		eventLogH = 2 // minimal for off-screen tab
 	}
 
 	if analysisH < 2 {
@@ -592,7 +682,7 @@ func (m Model) bottomBarHeight() int {
 		return 3 // blank + help + empty
 	default:
 		if m.showHelp {
-			return 2 + len(allHelpHints()) + 2 // blank + header + hints + close hint + blank
+			return 2 + helpOverlayHeight() + 2 // blank + header + body + close hint + blank
 		}
 		return 2 // blank + 1 help row
 	}
@@ -742,7 +832,17 @@ func (m Model) renderBottomBar() string {
 		}
 		b.WriteString("\n\n")
 	default:
-		if m.autopilotMode == "confirm" {
+		if m.pollConfirm {
+			b.WriteString(headerStyle().Render("  Run comprehensive analysis? (Requires LLM tokens)"))
+			b.WriteString("\n")
+			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
+			b.WriteString("\n")
+		} else if m.autopilotMode == "scan-confirm" {
+			b.WriteString(headerStyle().Render("  Analyze tracked items for autopilot? (Requires LLM tokens)"))
+			b.WriteString("\n")
+			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
+			b.WriteString("\n")
+		} else if m.autopilotMode == "confirm" {
 			b.WriteString(headerStyle().Render(
 				fmt.Sprintf("  %d issues found, %d unblocked. Launch %d agents? (y/n)",
 					m.autopilotTotal, m.autopilotUnblocked, m.project.AutopilotMaxAgents)))
@@ -771,9 +871,9 @@ func (m Model) renderBottomBar() string {
 			b.WriteString("\n")
 		}
 		if m.showHelp {
-			b.WriteString(renderHelpOverlay(m.width))
+			b.WriteString(renderHelpOverlay(m.width, m.activeTab))
 		} else {
-			b.WriteString(renderHelpBar(m.width))
+			b.WriteString(renderHelpBar(m.width, m.activeTab))
 		}
 		b.WriteString("\n")
 	}
@@ -782,7 +882,7 @@ func (m Model) renderBottomBar() string {
 }
 
 // renderHelpBar builds a single-line condensed help bar with ? for full list.
-func renderHelpBar(width int) string {
+func renderHelpBar(width, activeTab int) string {
 	keyStyle := helpKeyStyle()
 	descStyle := helpStyle()
 	sep := descStyle.Render(" \u2022 ")
@@ -792,15 +892,27 @@ func renderHelpBar(width int) string {
 		desc string
 	}
 
-	// Show essential keys on the condensed bar.
-	condensed := []hint{
-		{"p", "pause"},
-		{"r", "poll"},
-		{"i", "track"},
-		{"f", "filter"},
-		{"m", "broadcast"},
-		{"q", "quit"},
-		{"?", "help"},
+	var condensed []hint
+	if activeTab == tabAnalysis {
+		condensed = []hint{
+			{"1/2", "tabs"},
+			{"R", "analyze"},
+			{"b", "batch track"},
+			{"u", "user msg"},
+			{"m", "broadcast"},
+			{"q", "quit"},
+			{"?", "help"},
+		}
+	} else {
+		condensed = []hint{
+			{"1/2", "tabs"},
+			{"p", "pause"},
+			{"r", "poll"},
+			{"i", "track"},
+			{"b", "batch track"},
+			{"q", "quit"},
+			{"?", "help"},
+		}
 	}
 
 	var row strings.Builder
@@ -812,53 +924,138 @@ func renderHelpBar(width int) string {
 		row.WriteString(entry)
 	}
 
+	_ = width
 	return row.String()
 }
 
-// allHelpHints returns the full list of keybind hints for the help overlay.
-func allHelpHints() []struct{ key, desc string } {
-	return []struct{ key, desc string }{
-		{"p", "pause/resume polling"},
-		{"r", "poll now"},
-		{"e", "expand/collapse analysis"},
-		{"w", "toggle worktrees"},
-		{"x", "expand/collapse tracked"},
-		{"c", "expand/collapse concerns"},
-		{"s", "settings"},
-		{"i", "track issues"},
-		{"I", "untrack issues"},
-		{"f", "filter & bulk track"},
-		{"u", "post user message"},
-		{"m", "broadcast to agents"},
-		{"o", "generate onboarding"},
-		{"a", "launch autopilot"},
-		{"A", "stop autopilot"},
-		{"d", "toggle repo/topic details"},
-		{"t", "cycle theme"},
-		{"\u2191/\u2193", "scroll event log"},
-		{"?", "toggle this help"},
-		{"q", "quit"},
-	}
+type helpHint struct {
+	key  string
+	desc string
 }
 
-// renderHelpOverlay renders the full help overlay box.
-func renderHelpOverlay(width int) string {
+// Help hint groups for the columnar overlay.
+var (
+	globalHints = []helpHint{
+		{"1/2/tab", "switch tabs"},
+		{"s", "settings"},
+		{"d", "details"},
+		{"t", "theme"},
+		{"\u2191/\u2193", "scroll"},
+		{"?", "close help"},
+		{"q", "quit"},
+	}
+
+	opsHints = []helpHint{
+		{"p", "pause/resume sync"},
+		{"r", "status check"},
+		{"i", "track issues"},
+		{"I", "untrack issues"},
+		{"b", "batch track"},
+		{"x", "expand tracked"},
+		{"w", "toggle worktrees"},
+		{"a", "launch autopilot"},
+		{"A", "stop autopilot"},
+	}
+
+	analysisHints = []helpHint{
+		{"R", "run analysis"},
+		{"e", "expand analysis"},
+		{"c", "expand concerns"},
+		{"u", "user message"},
+		{"m", "broadcast"},
+		{"o", "onboarding"},
+	}
+)
+
+// helpOverlayHeight returns the number of lines the help body occupies.
+func helpOverlayHeight() int {
+	// 3 column headers + max of the three column lengths.
+	maxRows := len(globalHints)
+	if len(opsHints) > maxRows {
+		maxRows = len(opsHints)
+	}
+	if len(analysisHints) > maxRows {
+		maxRows = len(analysisHints)
+	}
+	return 1 + maxRows // 1 header row + hint rows
+}
+
+// renderHelpOverlay renders a three-column help overlay with the active tab highlighted.
+func renderHelpOverlay(width, activeTab int) string {
 	keyStyle := helpKeyStyle()
 	descStyle := helpStyle()
-	hints := allHelpHints()
+
+	// Column widths.
+	colW := 26
+	if width > 0 && width/3 > colW {
+		colW = width / 3
+	}
+
+	// Build column header labels — highlight the active tab's column.
+	globalLabel := headerStyle().Render("Global")
+	var opsLabel, analysisLabel string
+	if activeTab == tabOperations {
+		opsLabel = tabActiveStyle().Render(" Operations ")
+		analysisLabel = mutedStyle().Render("Analysis")
+	} else {
+		opsLabel = mutedStyle().Render("Operations")
+		analysisLabel = tabActiveStyle().Render(" Analysis ")
+	}
 
 	var b strings.Builder
 	b.WriteString(headerStyle().Render("Keybindings"))
 	b.WriteString("\n")
-	for _, h := range hints {
-		fmt.Fprintf(&b, "  %s %s\n",
-			keyStyle.Render(fmt.Sprintf("%3s", h.key)),
-			descStyle.Render(h.desc))
+
+	// Column headers.
+	fmt.Fprintf(&b, "  %-*s", colW, globalLabel)
+	fmt.Fprintf(&b, "%-*s", colW, opsLabel)
+	b.WriteString(analysisLabel)
+	b.WriteString("\n")
+
+	// Determine row count from longest column.
+	maxRows := len(globalHints)
+	if len(opsHints) > maxRows {
+		maxRows = len(opsHints)
 	}
+	if len(analysisHints) > maxRows {
+		maxRows = len(analysisHints)
+	}
+
+	dimStyle := lipgloss.NewStyle().Foreground(currentTheme().Border) // Surface2 — very faded
+
+	fmtHint := func(hints []helpHint, row int, active bool) string {
+		if row >= len(hints) {
+			return fmt.Sprintf("%-*s", colW, "")
+		}
+		h := hints[row]
+		var k, d string
+		if active {
+			k = keyStyle.Render(fmt.Sprintf("%7s", h.key))
+			d = descStyle.Render(" " + h.desc)
+		} else {
+			k = dimStyle.Render(fmt.Sprintf("%7s", h.key))
+			d = dimStyle.Render(" " + h.desc)
+		}
+		entry := k + d
+		// Pad with spaces to fill column (approximate since ANSI codes add invisible chars).
+		pad := colW - len(h.key) - 7 - len(h.desc)
+		if pad < 1 {
+			pad = 1
+		}
+		return entry + strings.Repeat(" ", pad)
+	}
+
+	for i := 0; i < maxRows; i++ {
+		b.WriteString("  ")
+		b.WriteString(fmtHint(globalHints, i, true))
+		b.WriteString(fmtHint(opsHints, i, activeTab == tabOperations))
+		b.WriteString(fmtHint(analysisHints, i, activeTab == tabAnalysis))
+		b.WriteString("\n")
+	}
+
 	b.WriteString(mutedStyle().Render("  press ? to close"))
 	b.WriteString("\n")
 
-	_ = width // available for future width-aware formatting
 	return b.String()
 }
 
@@ -893,7 +1090,6 @@ func (m Model) renderAutopilotSlots() string {
 	return b.String()
 }
 
-// renderAgentLogPreview shows the last N lines of the active agent's log.
 // truncateLine truncates a string to maxWidth characters, adding "..." if truncated.
 func truncateLine(s string, maxWidth int) string {
 	if maxWidth <= 0 {

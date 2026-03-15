@@ -2,13 +2,14 @@ package db
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/dustinlange/agent-minder/internal/sqliteutil"
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 9
+const currentVersion = 11
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -32,10 +33,13 @@ CREATE TABLE IF NOT EXISTS projects (
 	analyzer_focus        TEXT DEFAULT '',
 	autopilot_filter_type  TEXT DEFAULT '',
 	autopilot_filter_value TEXT DEFAULT '',
+	status_interval_sec    INTEGER DEFAULT 300,
+	analysis_interval_sec  INTEGER DEFAULT 1800,
 	autopilot_max_agents   INTEGER DEFAULT 3,
 	autopilot_max_turns    INTEGER DEFAULT 50,
 	autopilot_max_budget_usd REAL DEFAULT 3.00,
 	autopilot_skip_label   TEXT DEFAULT 'no-agent',
+	autopilot_base_branch  TEXT DEFAULT '',
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -219,6 +223,18 @@ func migrate(db *sqlx.DB) error {
 	if version < 9 {
 		if err := migrateV9(db); err != nil {
 			return fmt.Errorf("apply migration v9: %w", err)
+		}
+	}
+
+	if version < 10 {
+		if err := migrateV10(db); err != nil {
+			return fmt.Errorf("apply migration v10: %w", err)
+		}
+	}
+
+	if version < 11 {
+		if err := migrateV11(db); err != nil {
+			return fmt.Errorf("apply migration v11: %w", err)
 		}
 	}
 
@@ -409,7 +425,38 @@ func migrateV9(db *sqlx.DB) error {
 	return nil
 }
 
-// DefaultDBPath returns the default path for the agent-minder database.
+func migrateV10(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN autopilot_base_branch TEXT DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("add autopilot_base_branch: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE projects SET autopilot_base_branch = '' WHERE autopilot_base_branch IS NULL`); err != nil {
+		return fmt.Errorf("null-fill autopilot_base_branch: %w", err)
+	}
+	return nil
+}
+
+func migrateV11(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN status_interval_sec INTEGER DEFAULT 300`,
+		`ALTER TABLE projects ADD COLUMN analysis_interval_sec INTEGER DEFAULT 1800`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	// Copy existing refresh_interval_sec into analysis_interval_sec for migration continuity.
+	if _, err := db.Exec(`UPDATE projects SET analysis_interval_sec = refresh_interval_sec WHERE refresh_interval_sec > 0`); err != nil {
+		return fmt.Errorf("copy refresh_interval to analysis_interval: %w", err)
+	}
+	return nil
+}
+
+// DefaultDBPath returns the agent-minder database path, respecting MINDER_DB env var.
 func DefaultDBPath() string {
+	if p := os.Getenv("MINDER_DB"); p != "" {
+		return ExpandHome(p)
+	}
 	return ExpandHome("~/.agent-minder/minder.db")
 }

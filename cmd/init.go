@@ -27,9 +27,9 @@ func init() {
 
 // goalTypes maps goal selection number to (type, default refresh seconds).
 var goalTypes = []struct {
-	Name        string
-	Label       string
-	DefaultSec  int
+	Name       string
+	Label      string
+	DefaultSec int
 }{
 	{"feature", "Feature work — building or shipping something new", 300},
 	{"bugfix", "Bug fix — tracking down and fixing a specific issue", 180},
@@ -183,6 +183,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		GoalType:            goal.Name,
 		GoalDescription:     goalDesc,
 		RefreshIntervalSec:  int(interval.Seconds()),
+		AnalysisIntervalSec: int(interval.Seconds()),
 		MessageTTLSec:       int(ttl.Seconds()),
 		AutoEnrollWorktrees: autoEnrollBool,
 		IdlePauseSec:        idlePauseSec,
