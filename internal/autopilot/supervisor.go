@@ -498,6 +498,8 @@ func (s *Supervisor) convertTrackedItems(ctx context.Context) ([]*db.AutopilotTa
 
 		tasks = append(tasks, &db.AutopilotTask{
 			ProjectID:    s.project.ID,
+			Owner:        item.Owner,
+			Repo:         item.Repo,
 			IssueNumber:  item.Number,
 			IssueTitle:   liveStatus.Title,
 			IssueBody:    body,
@@ -764,6 +766,8 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 
 		newTasks = append(newTasks, &db.AutopilotTask{
 			ProjectID:    s.project.ID,
+			Owner:        item.Owner,
+			Repo:         item.Repo,
 			IssueNumber:  item.Number,
 			IssueTitle:   liveStatus.Title,
 			IssueBody:    body,

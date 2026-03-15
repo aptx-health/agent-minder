@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 11
+const currentVersion = 12
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -114,6 +114,8 @@ CREATE TABLE IF NOT EXISTS tracked_items (
 CREATE TABLE IF NOT EXISTS autopilot_tasks (
 	id             INTEGER PRIMARY KEY,
 	project_id     INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	owner          TEXT NOT NULL DEFAULT '',
+	repo           TEXT NOT NULL DEFAULT '',
 	issue_number   INTEGER NOT NULL,
 	issue_title    TEXT NOT NULL DEFAULT '',
 	issue_body     TEXT NOT NULL DEFAULT '',
@@ -235,6 +237,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 11 {
 		if err := migrateV11(db); err != nil {
 			return fmt.Errorf("apply migration v11: %w", err)
+		}
+	}
+
+	if version < 12 {
+		if err := migrateV12(db); err != nil {
+			return fmt.Errorf("apply migration v12: %w", err)
 		}
 	}
 
@@ -449,6 +457,19 @@ func migrateV11(db *sqlx.DB) error {
 	// Copy existing refresh_interval_sec into analysis_interval_sec for migration continuity.
 	if _, err := db.Exec(`UPDATE projects SET analysis_interval_sec = refresh_interval_sec WHERE refresh_interval_sec > 0`); err != nil {
 		return fmt.Errorf("copy refresh_interval to analysis_interval: %w", err)
+	}
+	return nil
+}
+
+func migrateV12(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE autopilot_tasks ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE autopilot_tasks ADD COLUMN repo TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
 	}
 	return nil
 }

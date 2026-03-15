@@ -249,6 +249,12 @@ func (m Model) renderAutopilotTab() string {
 		return b.String()
 	}
 
+	// Completed state: session finished, tasks preserved for inspection.
+	if m.autopilotMode == "completed" {
+		b.WriteString(m.renderAutopilotCompletedContent())
+		return b.String()
+	}
+
 	return b.String()
 }
 
@@ -259,11 +265,19 @@ func (m Model) renderAutopilotRunningContent() string {
 	// Slot section (compact, top of tab).
 	if m.autopilotSupervisor != nil {
 		slots := m.autopilotSupervisor.SlotStatus()
-		b.WriteString(headerStyle().Render("Slots"))
+		slotHeader := "Slots"
+		if m.autopilotPaused {
+			slotHeader = "Slots  " + warningStyle().Render("PAUSED")
+		}
+		b.WriteString(headerStyle().Render(slotHeader))
 		b.WriteString("\n")
 		for _, slot := range slots {
 			if slot.Status == "idle" {
-				b.WriteString(mutedStyle().Render(fmt.Sprintf("  Slot %d: idle", slot.SlotNum)))
+				label := "idle"
+				if m.autopilotPaused {
+					label = "idle (paused)"
+				}
+				b.WriteString(mutedStyle().Render(fmt.Sprintf("  Slot %d: %s", slot.SlotNum, label)))
 			} else {
 				elapsed := slot.RunningFor.Round(time.Second)
 				b.WriteString(statusRunningStyle().Render(fmt.Sprintf("  Slot %d: #%d  %s",
@@ -287,13 +301,47 @@ func (m Model) renderAutopilotRunningContent() string {
 	b.WriteString(m.autopilotTaskVP.View())
 	b.WriteString("\n")
 
+	// Task detail panel for selected task.
+	detail := m.renderTaskDetail()
+	if detail != "" {
+		b.WriteString("\n")
+		b.WriteString(detail)
+	}
+
+	return b.String()
+}
+
+// renderAutopilotCompletedContent renders the task list for a completed autopilot session (no slots).
+func (m Model) renderAutopilotCompletedContent() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle().Render("Autopilot — Completed"))
+	b.WriteString("  ")
+	expandHint := "e: expand"
+	if m.autopilotTasksExpanded {
+		expandHint = "e: collapse"
+	}
+	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
+	b.WriteString("\n")
+	b.WriteString(m.autopilotTaskVP.View())
+	b.WriteString("\n")
+
+	// Task detail panel for selected task.
+	detail := m.renderTaskDetail()
+	if detail != "" {
+		b.WriteString("\n")
+		b.WriteString(detail)
+	}
+
 	return b.String()
 }
 
 // rebuildAutopilotTaskContent refreshes the task list viewport from the database.
+// Stores the sorted task list in m.autopilotTasks and pins cursor by issue number.
 func (m *Model) rebuildAutopilotTaskContent() {
 	tasks, err := m.store.GetAutopilotTasks(m.project.ID)
 	if err != nil || len(tasks) == 0 {
+		m.autopilotTasks = nil
 		m.autopilotTaskVP.SetContent(mutedStyle().Render("  (no tasks)"))
 		return
 	}
@@ -319,11 +367,38 @@ func (m *Model) rebuildAutopilotTaskContent() {
 			}
 		}
 	}
+	m.autopilotTasks = sortedTasks
+
+	// Pin cursor by issue number across refreshes.
+	if m.autopilotSelectedIssue > 0 {
+		found := false
+		for i, t := range m.autopilotTasks {
+			if t.IssueNumber == m.autopilotSelectedIssue {
+				m.autopilotCursor = i
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.autopilotCursor = 0
+			if len(m.autopilotTasks) > 0 {
+				m.autopilotSelectedIssue = m.autopilotTasks[0].IssueNumber
+			}
+		}
+	} else if len(m.autopilotTasks) > 0 {
+		m.autopilotCursor = 0
+		m.autopilotSelectedIssue = m.autopilotTasks[0].IssueNumber
+	}
+
+	// Clamp cursor.
+	if m.autopilotCursor >= len(m.autopilotTasks) {
+		m.autopilotCursor = len(m.autopilotTasks) - 1
+	}
 
 	var lines []string
-	for _, t := range sortedTasks {
+	for i, t := range m.autopilotTasks {
 		title := t.IssueTitle
-		maxTitle := m.width - 30
+		maxTitle := m.width - 34 // extra room for cursor indicator
 		if maxTitle < 10 {
 			maxTitle = 10
 		}
@@ -331,25 +406,108 @@ func (m *Model) rebuildAutopilotTaskContent() {
 			title = title[:maxTitle-3] + "..."
 		}
 
-		var context string
+		var extra string
 		switch t.Status {
 		case "blocked":
-			context = m.taskBlockedContext(t)
+			extra = m.taskBlockedContext(t)
 		case "review":
 			if t.PRNumber > 0 {
-				context = fmt.Sprintf("PR #%d", t.PRNumber)
+				extra = fmt.Sprintf("PR #%d", t.PRNumber)
+			}
+		case "running":
+			if t.StartedAt != "" {
+				if started, err := time.Parse(time.RFC3339, t.StartedAt); err == nil {
+					extra = time.Since(started).Round(time.Second).String()
+				}
 			}
 		}
 
+		cursor := "  "
+		if i == m.autopilotCursor {
+			cursor = mutedStyle().Render("▸ ")
+		}
+
 		statusStr := m.taskStatusDisplay(t.Status)
-		line := fmt.Sprintf("  #%-5d %s  %s", t.IssueNumber, statusStr, title)
-		if context != "" {
-			line += "  " + mutedStyle().Render(context)
+		issueRef := fmt.Sprintf("#%-5d", t.IssueNumber)
+		if t.Owner != "" && t.Repo != "" {
+			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", t.Owner, t.Repo, t.IssueNumber)
+			issueRef = fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", ghURL, issueRef)
+		}
+		line := fmt.Sprintf("%s%s %s  %s", cursor, issueRef, statusStr, title)
+		if extra != "" {
+			line += "  " + mutedStyle().Render(extra)
 		}
 		lines = append(lines, line)
 	}
 
 	m.autopilotTaskVP.SetContentLines(lines)
+}
+
+// renderTaskDetail renders the detail panel for the selected autopilot task.
+func (m Model) renderTaskDetail() string {
+	task := m.selectedAutopilotTask()
+	if task == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(headerStyle().Render("Detail"))
+	b.WriteString("\n")
+
+	// Issue number + full title (clickable link if owner/repo available).
+	issueLabel := fmt.Sprintf("#%d", task.IssueNumber)
+	if task.Owner != "" && task.Repo != "" {
+		ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", task.Owner, task.Repo, task.IssueNumber)
+		issueLabel = fmt.Sprintf("\033]8;;%s\033\\#%d\033]8;;\033\\", ghURL, task.IssueNumber)
+	}
+	b.WriteString(textStyle().Render(fmt.Sprintf("  %s  %s", issueLabel, task.IssueTitle)))
+	b.WriteString("\n")
+
+	// Status.
+	fmt.Fprintf(&b, "  Status: %s", m.taskStatusDisplay(task.Status))
+	b.WriteString("\n")
+
+	// Dependencies.
+	deps := m.taskBlockedContext(*task)
+	if deps != "" {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("  Deps: %s", deps)))
+		b.WriteString("\n")
+	}
+
+	// Worktree path.
+	if task.WorktreePath != "" {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("  Worktree: %s", task.WorktreePath)))
+		b.WriteString("\n")
+	}
+
+	// Branch.
+	if task.Branch != "" {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("  Branch: %s", task.Branch)))
+		b.WriteString("\n")
+	}
+
+	// PR number.
+	if task.PRNumber > 0 {
+		b.WriteString(broadcastStyle().Render(fmt.Sprintf("  PR #%d", task.PRNumber)))
+		b.WriteString("\n")
+	}
+
+	// Agent log.
+	if task.AgentLog != "" {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("  Log: %s", task.AgentLog)))
+		b.WriteString("\n")
+	}
+
+	// Runtime.
+	if task.Status == "running" && task.StartedAt != "" {
+		if started, err := time.Parse(time.RFC3339, task.StartedAt); err == nil {
+			elapsed := time.Since(started).Round(time.Second)
+			b.WriteString(statusRunningStyle().Render(fmt.Sprintf("  Running for %s", elapsed)))
+			b.WriteString("\n")
+		}
+	}
+
+	return b.String()
 }
 
 // taskStatusDisplay returns a styled status string for an autopilot task.
@@ -835,8 +993,11 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 		autopilotTaskH = 2
 
 	case tabAutopilot:
-		// Autopilot tab: slot section + task list header + VP
-		if m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" {
+		// Autopilot tab: slot section + task list header + VP + detail panel
+		isRunning := m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" ||
+			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" ||
+			m.autopilotMode == "completed"
+		if isRunning {
 			// Slot section.
 			if m.autopilotSupervisor != nil {
 				slots := m.autopilotSupervisor.SlotStatus()
@@ -846,6 +1007,11 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 			}
 			fixed += 1 // "Tasks" header
 			fixed += 1 // trailing newline
+
+			// Detail panel: ~8 lines (header + fields).
+			detailLines := 8
+			fixed += 1 // blank line before detail
+			fixed += detailLines
 
 			remaining := m.height - fixed
 			if remaining < 5 {
@@ -1079,6 +1245,30 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "stop-task-confirm" {
+			task := m.selectedAutopilotTask()
+			issueNum := 0
+			if task != nil {
+				issueNum = task.IssueNumber
+			}
+			b.WriteString(warningStyle().Render(fmt.Sprintf("  ⚠ Stop agent on #%d? ", issueNum)))
+			b.WriteString(helpKeyStyle().Render("y"))
+			b.WriteString(helpStyle().Render(": stop • "))
+			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "restart-confirm" {
+			task := m.selectedAutopilotTask()
+			issueNum := 0
+			if task != nil {
+				issueNum = task.IssueNumber
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Restart agent on #%d? ", issueNum)))
+			b.WriteString(helpKeyStyle().Render("y"))
+			b.WriteString(helpStyle().Render(": restart • "))
+			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
 		} else if m.autopilotStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
 			b.WriteString("\n")
@@ -1098,7 +1288,7 @@ func (m Model) renderBottomBar() string {
 		if m.showHelp {
 			b.WriteString(renderHelpOverlay(m.width, m.activeTab))
 		} else {
-			b.WriteString(renderHelpBar(m.width, m.activeTab))
+			b.WriteString(m.renderHelpBar())
 		}
 		b.WriteString("\n")
 	}
@@ -1107,7 +1297,9 @@ func (m Model) renderBottomBar() string {
 }
 
 // renderHelpBar builds a single-line condensed help bar with ? for full list.
-func renderHelpBar(width, activeTab int) string {
+func (m Model) renderHelpBar() string {
+	width := m.width
+	activeTab := m.activeTab
 	keyStyle := helpKeyStyle()
 	descStyle := helpStyle()
 	sep := descStyle.Render(" \u2022 ")
@@ -1130,13 +1322,70 @@ func renderHelpBar(width, activeTab int) string {
 			{"?", "help"},
 		}
 	case tabAutopilot:
-		condensed = []hint{
-			{"1/2/3", "tabs"},
-			{"a", "start"},
-			{"A", "stop"},
-			{"e", "expand"},
-			{"q", "quit"},
-			{"?", "help"},
+		switch m.autopilotMode {
+		case "running":
+			condensed = []hint{
+				{"↑/↓", "select"},
+			}
+			// Context-sensitive hints based on selected task.
+			task := m.selectedAutopilotTask()
+			if task != nil {
+				switch task.Status {
+				case "running":
+					condensed = append(condensed,
+						hint{"s", "stop"},
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "bailed", "stopped":
+					condensed = append(condensed,
+						hint{"r", "restart"},
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "queued", "blocked":
+					condensed = append(condensed, hint{"D", "deps"})
+				case "review", "done":
+					condensed = append(condensed,
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				}
+			}
+			condensed = append(condensed,
+				hint{"P", "pause"},
+				hint{"A", "stop all"},
+				hint{"?", "help"},
+			)
+		case "completed":
+			condensed = []hint{
+				{"↑/↓", "select"},
+			}
+			task := m.selectedAutopilotTask()
+			if task != nil {
+				switch task.Status {
+				case "bailed", "stopped", "review", "done":
+					condensed = append(condensed,
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "queued", "blocked":
+					condensed = append(condensed, hint{"D", "deps"})
+				}
+			}
+			condensed = append(condensed,
+				hint{"a", "new session"},
+				hint{"?", "help"},
+			)
+		default:
+			condensed = []hint{
+				{"1/2/3", "tabs"},
+				{"a", "start"},
+				{"A", "stop"},
+				{"e", "expand"},
+				{"q", "quit"},
+				{"?", "help"},
+			}
 		}
 	default:
 		condensed = []hint{
@@ -1200,7 +1449,13 @@ var (
 
 	autopilotHints = []helpHint{
 		{"a", "launch autopilot"},
-		{"A", "stop autopilot"},
+		{"A", "stop all agents"},
+		{"s", "stop selected"},
+		{"r", "restart selected"},
+		{"c", "copy worktree path"},
+		{"P", "pause/resume slots"},
+		{"D", "show dependencies"},
+		{"l", "view log"},
 		{"e", "expand tasks"},
 	}
 )

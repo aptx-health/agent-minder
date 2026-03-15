@@ -176,6 +176,8 @@ func (c *CompletedItem) DisplayRef() string {
 type AutopilotTask struct {
 	ID           int64  `db:"id"`
 	ProjectID    int64  `db:"project_id"`
+	Owner        string `db:"owner"`
+	Repo         string `db:"repo"`
 	IssueNumber  int    `db:"issue_number"`
 	IssueTitle   string `db:"issue_title"`
 	IssueBody    string `db:"issue_body"`

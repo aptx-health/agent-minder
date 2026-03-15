@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -113,6 +114,9 @@ type autopilotEventMsg autopilot.Event
 // clearAutopilotStatusMsg clears a temporary autopilot status message.
 type clearAutopilotStatusMsg struct{}
 
+// autopilotTickMsg triggers periodic refresh of task list and slot status.
+type autopilotTickMsg time.Time
+
 // idleCheckMsg triggers periodic idle timeout checking.
 type idleCheckMsg time.Time
 
@@ -195,13 +199,19 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor    *autopilot.Supervisor
-	autopilotMode          string // "", "scan-confirm", "confirm", "running", "stop-confirm"
+	autopilotMode          string // "", "scan-confirm", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "completed"
 	autopilotStatus        string
 	autopilotTotal         int
 	autopilotUnblocked     int
 	origPollInterval       time.Duration // saved to restore after autopilot stops
 	autopilotTasksExpanded bool          // 'e' toggles 5-line minimum vs expanded task list
 	autopilotTaskVP        viewport.Model
+
+	// Autopilot task list cursor and navigation.
+	autopilotTasks         []db.AutopilotTask // sorted task list for navigation
+	autopilotCursor        int                // index into autopilotTasks
+	autopilotSelectedIssue int                // issue number for pinning cursor across refreshes
+	autopilotPaused        bool               // tracks pause state for display
 
 	// Auto-pause on idle.
 	lastUserInput time.Time
@@ -559,7 +569,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rebuildAutopilotTaskContent()
 		if event.Type == "finished" {
-			m.autopilotMode = ""
+			m.autopilotMode = "completed"
 			// Restore status interval.
 			if m.origPollInterval > 0 {
 				m.poller.SetStatusInterval(m.origPollInterval)
@@ -569,7 +579,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autopilotSupervisor = nil
 		}
 		m.resizeViewports()
-		return m, listenForAutopilotEvents(m.autopilotSupervisor)
+		cmds := []tea.Cmd{listenForAutopilotEvents(m.autopilotSupervisor)}
+		// Sync operations tab on state-changing events.
+		switch event.Type {
+		case "started", "completed", "bailed", "stopped", "finished":
+			p := m.poller
+			cmds = append(cmds, func() tea.Msg {
+				time.Sleep(4 * time.Second)
+				p.StatusNow(context.Background())
+				return nil
+			})
+		}
+		return m, tea.Batch(cmds...)
 
 	case clearAutopilotStatusMsg:
 		m.autopilotStatus = ""
@@ -669,6 +690,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return m, tickEvery()
+
+	case autopilotTickMsg:
+		if m.autopilotMode == "running" || m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" {
+			m.rebuildAutopilotTaskContent()
+			return m, autopilotTick()
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -732,6 +760,24 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.autopilotMode == "stop-task-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "y", "enter":
+			return m.confirmStopTask()
+		case "n", "esc":
+			m.autopilotMode = "running"
+			return m, nil
+		}
+	}
+	if m.autopilotMode == "restart-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "y", "enter":
+			return m.confirmRestartTask()
+		case "n", "esc":
+			m.autopilotMode = "running"
+			return m, nil
+		}
+	}
 
 	switch msg.String() {
 	case "1":
@@ -775,6 +821,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "r":
+		// On tab 3 during autopilot, 'r' restarts the selected task.
+		if m.activeTab == tabAutopilot && m.autopilotMode == "running" {
+			task := m.selectedAutopilotTask()
+			if task != nil && (task.Status == "bailed" || task.Status == "stopped") {
+				m.autopilotMode = "restart-confirm"
+				return m, nil
+			}
+			return m, nil
+		}
 		p := m.poller
 		return m, func() tea.Msg {
 			p.StatusNow(context.Background())
@@ -867,14 +922,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.trackedExpanded = !m.trackedExpanded
 		m.resizeViewports()
 		return m, nil
-	case "c":
-		if m.activeTab != tabAnalysis {
+	case "s":
+		// On tab 3 during autopilot, 's' stops the selected agent.
+		if m.activeTab == tabAutopilot && m.autopilotMode == "running" {
+			task := m.selectedAutopilotTask()
+			if task != nil && task.Status == "running" {
+				m.autopilotMode = "stop-task-confirm"
+			}
 			return m, nil
 		}
-		m.concernsExpanded = !m.concernsExpanded
-		m.resizeViewports()
-		return m, nil
-	case "s":
 		m.settingsState = newSettingsState(m.project)
 		// Apply textarea theme to match current theme.
 		var s textarea.Styles
@@ -940,11 +996,127 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case tabAnalysis:
 			m.analysisVP, cmd = m.analysisVP.Update(msg)
 		case tabAutopilot:
-			m.autopilotTaskVP, cmd = m.autopilotTaskVP.Update(msg)
+			if (m.autopilotMode == "running" || m.autopilotMode == "completed") && len(m.autopilotTasks) > 0 {
+				// Navigate cursor through task list.
+				switch msg.String() {
+				case "up":
+					if m.autopilotCursor > 0 {
+						m.autopilotCursor--
+					} else {
+						m.autopilotCursor = len(m.autopilotTasks) - 1 // wrap
+					}
+				case "down":
+					if m.autopilotCursor < len(m.autopilotTasks)-1 {
+						m.autopilotCursor++
+					} else {
+						m.autopilotCursor = 0 // wrap
+					}
+				case "pgup":
+					m.autopilotCursor -= 5
+					if m.autopilotCursor < 0 {
+						m.autopilotCursor = 0
+					}
+				case "pgdown":
+					m.autopilotCursor += 5
+					if m.autopilotCursor >= len(m.autopilotTasks) {
+						m.autopilotCursor = len(m.autopilotTasks) - 1
+					}
+				}
+				m.autopilotSelectedIssue = m.autopilotTasks[m.autopilotCursor].IssueNumber
+				m.rebuildAutopilotTaskContent()
+				// Ensure cursor is visible in viewport.
+				m.autopilotTaskVP.SetYOffset(m.autopilotCursor)
+			} else {
+				m.autopilotTaskVP, cmd = m.autopilotTaskVP.Update(msg)
+			}
 		default:
 			m.eventLogVP, cmd = m.eventLogVP.Update(msg)
 		}
 		return m, cmd
+
+	// Per-agent controls (tab 3 only, when autopilot running).
+	case "P":
+		if m.activeTab != tabAutopilot || m.autopilotSupervisor == nil || m.autopilotMode != "running" {
+			return m, nil
+		}
+		if m.autopilotPaused {
+			m.autopilotSupervisor.Resume(context.Background())
+			m.autopilotPaused = false
+			m.autopilotStatus = "Resumed — filling slots"
+		} else {
+			m.autopilotSupervisor.Pause()
+			m.autopilotPaused = true
+			// Count running and queued.
+			running, queued := 0, 0
+			for _, t := range m.autopilotTasks {
+				switch t.Status {
+				case "running":
+					running++
+				case "queued":
+					queued++
+				}
+			}
+			m.autopilotStatus = fmt.Sprintf("Paused — %d agents still running, %d queued", running, queued)
+		}
+		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+
+	case "c":
+		if m.activeTab == tabAnalysis {
+			m.concernsExpanded = !m.concernsExpanded
+			m.resizeViewports()
+			return m, nil
+		}
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
+			return m, nil
+		}
+		task := m.selectedAutopilotTask()
+		if task == nil || task.WorktreePath == "" {
+			return m, nil
+		}
+		// Copy worktree path to clipboard via pbcopy.
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(task.WorktreePath)
+		if err := cmd.Run(); err == nil {
+			m.autopilotStatus = fmt.Sprintf("Copied: %s", task.WorktreePath)
+		} else {
+			m.autopilotStatus = fmt.Sprintf("Copy failed: %v", err)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+
+	case "l":
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
+			return m, nil
+		}
+		task := m.selectedAutopilotTask()
+		if task == nil || task.AgentLog == "" {
+			return m, nil
+		}
+		m.autopilotStatus = "Log viewer coming soon — log at: " + task.AgentLog
+		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+
+	case "D":
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
+			return m, nil
+		}
+		task := m.selectedAutopilotTask()
+		if task == nil {
+			return m, nil
+		}
+		deps := m.taskBlockedContext(*task)
+		if deps == "" {
+			m.autopilotStatus = fmt.Sprintf("#%d has no dependencies", task.IssueNumber)
+		} else {
+			m.autopilotStatus = fmt.Sprintf("#%d deps: %s", task.IssueNumber, deps)
+		}
+		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
 	}
 	return m, nil
 }
@@ -1528,6 +1700,7 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 
 	return m, tea.Batch(
 		listenForAutopilotEvents(sup),
+		autopilotTick(),
 		tea.Tick(8*time.Second, func(t time.Time) tea.Msg {
 			return clearAutopilotStatusMsg{}
 		}),
@@ -1550,6 +1723,94 @@ func (m Model) confirmStopAutopilot() (tea.Model, tea.Cmd) {
 		sup.Stop()
 		return nil
 	}
+}
+
+// confirmStopTask stops the selected agent after user confirms.
+func (m Model) confirmStopTask() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil || task.Status != "running" {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	// Find the slot index for this task.
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+	slots := sup.SlotStatus()
+	slotIdx := -1
+	for i, slot := range slots {
+		if slot.IssueNumber == task.IssueNumber && slot.Status == "running" {
+			slotIdx = i
+			break
+		}
+	}
+	if slotIdx < 0 {
+		m.autopilotMode = "running"
+		m.autopilotStatus = fmt.Sprintf("#%d not found in active slots", task.IssueNumber)
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+	}
+
+	sup.StopAgent(slotIdx)
+	m.autopilotMode = "running"
+	m.autopilotStatus = fmt.Sprintf("Stopping agent on #%d...", task.IssueNumber)
+	return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+		return clearAutopilotStatusMsg{}
+	})
+}
+
+// confirmRestartTask restarts the selected bailed/stopped task after user confirms.
+func (m Model) confirmRestartTask() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil || (task.Status != "bailed" && task.Status != "stopped") {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+	m.autopilotMode = "running"
+
+	return m, func() tea.Msg {
+		if err := sup.RestartTask(context.Background(), taskID); err != nil {
+			return autopilotEventMsg(autopilot.Event{
+				Time:    time.Now(),
+				Type:    "error",
+				Summary: fmt.Sprintf("Failed to restart #%d: %v", issueNum, err),
+			})
+		}
+		return autopilotEventMsg(autopilot.Event{
+			Time:    time.Now(),
+			Type:    "started",
+			Summary: fmt.Sprintf("Restarted #%d — re-queued", issueNum),
+		})
+	}
+}
+
+// autopilotTick returns a command that fires every 5 seconds for task list refresh.
+func autopilotTick() tea.Cmd {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		return autopilotTickMsg(t)
+	})
+}
+
+// selectedAutopilotTask returns the currently selected task from the task list, or nil.
+func (m Model) selectedAutopilotTask() *db.AutopilotTask {
+	if len(m.autopilotTasks) == 0 || m.autopilotCursor < 0 || m.autopilotCursor >= len(m.autopilotTasks) {
+		return nil
+	}
+	t := m.autopilotTasks[m.autopilotCursor]
+	return &t
 }
 
 // listenForAutopilotEvents returns a command that waits for the next autopilot event.
