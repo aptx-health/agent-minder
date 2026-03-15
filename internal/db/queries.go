@@ -677,7 +677,7 @@ func (s *Store) GetAutopilotTasks(projectID int64) ([]AutopilotTask, error) {
 
 // UpdateAutopilotTaskStatus updates only the status and completed_at of an autopilot task.
 func (s *Store) UpdateAutopilotTaskStatus(id int64, status string) error {
-	if status == "done" || status == "bailed" {
+	if status == "done" || status == "bailed" || status == "stopped" {
 		_, err := s.db.Exec(`
 			UPDATE autopilot_tasks SET status = ?, completed_at = datetime('now') WHERE id = ?
 		`, status, id)
@@ -799,6 +799,17 @@ func (s *Store) ResetStaleAutopilotTasks(projectID int64) (int, error) {
 	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
+}
+
+// ResetAutopilotTask resets a single task back to queued, clearing runtime fields.
+func (s *Store) ResetAutopilotTask(id int64) error {
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks
+		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
+		    started_at = NULL, completed_at = NULL, pr_number = 0
+		WHERE id = ?
+	`, id)
+	return err
 }
 
 // parseDependencies parses a JSON array of issue numbers.

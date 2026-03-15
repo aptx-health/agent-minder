@@ -539,7 +539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.events = m.events[len(m.events)-50:]
 		}
 		m.rebuildEventLogContent()
-		if event.Type == "stopped" {
+		if event.Type == "finished" {
 			m.autopilotMode = ""
 			// Restore status interval.
 			if m.origPollInterval > 0 {

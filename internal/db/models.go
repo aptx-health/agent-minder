@@ -180,7 +180,7 @@ type AutopilotTask struct {
 	IssueTitle   string `db:"issue_title"`
 	IssueBody    string `db:"issue_body"`
 	Dependencies string `db:"dependencies"` // JSON array of issue numbers
-	Status       string `db:"status"`       // queued, running, done, bailed, blocked
+	Status       string `db:"status"`       // queued, running, done, bailed, stopped, blocked
 	WorktreePath string `db:"worktree_path"`
 	Branch       string `db:"branch"`
 	PRNumber     int    `db:"pr_number"`
