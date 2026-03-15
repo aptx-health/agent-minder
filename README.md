@@ -176,6 +176,24 @@ Press `a` to launch autopilot — minder converts tracked GitHub issues into a t
 
 **Minder is a work dispatcher, not a quality gate.** It generates the dependency graph and assigns work — the target repo's own tooling (pre-commit hooks, linters, test suites, CI/CD) is responsible for enforcing code quality. Repos should have a `CLAUDE.md` with project conventions and build/test commands so agents can work effectively.
 
+#### Agent definition (optional)
+
+Autopilot supports an optional [Claude Code agent definition](https://docs.anthropic.com/en/docs/claude-code/sub-agents) that gives agents consistent behavioral guidance. **The agent definition is additive, never required** — it's a thin layer to make agent behaviors more predictable and customizable. Without it, autopilot works exactly as before using its built-in prompt.
+
+To use it, install `agents/autopilot.md` in a target repo or globally:
+
+```bash
+# Per-repo (committed with the project)
+cp agents/autopilot.md <your-repo>/.claude/agents/autopilot.md
+
+# Or globally (applies to all repos)
+cp agents/autopilot.md ~/.claude/agents/autopilot.md
+```
+
+When the supervisor detects the definition (project-level or user-level), it switches from a single monolithic prompt to `claude --agent autopilot -p "<task context>"` — the agent definition provides the behavioral instructions (workflow, constraints, bail conditions) and the prompt carries only the dynamic task context (issue number, paths, commands).
+
+You can customize the definition per-repo to adjust complexity thresholds, add project-specific conventions, or modify the workflow. See [agents/README.md](agents/README.md) for details.
+
 See [docs/automated-agents-design.md](docs/automated-agents-design.md) for the full design.
 
 ### Data storage
@@ -196,6 +214,8 @@ All state lives in SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys
 
 ```
 agent-minder/
+├── agents/
+│   └── autopilot.md    # Claude Code agent definition template for autopilot
 ├── cmd/
 │   ├── root.go          # Cobra root command
 │   ├── init.go          # Interactive setup wizard

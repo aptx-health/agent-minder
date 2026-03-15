@@ -7,6 +7,38 @@ import (
 	"github.com/dustinlange/agent-minder/internal/db"
 )
 
+// renderTaskContext builds a minimal prompt with only dynamic per-task context.
+// Used when a .claude/agents/autopilot.md agent definition provides the behavioral instructions.
+func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "## Task Context\n\n")
+	fmt.Fprintf(&b, "**Issue:** #%d — %s\n", task.IssueNumber, task.IssueTitle)
+	fmt.Fprintf(&b, "**Repository:** %s/%s\n\n", owner, repo)
+
+	if task.IssueBody != "" {
+		b.WriteString(task.IssueBody)
+		b.WriteString("\n\n")
+	}
+
+	fmt.Fprintf(&b, "**Worktree:** %s\n", task.WorktreePath)
+	fmt.Fprintf(&b, "**Branch:** %s (already checked out)\n", task.Branch)
+	fmt.Fprintf(&b, "**Base branch:** %s\n\n", baseBranch)
+
+	fmt.Fprintf(&b, "## Commands for this task\n\n")
+	fmt.Fprintf(&b, "Label in-progress: gh issue edit %d --add-label \"in-progress\" -R %s/%s\n", task.IssueNumber, owner, repo)
+	fmt.Fprintf(&b, "Post starting comment: gh issue comment %d --body \"Agent starting work on this issue\" -R %s/%s\n", task.IssueNumber, owner, repo)
+	fmt.Fprintf(&b, "Commit message must include: Fixes #%d\n", task.IssueNumber)
+	fmt.Fprintf(&b, "Rebase before push:\n")
+	fmt.Fprintf(&b, "  git fetch origin %s\n", baseBranch)
+	fmt.Fprintf(&b, "  git rebase origin/%s\n", baseBranch)
+	fmt.Fprintf(&b, "Draft PR target: %s\n", baseBranch)
+	fmt.Fprintf(&b, "Label blocked (if bailing): gh issue edit %d --add-label \"blocked\" -R %s/%s\n", task.IssueNumber, owner, repo)
+	fmt.Fprintf(&b, "Remove in-progress (if bailing): gh issue edit %d --remove-label \"in-progress\" -R %s/%s\n", task.IssueNumber, owner, repo)
+
+	return b.String()
+}
+
 // renderPrompt builds the agent prompt from the design doc template.
 func renderPrompt(task *db.AutopilotTask, baseBranch, owner, repo string) string {
 	var b strings.Builder
