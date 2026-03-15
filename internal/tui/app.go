@@ -146,8 +146,9 @@ type Model struct {
 
 	// Tracked items (refreshed on poll results).
 	trackedItems     []db.TrackedItem
-	trackedExpanded  bool // 'x' toggles compact strip vs expanded list with titles
-	concernsExpanded bool // 'c' toggles capped vs full concern display
+	bailedIssues     map[int]bool // issue numbers with bailed autopilot tasks
+	trackedExpanded  bool         // 'x' toggles compact strip vs expanded list with titles
+	concernsExpanded bool         // 'c' toggles capped vs full concern display
 
 	// Settings dialog.
 	settingsState  *settingsState
@@ -368,7 +369,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if event.PollResult != nil {
 			m.lastPoll = event.PollResult
 			m.polling = false
-			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+			m.refreshTrackedItems()
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
 			// Flag new analysis if user is on Ops tab and this was an analysis result.
 			if m.activeTab == tabOperations && event.PollResult.Tier2Analysis != "" {
@@ -429,7 +430,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case bulkTrackResultMsg:
-		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		m.refreshTrackedItems()
 		if msg.failed > 0 {
 			m.trackError = true
 			m.trackStatus = fmt.Sprintf("Tracked %d, %d failed: %s", msg.added, msg.failed, strings.Join(msg.errors, "; "))
@@ -441,7 +442,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case bulkUntrackResultMsg:
-		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		m.refreshTrackedItems()
 		if msg.failed > 0 {
 			m.trackError = true
 			m.trackStatus = fmt.Sprintf("Untracked %d, %d failed: %s", msg.removed, msg.failed, strings.Join(msg.errors, "; "))
@@ -468,7 +469,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case cleanupResultMsg:
-		m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+		m.refreshTrackedItems()
 		if msg.err != nil {
 			m.trackError = true
 			m.trackStatus = fmt.Sprintf("Cleanup failed: %v", msg.err)
@@ -580,7 +581,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterStatus = fmt.Sprintf("Error: %v", msg.err)
 		} else {
 			m.filterStatus = fmt.Sprintf("Added %d items", msg.added)
-			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+			m.refreshTrackedItems()
 		}
 		m.filterState = nil
 		m.mode = "normal"
@@ -593,7 +594,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.filterStatus = fmt.Sprintf("Error: %v", msg.err)
 		} else {
 			m.filterStatus = fmt.Sprintf("Updated: +%d new, -%d closed", msg.added, msg.removed)
-			m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+			m.refreshTrackedItems()
 		}
 		m.filterState = nil
 		m.mode = "normal"
@@ -1503,6 +1504,29 @@ func listenForAutopilotEvents(sup *autopilot.Supervisor) tea.Cmd {
 		}
 		return autopilotEventMsg(event)
 	}
+}
+
+// refreshTrackedItems reloads tracked items and rebuilds the bailed issues map
+// from autopilot tasks.
+func (m *Model) refreshTrackedItems() {
+	m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
+	m.bailedIssues = make(map[int]bool)
+	if tasks, err := m.store.GetAutopilotTasks(m.project.ID); err == nil {
+		for _, t := range tasks {
+			if t.Status == "bailed" {
+				m.bailedIssues[t.IssueNumber] = true
+			}
+		}
+	}
+}
+
+// effectiveStatus returns the display status for a tracked item, overlaying
+// bailed autopilot status when applicable.
+func (m Model) effectiveStatus(item db.TrackedItem) string {
+	if m.bailedIssues[item.Number] && item.LastStatus != "Mrgd" && item.LastStatus != "Closd" {
+		return "Baild"
+	}
+	return item.LastStatus
 }
 
 // formatDuration returns a human-readable duration string like "4h" or "30m".
