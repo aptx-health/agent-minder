@@ -21,15 +21,21 @@ func (m Model) View() tea.View {
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
 
-	// Info detail (repos/topics) — only when toggled.
-	if m.showInfo {
-		b.WriteString(m.renderInfoDetail())
-		b.WriteString("\n")
-	}
-
 	// Tab bar.
 	b.WriteString(m.renderTabBar())
 	b.WriteString("\n")
+
+	// Warning banner (persistent, dismiss with 'd').
+	if m.warningBanner != "" {
+		bannerText := fmt.Sprintf(" ⚠ %s  (press d to dismiss)", m.warningBanner)
+		maxW := m.width
+		if maxW <= 0 {
+			maxW = 80
+		}
+		banner := warningStyle().Width(maxW).Render(bannerText)
+		b.WriteString(banner)
+		b.WriteString("\n")
+	}
 
 	// Tab content: modal modes overlay tab content.
 	if m.mode == "settings" {
@@ -225,32 +231,6 @@ func (m Model) renderHeader() string {
 	return b.String()
 }
 
-// renderInfoDetail returns the expanded repos/topics listing (shown when showInfo is true).
-func (m Model) renderInfoDetail() string {
-	var b strings.Builder
-
-	repos, _ := m.store.GetRepos(m.project.ID)
-	b.WriteString(headerStyle().Render("Repos"))
-	b.WriteString("\n")
-	for _, r := range repos {
-		b.WriteString(textStyle().Render(fmt.Sprintf("  %s (%s)", r.ShortName, r.Path)))
-		b.WriteString("\n")
-	}
-
-	topics, _ := m.store.GetTopics(m.project.ID)
-	if len(topics) > 0 {
-		b.WriteString(headerStyle().Render("Topics"))
-		b.WriteString("\n")
-		for _, t := range topics {
-			b.WriteString(textStyle().Render(fmt.Sprintf("  %s", t.Name)))
-			b.WriteString("\n")
-		}
-	}
-	b.WriteString("\n")
-
-	return b.String()
-}
-
 // renderConcerns returns wrapped concerns, capped at maxConcernLines total.
 // If the wrapped output exceeds the cap, concerns are truncated to fit.
 // When concernsExpanded is true, all concerns are shown without caps.
@@ -336,9 +316,10 @@ func (m Model) renderTrackedStrip() string {
 
 	if m.trackedExpanded {
 		for _, item := range m.trackedItems {
-			dot := statusDot(item.LastStatus)
+			st := m.effectiveStatus(item)
+			dot := statusDot(st)
 			ref := fmt.Sprintf("#%d", item.Number)
-			status := fmt.Sprintf("[%s]", item.LastStatus)
+			status := fmt.Sprintf("[%s]", st)
 			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
 
 			// Truncate title to fit available width.
@@ -367,8 +348,9 @@ func (m Model) renderTrackedStrip() string {
 		line.WriteString("  ")
 
 		for i, item := range m.trackedItems {
-			entry := fmt.Sprintf("#%d[%s]", item.Number, item.LastStatus)
-			dot := statusDot(item.LastStatus)
+			st := m.effectiveStatus(item)
+			entry := fmt.Sprintf("#%d[%s]", item.Number, st)
+			dot := statusDot(st)
 			entryLen := len(entry) + 2 // +2 for dot + space
 			// Build GitHub URL for OSC 8 hyperlink.
 			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
@@ -513,6 +495,8 @@ func (m *Model) rebuildEventLogContent() {
 			style = userMsgStyle()
 		case "broadcast":
 			style = broadcastStyle()
+		case "warning":
+			style = warningStyle()
 		case "error":
 			style = errorStyle()
 		default:
@@ -566,17 +550,6 @@ func (m *Model) resizeViewports() {
 func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 	fixed := 2 // header (title + goal)
 	fixed += 1 // blank line after header
-
-	if m.showInfo {
-		repos, _ := m.store.GetRepos(m.project.ID)
-		topics, _ := m.store.GetTopics(m.project.ID)
-		fixed += 1 + len(repos) // "Repos" header + repo lines
-		if len(topics) > 0 {
-			fixed += 1 + len(topics) // "Topics" header + topic lines
-		}
-		fixed += 1 // blank line after info
-	}
-
 	fixed += 1 // tab bar
 	fixed += 1 // blank line after tab bar
 	fixed += m.bottomBarHeight()
@@ -938,7 +911,6 @@ var (
 	globalHints = []helpHint{
 		{"1/2/tab", "switch tabs"},
 		{"s", "settings"},
-		{"d", "details"},
 		{"t", "theme"},
 		{"\u2191/\u2193", "scroll"},
 		{"?", "close help"},

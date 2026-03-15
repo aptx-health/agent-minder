@@ -400,5 +400,28 @@ func (m Model) renderSettingsView() string {
 		}
 	}
 
+	// Read-only project info.
+	b.WriteString("\n")
+	b.WriteString(mutedStyle().Render("  ──────────────────────────"))
+	b.WriteString("\n\n")
+
+	repos, _ := m.store.GetRepos(m.project.ID)
+	b.WriteString(mutedStyle().Render("  Repos"))
+	b.WriteString("\n")
+	for _, r := range repos {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("    %s (%s)", r.ShortName, r.Path)))
+		b.WriteString("\n")
+	}
+
+	topics, _ := m.store.GetTopics(m.project.ID)
+	if len(topics) > 0 {
+		b.WriteString(mutedStyle().Render("  Topics"))
+		b.WriteString("\n")
+		for _, t := range topics {
+			b.WriteString(mutedStyle().Render(fmt.Sprintf("    %s", t.Name)))
+			b.WriteString("\n")
+		}
+	}
+
 	return b.String()
 }

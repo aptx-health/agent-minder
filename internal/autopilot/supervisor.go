@@ -53,12 +53,13 @@ type Supervisor struct {
 	repo     string
 	ghToken  string
 
-	mu     sync.Mutex
-	slots  []*slotState // len == maxAgents; nil = idle
-	active bool
-	events chan Event
-	cancel context.CancelFunc
-	done   chan struct{}
+	mu        sync.Mutex
+	slots     []*slotState // len == maxAgents; nil = idle
+	active    bool
+	events    chan Event
+	cancel    context.CancelFunc
+	done      chan struct{}
+	discovery chan struct{} // signal to trigger immediate discovery
 }
 
 // New creates a new Supervisor.
@@ -68,21 +69,30 @@ func New(store *db.Store, project *db.Project, provider llm.Provider, repoDir, o
 		maxAgents = 3
 	}
 	return &Supervisor{
-		store:    store,
-		project:  project,
-		provider: provider,
-		repoDir:  repoDir,
-		owner:    owner,
-		repo:     repo,
-		ghToken:  ghToken,
-		slots:    make([]*slotState, maxAgents),
-		events:   make(chan Event, 64),
+		store:     store,
+		project:   project,
+		provider:  provider,
+		repoDir:   repoDir,
+		owner:     owner,
+		repo:      repo,
+		ghToken:   ghToken,
+		slots:     make([]*slotState, maxAgents),
+		events:    make(chan Event, 64),
+		discovery: make(chan struct{}, 1),
 	}
 }
 
 // Events returns the channel of events for the TUI.
 func (s *Supervisor) Events() <-chan Event {
 	return s.events
+}
+
+// TriggerDiscovery signals the supervisor to check for new tracked items immediately.
+func (s *Supervisor) TriggerDiscovery() {
+	select {
+	case s.discovery <- struct{}{}:
+	default: // already pending
+	}
 }
 
 // IsActive returns whether the supervisor is currently running.
@@ -203,6 +213,11 @@ func (s *Supervisor) Launch(ctx context.Context) {
 					if added > 0 {
 						s.fillSlots(ctx)
 					}
+				}
+			case <-s.discovery:
+				added := s.discoverNewTasks(ctx)
+				if added > 0 {
+					s.fillSlots(ctx)
 				}
 			default:
 			}
@@ -646,6 +661,16 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 	for _, t := range newTasks {
 		s.emitEvent("discovered", fmt.Sprintf("New task #%d: %s", t.IssueNumber, t.IssueTitle), nil)
 	}
+
+	// Warn that the dependency graph (built once during Prepare) may be stale.
+	// Dynamically discovered tasks are queued without deps, but they could
+	// affect ordering of already-queued tasks. The user can stop and re-launch
+	// autopilot to rebuild the full dep graph with an LLM call.
+	var nums []string
+	for _, t := range newTasks {
+		nums = append(nums, fmt.Sprintf("#%d", t.IssueNumber))
+	}
+	s.emitEvent("warning", fmt.Sprintf("New tasks discovered (%s) — dependency graph may be stale. New tasks will run without dependency ordering.", strings.Join(nums, ", ")), nil)
 
 	return added
 }
