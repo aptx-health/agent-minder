@@ -68,15 +68,15 @@ func New(store *db.Store, project *db.Project, provider llm.Provider, repoDir, o
 		maxAgents = 3
 	}
 	return &Supervisor{
-		store:   store,
-		project: project,
+		store:    store,
+		project:  project,
 		provider: provider,
-		repoDir: repoDir,
-		owner:   owner,
-		repo:    repo,
-		ghToken: ghToken,
-		slots:   make([]*slotState, maxAgents),
-		events:  make(chan Event, 64),
+		repoDir:  repoDir,
+		owner:    owner,
+		repo:     repo,
+		ghToken:  ghToken,
+		slots:    make([]*slotState, maxAgents),
+		events:   make(chan Event, 64),
 	}
 }
 
@@ -114,7 +114,9 @@ func (s *Supervisor) Prepare(ctx context.Context) (total, unblocked int, err err
 	}
 
 	// Clean up any leftovers from a previous run.
-	s.store.ClearAutopilotTasks(s.project.ID)
+	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
+		return 0, 0, fmt.Errorf("clear autopilot tasks: %w", err)
+	}
 	s.cleanOrphanedWorktrees()
 
 	// Convert tracked items to autopilot tasks.
@@ -154,7 +156,7 @@ func (s *Supervisor) cleanOrphanedWorktrees() {
 		path := filepath.Join(worktreeBase, e.Name())
 		if err := gitpkg.WorktreeRemove(s.repoDir, path); err != nil {
 			// Best-effort: try direct removal if git worktree remove fails.
-			os.RemoveAll(path)
+			_ = os.RemoveAll(path)
 		}
 	}
 }
@@ -540,7 +542,7 @@ func (s *Supervisor) setSequentialDeps(tasks []*db.AutopilotTask) {
 	for i := 1; i < len(tasks); i++ {
 		deps := []int{tasks[i-1].IssueNumber}
 		depsJSON, _ := json.Marshal(deps)
-		s.store.UpdateAutopilotTaskDeps(tasks[i].ID, string(depsJSON))
+		_ = s.store.UpdateAutopilotTaskDeps(tasks[i].ID, string(depsJSON))
 	}
 }
 
@@ -687,11 +689,19 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	home, _ := os.UserHomeDir()
 
 	// Ensure directories exist.
-	os.MkdirAll(filepath.Dir(task.WorktreePath), 0755)
-	os.MkdirAll(filepath.Join(home, ".agent-minder", "agents"), 0755)
+	if err := os.MkdirAll(filepath.Dir(task.WorktreePath), 0755); err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to create worktree dir for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".agent-minder", "agents"), 0755); err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to create agents dir for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		return
+	}
 
 	// Clean up stale branch from previous run if it exists.
-	gitpkg.DeleteBranch(s.repoDir, task.Branch)
+	_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
 
 	// Get base branch: use configured value if set, otherwise auto-detect.
 	baseBranch := s.project.AutopilotBaseBranch
@@ -707,7 +717,7 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	// Create worktree from the latest remote base branch.
 	if err := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch, "origin/"+baseBranch); err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to create worktree for #%d: %v", task.IssueNumber, err), task)
-		s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
 		return
 	}
 
@@ -723,7 +733,7 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.cleanup(task, true)
 		return
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	// Build claude command.
 	maxTurns := s.project.AutopilotMaxTurns
@@ -766,13 +776,13 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 
 	// Inspect outcome.
 	status := s.inspectOutcome(ctx, task, exitCode)
-	s.store.UpdateAutopilotTaskStatus(task.ID, status)
+	_ = s.store.UpdateAutopilotTaskStatus(task.ID, status)
 
 	if status == "review" {
 		// Swap in-progress → needs-review label on the issue.
 		ghClient := ghpkg.NewClient(s.ghToken)
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
-		ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+		_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
 		s.emitEvent("completed", fmt.Sprintf("Agent completed #%d — PR opened, awaiting review & merge", task.IssueNumber), task)
 	} else {
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
@@ -804,7 +814,7 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 		}
 
 		if item.State == "merged" || item.State == "closed" {
-			s.store.UpdateAutopilotTaskStatus(task.ID, "done")
+			_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
 			// Clean up the needs-review label.
 			ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
 			promoted++
@@ -820,7 +830,7 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 	ghClient := ghpkg.NewClient(s.ghToken)
 	pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
 	if err == nil && pr != nil && pr.Number > 0 {
-		s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
+		_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
 		return "review" // awaiting human review & merge before dependents unblock
 	}
 	return "bailed"
@@ -828,11 +838,11 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 
 func (s *Supervisor) cleanup(task *db.AutopilotTask, deleteBranch bool) {
 	// Remove worktree.
-	gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath)
+	_ = gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath)
 
 	// Delete branch only if bailed (keep if PR opened).
 	if deleteBranch {
-		gitpkg.DeleteBranch(s.repoDir, task.Branch)
+		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
 	}
 }
 

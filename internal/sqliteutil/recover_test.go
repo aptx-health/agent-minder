@@ -18,7 +18,7 @@ func TestOpenWithRecoveryHealthyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWithRecovery on fresh DB: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Should be able to create a table and query.
 	_, err = db.Exec("CREATE TABLE t (id INTEGER PRIMARY KEY)")
@@ -40,7 +40,7 @@ func TestOpenWithRecoveryStaleSHM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed DB: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	// Write garbage to the -shm file to simulate a stale/corrupt shm.
 	shmPath := dbPath + "-shm"
@@ -54,7 +54,7 @@ func TestOpenWithRecoveryStaleSHM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenWithRecovery with stale shm: %v", err)
 	}
-	defer db2.Close()
+	defer func() { _ = db2.Close() }()
 
 	// Data should still be accessible.
 	var count int

@@ -35,7 +35,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	store := db.NewStore(conn)
 
 	// Load project.
@@ -65,7 +65,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		log.Printf("Warning: bus publishing unavailable: %v", err)
 	} else {
 		publisher = pub
-		defer publisher.Close()
+		defer func() { _ = publisher.Close() }()
 	}
 
 	// Create poller.

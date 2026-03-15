@@ -172,8 +172,8 @@ func (c *Client) FetchItemContent(ctx context.Context, owner, repo string, numbe
 
 	// Get last 10 comments (newest first, then reverse to chronological).
 	opts := &github.IssueListCommentsOptions{
-		Sort:      github.String("created"),
-		Direction: github.String("desc"),
+		Sort:      github.Ptr("created"),
+		Direction: github.Ptr("desc"),
 		ListOptions: github.ListOptions{
 			PerPage: 10,
 		},
@@ -299,7 +299,7 @@ func (c *Client) AddLabel(ctx context.Context, owner, repo string, number int, l
 
 // RemoveLabel removes a label from an issue/PR. Ignores errors if label isn't present.
 func (c *Client) RemoveLabel(ctx context.Context, owner, repo string, number int, label string) {
-	c.gh.Issues.RemoveLabelForIssue(ctx, owner, repo, number, label)
+	_, _ = c.gh.Issues.RemoveLabelForIssue(ctx, owner, repo, number, label)
 }
 
 // ListMilestones returns open milestones for a repo.

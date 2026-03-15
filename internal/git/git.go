@@ -25,8 +25,8 @@ type WorktreeEntry struct {
 
 // BranchInfo represents a git branch.
 type BranchInfo struct {
-	Name     string
-	IsRemote bool
+	Name      string
+	IsRemote  bool
 	IsCurrent bool
 }
 
@@ -300,6 +300,6 @@ func CommitsSince(dir, ref string) (int, error) {
 		return 0, err
 	}
 	var count int
-	fmt.Sscanf(out, "%d", &count)
+	_, _ = fmt.Sscanf(out, "%d", &count)
 	return count, nil
 }

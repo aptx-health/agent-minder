@@ -27,7 +27,7 @@ func CheckAndRecover(db *sqlx.DB, dbPath string) (bool, error) {
 	// Quick check: can we ping?
 	if err := db.Ping(); err != nil {
 		if isIOError(err) {
-			db.Close()
+			_ = db.Close()
 			if removeErr := removeStaleFiles(dbPath); removeErr != nil {
 				return false, fmt.Errorf("WAL recovery failed for %s: %w (original: %v)", dbPath, removeErr, err)
 			}
@@ -40,7 +40,7 @@ func CheckAndRecover(db *sqlx.DB, dbPath string) (bool, error) {
 	var result string
 	if err := db.Get(&result, "PRAGMA integrity_check"); err != nil {
 		if isIOError(err) {
-			db.Close()
+			_ = db.Close()
 			if removeErr := removeStaleFiles(dbPath); removeErr != nil {
 				return false, fmt.Errorf("WAL recovery failed for %s: %w (original: %v)", dbPath, removeErr, err)
 			}
@@ -102,7 +102,7 @@ func OpenWithRecovery(dbPath, dsn string) (*sqlx.DB, error) {
 
 	if err != nil {
 		// Recovery failed or non-recoverable error.
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("health check %s: %w", dbPath, err)
 	}
 
@@ -113,7 +113,7 @@ func OpenWithRecovery(dbPath, dsn string) (*sqlx.DB, error) {
 	}
 
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("ping after recovery %s: %w", dbPath, err)
 	}
 

@@ -50,23 +50,23 @@ func setupTestDB(t *testing.T) *Client {
 	}
 
 	// Insert test messages.
-	db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('ripit/app', 'ripit/Cornelius', 'Added auth middleware')`)
-	db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('ripit/app', 'ripit/Bartholomew', 'Fixed login bug')`)
-	db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('ripit/infra', 'ripit/Tobias', 'k3s cluster ready')`)
-	db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('other/topic', 'other/Agent', 'Unrelated message')`)
+	_, _ = db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('ripit/app', 'ripit/Cornelius', 'Added auth middleware')`)
+	_, _ = db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('ripit/app', 'ripit/Bartholomew', 'Fixed login bug')`)
+	_, _ = db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('ripit/infra', 'ripit/Tobias', 'k3s cluster ready')`)
+	_, _ = db.Exec(`INSERT INTO messages (topic, sender, message) VALUES ('other/topic', 'other/Agent', 'Unrelated message')`)
 
 	// Ack message 1 for one agent.
-	db.Exec(`INSERT INTO acks (message_id, agent_name) VALUES (1, 'ripit/minder')`)
+	_, _ = db.Exec(`INSERT INTO acks (message_id, agent_name) VALUES (1, 'ripit/minder')`)
 
 	// Register an agent name.
-	db.Exec(`INSERT INTO agent_names (repo, name) VALUES ('ripit', 'Cornelius')`)
+	_, _ = db.Exec(`INSERT INTO agent_names (repo, name) VALUES ('ripit', 'Cornelius')`)
 
 	return &Client{db: db}
 }
 
 func TestRecentMessages(t *testing.T) {
 	c := setupTestDB(t)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	msgs, err := c.RecentMessages(1*time.Hour, "")
 	if err != nil {
@@ -79,7 +79,7 @@ func TestRecentMessages(t *testing.T) {
 
 func TestRecentMessagesFiltered(t *testing.T) {
 	c := setupTestDB(t)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	msgs, err := c.RecentMessages(1*time.Hour, "ripit")
 	if err != nil {
@@ -92,7 +92,7 @@ func TestRecentMessagesFiltered(t *testing.T) {
 
 func TestUnreadMessages(t *testing.T) {
 	c := setupTestDB(t)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	// ripit/minder has acked message 1, so should see 3 unread.
 	msgs, err := c.UnreadMessages("ripit/minder", "")
@@ -106,7 +106,7 @@ func TestUnreadMessages(t *testing.T) {
 
 func TestUnreadMessagesFiltered(t *testing.T) {
 	c := setupTestDB(t)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	// ripit/minder acked msg 1 (ripit/app). Remaining ripit/* unread: msg 2 (ripit/app) + msg 3 (ripit/infra).
 	msgs, err := c.UnreadMessages("ripit/minder", "ripit")
@@ -120,7 +120,7 @@ func TestUnreadMessagesFiltered(t *testing.T) {
 
 func TestTopicsSummary(t *testing.T) {
 	c := setupTestDB(t)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	summaries, err := c.TopicsSummary(1*time.Hour, "ripit", "ripit/minder")
 	if err != nil {
@@ -145,7 +145,7 @@ func TestTopicsSummary(t *testing.T) {
 
 func TestMessageCount(t *testing.T) {
 	c := setupTestDB(t)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	count, err := c.MessageCount("")
 	if err != nil {
@@ -166,7 +166,7 @@ func TestMessageCount(t *testing.T) {
 
 func TestActiveAgents(t *testing.T) {
 	c := setupTestDB(t)
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	agents, err := c.ActiveAgents(1*time.Hour, "ripit")
 	if err != nil {
@@ -199,14 +199,14 @@ func TestPublisher(t *testing.T) {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
-	db.Close()
+	_ = db.Close()
 
 	// Test the publisher.
 	pub, err := NewPublisher(dbPath)
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
 	}
-	defer pub.Close()
+	defer func() { _ = pub.Close() }()
 
 	if err := pub.Publish("test/coord", "test/minder", "Hello from publisher"); err != nil {
 		t.Fatalf("Publish: %v", err)
@@ -217,7 +217,7 @@ func TestPublisher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	msgs, err := client.RecentMessages(1*time.Hour, "test")
 	if err != nil {
@@ -246,7 +246,7 @@ func TestOpenEmptyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	// Querying should fail since there are no tables.
 	_, err = c.MessageCount("")

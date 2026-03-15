@@ -26,7 +26,9 @@ func setupTestRepo(t *testing.T, name string) string {
 		}
 	}
 
-	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# "+name+"\nA test repo.\n"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# "+name+"\nA test repo.\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	for _, args := range [][]string{
 		{"git", "add", "."},
 		{"git", "commit", "-m", "Initial commit"},
