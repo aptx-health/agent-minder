@@ -22,7 +22,7 @@ import (
 // Event is emitted by the supervisor for the TUI to consume.
 type Event struct {
 	Time    time.Time
-	Type    string // "started", "completed", "bailed", "error", "stopped"
+	Type    string // "started", "completed", "bailed", "stopped", "finished", "error", "warning", "discovered"
 	Summary string
 	Task    *db.AutopilotTask
 }
@@ -35,12 +35,15 @@ type SlotInfo struct {
 	Branch      string
 	RunningFor  time.Duration
 	Status      string // "running" or "idle"
+	Paused      bool   // true when slot filling is paused (idle slots show "(paused)")
 }
 
 type slotState struct {
-	task      *db.AutopilotTask
-	startedAt time.Time
-	cmd       *exec.Cmd
+	task          *db.AutopilotTask
+	startedAt     time.Time
+	cmd           *exec.Cmd
+	cancelFunc    context.CancelFunc // per-slot cancel; nil before launch
+	stoppedByUser bool               // set by StopAgent before cancelling
 }
 
 // Supervisor manages concurrent autopilot agents working on GitHub issues.
@@ -56,7 +59,9 @@ type Supervisor struct {
 	mu        sync.Mutex
 	slots     []*slotState // len == maxAgents; nil = idle
 	active    bool
+	paused    bool // when true, fillSlots returns early
 	events    chan Event
+	parentCtx context.Context // parent context for the session (used by slot goroutines for fillSlots)
 	cancel    context.CancelFunc
 	done      chan struct{}
 	discovery chan struct{} // signal to trigger immediate discovery
@@ -100,6 +105,93 @@ func (s *Supervisor) IsActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.active
+}
+
+// StopAgent cancels a single agent slot, leaving other agents running.
+func (s *Supervisor) StopAgent(slotIdx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if slotIdx < 0 || slotIdx >= len(s.slots) || s.slots[slotIdx] == nil {
+		return
+	}
+	s.slots[slotIdx].stoppedByUser = true
+	if s.slots[slotIdx].cancelFunc != nil {
+		s.slots[slotIdx].cancelFunc()
+	}
+}
+
+// RestartTask cleans up a bailed or stopped task and re-queues it.
+func (s *Supervisor) RestartTask(ctx context.Context, taskID int64) error {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return fmt.Errorf("task %d not found", taskID)
+	}
+	if task.Status != "bailed" && task.Status != "stopped" {
+		return fmt.Errorf("task #%d has status %q — only bailed or stopped tasks can be restarted", task.IssueNumber, task.Status)
+	}
+
+	// Clean up worktree and branch from the previous attempt.
+	if task.WorktreePath != "" {
+		_ = gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath)
+	}
+	if task.Branch != "" {
+		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
+	}
+
+	// Reset task fields in DB.
+	if err := s.store.ResetAutopilotTask(task.ID); err != nil {
+		return fmt.Errorf("reset task: %w", err)
+	}
+
+	s.emitEvent("started", fmt.Sprintf("Task #%d re-queued for restart", task.IssueNumber), task)
+
+	// Try to fill slots with the re-queued task.
+	s.fillSlots(ctx)
+	return nil
+}
+
+// Pause stops new agents from being started while letting running ones finish.
+func (s *Supervisor) Pause() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.paused {
+		return
+	}
+	s.paused = true
+	s.emitEventLocked("warning", "Slot filling paused", nil)
+}
+
+// Resume re-enables slot filling and immediately tries to fill idle slots.
+func (s *Supervisor) Resume(ctx context.Context) {
+	s.mu.Lock()
+	if !s.paused {
+		s.mu.Unlock()
+		return
+	}
+	s.paused = false
+	s.emitEventLocked("warning", "Slot filling resumed", nil)
+	s.mu.Unlock()
+
+	s.fillSlots(ctx)
+}
+
+// IsPaused returns whether slot filling is currently paused.
+func (s *Supervisor) IsPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paused
 }
 
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
@@ -179,6 +271,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		return
 	}
 	ctx, s.cancel = context.WithCancel(ctx)
+	s.parentCtx = ctx
 	s.active = true
 	s.done = make(chan struct{})
 	s.mu.Unlock()
@@ -200,7 +293,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.mu.Lock()
 				s.active = false
 				s.mu.Unlock()
-				s.emitEvent("stopped", "Autopilot cancelled", nil)
+				s.emitEvent("finished", "Autopilot cancelled", nil)
 				return
 			case <-reviewCheckTicker.C:
 				promoted := s.checkReviewTasks(ctx)
@@ -233,6 +326,8 @@ func (s *Supervisor) Launch(ctx context.Context) {
 			s.mu.Unlock()
 
 			// Check if there's any work left (running agents, queued tasks, or tasks in review).
+			// Critical: paused + queued tasks must keep the loop alive — otherwise the
+			// supervisor exits when running agents finish during pause, losing queued work.
 			hasWork := anyRunning
 			if !hasWork {
 				tasks, _ := s.store.GetAutopilotTasks(s.project.ID)
@@ -241,6 +336,14 @@ func (s *Supervisor) Launch(ctx context.Context) {
 						hasWork = true
 						break
 					}
+				}
+			}
+			if !hasWork {
+				s.mu.Lock()
+				isPaused := s.paused
+				s.mu.Unlock()
+				if isPaused {
+					hasWork = true
 				}
 			}
 
@@ -253,7 +356,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		s.mu.Lock()
 		s.active = false
 		s.mu.Unlock()
-		s.emitEvent("stopped", "All agents finished", nil)
+		s.emitEvent("finished", "All agents finished", nil)
 	}()
 }
 
@@ -286,6 +389,7 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 			infos[i] = SlotInfo{
 				SlotNum: i + 1,
 				Status:  "idle",
+				Paused:  s.paused,
 			}
 		} else {
 			infos[i] = SlotInfo{
@@ -325,7 +429,7 @@ func (s *Supervisor) StatusBlock() string {
 
 	// Summary counts.
 	tasks, _ := s.store.GetAutopilotTasks(s.project.ID)
-	var queued, running, review, done, bailed int
+	var queued, running, review, done, bailed, stopped int
 	for _, t := range tasks {
 		switch t.Status {
 		case "queued":
@@ -338,9 +442,11 @@ func (s *Supervisor) StatusBlock() string {
 			done++
 		case "bailed":
 			bailed++
+		case "stopped":
+			stopped++
 		}
 	}
-	fmt.Fprintf(&b, "\nTask summary: %d queued, %d running, %d in review, %d done, %d bailed\n", queued, running, review, done, bailed)
+	fmt.Fprintf(&b, "\nTask summary: %d queued, %d running, %d in review, %d done, %d bailed, %d stopped\n", queued, running, review, done, bailed, stopped)
 
 	return b.String()
 }
@@ -376,6 +482,10 @@ func (s *Supervisor) convertTrackedItems(ctx context.Context) ([]*db.AutopilotTa
 			continue
 		}
 		if hasLabel(liveStatus.Labels, skipLabel) {
+			continue
+		}
+		// Skip issues already being worked on, awaiting review, or blocked.
+		if hasLabel(liveStatus.Labels, "in-progress") || hasLabel(liveStatus.Labels, "needs-review") || hasLabel(liveStatus.Labels, "blocked") {
 			continue
 		}
 
@@ -565,6 +675,15 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.paused {
+		return
+	}
+
+	// Don't launch new agents if the context is cancelled (e.g. Stop() was called).
+	if ctx.Err() != nil {
+		return
+	}
+
 	for i, slot := range s.slots {
 		if slot != nil {
 			continue // Slot occupied.
@@ -632,6 +751,10 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 		if hasLabel(liveStatus.Labels, skipLabel) {
 			continue
 		}
+		// Skip issues already being worked on, awaiting review, or blocked.
+		if hasLabel(liveStatus.Labels, "in-progress") || hasLabel(liveStatus.Labels, "needs-review") || hasLabel(liveStatus.Labels, "blocked") {
+			continue
+		}
 
 		body := ""
 		content, err := ghClient.FetchItemContent(ctx, item.Owner, item.Repo, item.Number, "issue")
@@ -694,12 +817,16 @@ func (s *Supervisor) launchAgent(ctx context.Context, slotIdx int, task *db.Auto
 		return
 	}
 
+	// Create per-slot context so StopAgent can cancel just this agent.
+	slotCtx, slotCancel := context.WithCancel(ctx)
+
 	s.slots[slotIdx] = &slotState{
-		task:      task,
-		startedAt: time.Now(),
+		task:       task,
+		startedAt:  time.Now(),
+		cancelFunc: slotCancel,
 	}
 
-	go s.runAgent(ctx, slotIdx, task)
+	go s.runAgent(slotCtx, slotIdx, task)
 }
 
 func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.AutopilotTask) {
@@ -708,7 +835,8 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.slots[slotIdx] = nil
 		s.mu.Unlock()
 		// Try to fill slots with newly unblocked work.
-		s.fillSlots(ctx)
+		// Use parentCtx (not the slot ctx which may be cancelled by StopAgent).
+		s.fillSlots(s.parentCtx)
 	}()
 
 	home, _ := os.UserHomeDir()
@@ -799,6 +927,18 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		}
 	}
 
+	// Check if this agent was stopped by the user.
+	s.mu.Lock()
+	stoppedByUser := s.slots[slotIdx] != nil && s.slots[slotIdx].stoppedByUser
+	s.mu.Unlock()
+
+	if stoppedByUser {
+		// User-initiated stop: set stopped status, preserve worktree for investigation.
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "stopped")
+		s.emitEvent("stopped", fmt.Sprintf("Agent stopped by user on #%d", task.IssueNumber), task)
+		return
+	}
+
 	// Inspect outcome.
 	status := s.inspectOutcome(ctx, task, exitCode)
 	_ = s.store.UpdateAutopilotTaskStatus(task.ID, status)
@@ -881,5 +1021,19 @@ func (s *Supervisor) emitEvent(typ, summary string, task *db.AutopilotTask) {
 	}:
 	default:
 		// Drop event if channel is full.
+	}
+}
+
+// emitEventLocked is like emitEvent but must be called while s.mu is held.
+// It uses a non-blocking send so it won't deadlock.
+func (s *Supervisor) emitEventLocked(typ, summary string, task *db.AutopilotTask) {
+	select {
+	case s.events <- Event{
+		Time:    time.Now(),
+		Type:    typ,
+		Summary: summary,
+		Task:    task,
+	}:
+	default:
 	}
 }

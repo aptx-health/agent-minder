@@ -558,7 +558,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autopilotHasNew = true
 		}
 		m.rebuildAutopilotTaskContent()
-		if event.Type == "stopped" {
+		if event.Type == "finished" {
 			m.autopilotMode = ""
 			// Restore status interval.
 			if m.origPollInterval > 0 {
@@ -1508,8 +1508,29 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 
 	sup.Launch(context.Background())
 
+	// Show temporary notification with autopilot limits.
+	maxAgents := m.project.AutopilotMaxAgents
+	if maxAgents < 1 {
+		maxAgents = 3
+	}
+	maxTurns := m.project.AutopilotMaxTurns
+	if maxTurns < 1 {
+		maxTurns = 50
+	}
+	maxBudget := m.project.AutopilotMaxBudgetUSD
+	if maxBudget <= 0 {
+		maxBudget = 3.00
+	}
+	m.autopilotStatus = fmt.Sprintf(
+		"Autopilot running in background — %d agents, %d turns, $%.2f/agent max — press A to stop",
+		maxAgents, maxTurns, maxBudget,
+	)
+
 	return m, tea.Batch(
 		listenForAutopilotEvents(sup),
+		tea.Tick(8*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		}),
 	)
 }
 
