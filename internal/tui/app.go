@@ -579,7 +579,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autopilotSupervisor = nil
 		}
 		m.resizeViewports()
-		return m, listenForAutopilotEvents(m.autopilotSupervisor)
+		cmds := []tea.Cmd{listenForAutopilotEvents(m.autopilotSupervisor)}
+		// Sync operations tab on state-changing events.
+		switch event.Type {
+		case "started", "completed", "bailed", "stopped", "finished":
+			p := m.poller
+			cmds = append(cmds, func() tea.Msg {
+				p.StatusNow(context.Background())
+				return nil
+			})
+		}
+		return m, tea.Batch(cmds...)
 
 	case clearAutopilotStatusMsg:
 		m.autopilotStatus = ""
