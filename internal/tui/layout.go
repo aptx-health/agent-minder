@@ -1322,7 +1322,8 @@ func (m Model) renderHelpBar() string {
 			{"?", "help"},
 		}
 	case tabAutopilot:
-		if m.autopilotMode == "running" {
+		switch m.autopilotMode {
+		case "running":
 			condensed = []hint{
 				{"↑/↓", "select"},
 			}
@@ -1356,7 +1357,7 @@ func (m Model) renderHelpBar() string {
 				hint{"A", "stop all"},
 				hint{"?", "help"},
 			)
-		} else if m.autopilotMode == "completed" {
+		case "completed":
 			condensed = []hint{
 				{"↑/↓", "select"},
 			}
@@ -1376,7 +1377,7 @@ func (m Model) renderHelpBar() string {
 				hint{"a", "new session"},
 				hint{"?", "help"},
 			)
-		} else {
+		default:
 			condensed = []hint{
 				{"1/2/3", "tabs"},
 				{"a", "start"},
