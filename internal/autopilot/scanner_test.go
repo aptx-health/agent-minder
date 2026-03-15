@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"sync"
 	"testing"
 )
 
@@ -30,7 +29,7 @@ func TestScanStream_AssistantToolUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -38,8 +37,8 @@ func TestScanStream_AssistantToolUse(t *testing.T) {
 		scanStream(pr, logFile, 0, sup)
 	}()
 
-	pw.Write([]byte(events))
-	pw.Close()
+	_, _ = pw.Write([]byte(events))
+	_ = pw.Close()
 	<-done
 
 	sup.mu.Lock()
@@ -54,7 +53,9 @@ func TestScanStream_AssistantToolUse(t *testing.T) {
 	}
 
 	// Verify log file has all lines.
-	logFile.Seek(0, 0)
+	if _, err := logFile.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
 	content, _ := io.ReadAll(logFile)
 	lines := 0
 	for _, b := range content {
@@ -80,7 +81,7 @@ func TestScanStream_ResultEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -88,8 +89,8 @@ func TestScanStream_ResultEvent(t *testing.T) {
 		scanStream(pr, logFile, 0, sup)
 	}()
 
-	pw.Write([]byte(events))
-	pw.Close()
+	_, _ = pw.Write([]byte(events))
+	_ = pw.Close()
 	<-done
 
 	sup.mu.Lock()
@@ -118,7 +119,7 @@ also not json {{{
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -126,8 +127,8 @@ also not json {{{
 		scanStream(pr, logFile, 0, sup)
 	}()
 
-	pw.Write([]byte(events))
-	pw.Close()
+	_, _ = pw.Write([]byte(events))
+	_ = pw.Close()
 	<-done
 
 	sup.mu.Lock()
@@ -142,7 +143,9 @@ also not json {{{
 	}
 
 	// All 3 lines should be in the log file.
-	logFile.Seek(0, 0)
+	if _, err := logFile.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
 	content, _ := io.ReadAll(logFile)
 	lines := 0
 	for _, b := range content {
@@ -168,7 +171,7 @@ func TestScanStream_NilSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	done := make(chan struct{})
 	go func() {
@@ -176,8 +179,8 @@ func TestScanStream_NilSlot(t *testing.T) {
 		scanStream(pr, logFile, 0, sup)
 	}()
 
-	pw.Write([]byte(events))
-	pw.Close()
+	_, _ = pw.Write([]byte(events))
+	_ = pw.Close()
 	<-done
 	// No panic = success.
 }
@@ -235,22 +238,4 @@ func TestExtractToolInput(t *testing.T) {
 			}
 		})
 	}
-}
-
-// Ensure mu field exists and is usable (compile-time check that scanner uses the right lock).
-func TestSupervisorMutex(t *testing.T) {
-	sup := newTestSupervisor(1)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		sup.mu.Lock()
-		sup.mu.Unlock()
-	}()
-	go func() {
-		defer wg.Done()
-		sup.mu.Lock()
-		sup.mu.Unlock()
-	}()
-	wg.Wait()
 }
