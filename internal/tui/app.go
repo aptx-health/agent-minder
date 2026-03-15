@@ -199,7 +199,7 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor    *autopilot.Supervisor
-	autopilotMode          string // "", "scan-confirm", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm"
+	autopilotMode          string // "", "scan-confirm", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "completed"
 	autopilotStatus        string
 	autopilotTotal         int
 	autopilotUnblocked     int
@@ -569,7 +569,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rebuildAutopilotTaskContent()
 		if event.Type == "finished" {
-			m.autopilotMode = ""
+			m.autopilotMode = "completed"
 			// Restore status interval.
 			if m.origPollInterval > 0 {
 				m.poller.SetStatusInterval(m.origPollInterval)
@@ -985,7 +985,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case tabAnalysis:
 			m.analysisVP, cmd = m.analysisVP.Update(msg)
 		case tabAutopilot:
-			if m.autopilotMode == "running" && len(m.autopilotTasks) > 0 {
+			if (m.autopilotMode == "running" || m.autopilotMode == "completed") && len(m.autopilotTasks) > 0 {
 				// Navigate cursor through task list.
 				switch msg.String() {
 				case "up":
@@ -1057,7 +1057,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.resizeViewports()
 			return m, nil
 		}
-		if m.activeTab != tabAutopilot || m.autopilotMode != "running" {
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
 			return m, nil
 		}
 		task := m.selectedAutopilotTask()
@@ -1077,7 +1077,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		})
 
 	case "l":
-		if m.activeTab != tabAutopilot || m.autopilotMode != "running" {
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
 			return m, nil
 		}
 		task := m.selectedAutopilotTask()
@@ -1090,7 +1090,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		})
 
 	case "D":
-		if m.activeTab != tabAutopilot || m.autopilotMode != "running" {
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
 			return m, nil
 		}
 		task := m.selectedAutopilotTask()

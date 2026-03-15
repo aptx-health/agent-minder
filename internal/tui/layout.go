@@ -249,6 +249,12 @@ func (m Model) renderAutopilotTab() string {
 		return b.String()
 	}
 
+	// Completed state: session finished, tasks preserved for inspection.
+	if m.autopilotMode == "completed" {
+		b.WriteString(m.renderAutopilotCompletedContent())
+		return b.String()
+	}
+
 	return b.String()
 }
 
@@ -290,6 +296,31 @@ func (m Model) renderAutopilotRunningContent() string {
 	}
 	b.WriteString(headerStyle().Render("Tasks"))
 	b.WriteString("  ")
+	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
+	b.WriteString("\n")
+	b.WriteString(m.autopilotTaskVP.View())
+	b.WriteString("\n")
+
+	// Task detail panel for selected task.
+	detail := m.renderTaskDetail()
+	if detail != "" {
+		b.WriteString("\n")
+		b.WriteString(detail)
+	}
+
+	return b.String()
+}
+
+// renderAutopilotCompletedContent renders the task list for a completed autopilot session (no slots).
+func (m Model) renderAutopilotCompletedContent() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle().Render("Autopilot — Completed"))
+	b.WriteString("  ")
+	expandHint := "e: expand"
+	if m.autopilotTasksExpanded {
+		expandHint = "e: collapse"
+	}
 	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
 	b.WriteString("\n")
 	b.WriteString(m.autopilotTaskVP.View())
@@ -954,7 +985,8 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 	case tabAutopilot:
 		// Autopilot tab: slot section + task list header + VP + detail panel
 		isRunning := m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" ||
-			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm"
+			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" ||
+			m.autopilotMode == "completed"
 		if isRunning {
 			// Slot section.
 			if m.autopilotSupervisor != nil {
@@ -1312,6 +1344,26 @@ func (m Model) renderHelpBar() string {
 			condensed = append(condensed,
 				hint{"P", "pause"},
 				hint{"A", "stop all"},
+				hint{"?", "help"},
+			)
+		} else if m.autopilotMode == "completed" {
+			condensed = []hint{
+				{"↑/↓", "select"},
+			}
+			task := m.selectedAutopilotTask()
+			if task != nil {
+				switch task.Status {
+				case "bailed", "stopped", "review", "done":
+					condensed = append(condensed,
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "queued", "blocked":
+					condensed = append(condensed, hint{"D", "deps"})
+				}
+			}
+			condensed = append(condensed,
+				hint{"a", "new session"},
 				hint{"?", "help"},
 			)
 		} else {
