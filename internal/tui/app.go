@@ -703,9 +703,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Tab switching keys always pass through so users can browse freely.
 	if m.autopilotMode == "scan-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
-		case "y":
+		case "enter":
 			return m.prepareAutopilot()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = ""
 			m.autopilotSupervisor = nil
 			m.autopilotStatus = ""
@@ -714,9 +714,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.autopilotMode == "confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
-		case "y":
+		case "enter":
 			return m.confirmAutopilot()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = ""
 			m.autopilotSupervisor = nil
 			m.autopilotStatus = ""
@@ -725,9 +725,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.autopilotMode == "stop-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
-		case "y":
+		case "enter":
 			return m.confirmStopAutopilot()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = "running"
 			return m, nil
 		}

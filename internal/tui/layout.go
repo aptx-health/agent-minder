@@ -1059,13 +1059,13 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "scan-confirm" {
-			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
+			b.WriteString(helpStyle().Render("enter: analyze • esc: cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "confirm" {
-			b.WriteString(helpStyle().Render("y: launch • n: cancel"))
+			b.WriteString(helpStyle().Render("enter: launch • esc: cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "stop-confirm" {
-			b.WriteString(helpStyle().Render("y: stop • n: cancel"))
+			b.WriteString(helpStyle().Render("enter: stop • esc: cancel"))
 			b.WriteString("\n")
 		} else if m.autopilotStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
