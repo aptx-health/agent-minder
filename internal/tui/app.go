@@ -436,6 +436,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bulkTrackResultMsg:
 		m.refreshTrackedItems()
+		if msg.added > 0 && m.autopilotSupervisor != nil {
+			m.autopilotSupervisor.TriggerDiscovery()
+		}
 		if msg.failed > 0 {
 			m.trackError = true
 			m.trackStatus = fmt.Sprintf("Tracked %d, %d failed: %s", msg.added, msg.failed, strings.Join(msg.errors, "; "))
