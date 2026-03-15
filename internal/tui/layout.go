@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/dustinlange/agent-minder/internal/db"
 )
 
 // View renders the TUI dashboard with height-budgeted sections.
@@ -49,8 +50,10 @@ func (m Model) View() tea.View {
 		b.WriteString("\n")
 	} else if m.activeTab == tabOperations {
 		b.WriteString(m.renderOperationsTab())
-	} else {
+	} else if m.activeTab == tabAnalysis {
 		b.WriteString(m.renderAnalysisTab())
+	} else {
+		b.WriteString(m.renderAutopilotTab())
 	}
 
 	// Bottom bar: input or help.
@@ -63,25 +66,33 @@ func (m Model) View() tea.View {
 
 // renderTabBar renders the tab selector bar.
 func (m Model) renderTabBar() string {
+	type tabDef struct {
+		num    int
+		label  string
+		hasNew bool
+	}
+	tabs := []tabDef{
+		{1, "Operations", false},
+		{2, "Analysis", m.analysisHasNew},
+		{3, "Autopilot", m.autopilotHasNew},
+	}
+
 	var b strings.Builder
 	b.WriteString(" ")
-
-	opsLabel := " 1: Operations "
-	analysisLabel := " 2: Analysis "
-	if m.analysisHasNew {
-		analysisLabel = " 2: Analysis \u25cf "
+	for i, t := range tabs {
+		label := fmt.Sprintf(" %d: %s ", t.num, t.label)
+		if t.hasNew {
+			label = fmt.Sprintf(" %d: %s \u25cf ", t.num, t.label)
+		}
+		if m.activeTab == i {
+			b.WriteString(tabActiveStyle().Render(label))
+		} else {
+			b.WriteString(tabInactiveStyle().Render(label))
+		}
+		if i < len(tabs)-1 {
+			b.WriteString("  ")
+		}
 	}
-
-	if m.activeTab == tabOperations {
-		b.WriteString(tabActiveStyle().Render(opsLabel))
-		b.WriteString("  ")
-		b.WriteString(tabInactiveStyle().Render(analysisLabel))
-	} else {
-		b.WriteString(tabInactiveStyle().Render(opsLabel))
-		b.WriteString("  ")
-		b.WriteString(tabActiveStyle().Render(analysisLabel))
-	}
-
 	return b.String()
 }
 
@@ -101,15 +112,6 @@ func (m Model) renderOperationsTab() string {
 		wt := m.renderWorktrees()
 		if wt != "" {
 			b.WriteString(wt)
-			b.WriteString("\n")
-		}
-	}
-
-	// Autopilot slot status (when running).
-	if m.autopilotMode == "running" && m.autopilotSupervisor != nil {
-		ap := m.renderAutopilotSlots()
-		if ap != "" {
-			b.WriteString(ap)
 			b.WriteString("\n")
 		}
 	}
@@ -188,6 +190,219 @@ func (m Model) renderAnalysisTab() string {
 	}
 
 	return b.String()
+}
+
+// renderAutopilotTab renders the Autopilot tab content.
+func (m Model) renderAutopilotTab() string {
+	var b strings.Builder
+
+	// Empty state: no autopilot session.
+	if m.autopilotMode == "" && m.autopilotSupervisor == nil {
+		b.WriteString("\n")
+		b.WriteString(headerStyle().Render("  Autopilot"))
+		b.WriteString("\n\n")
+		b.WriteString(mutedStyle().Render("  No autopilot session — press a to start"))
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	// Settings preview: shown during scan-confirm.
+	if m.autopilotMode == "scan-confirm" {
+		b.WriteString("\n")
+		b.WriteString(headerStyle().Render("  Autopilot — Settings Preview"))
+		b.WriteString("\n\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Max agents:     %d", m.project.AutopilotMaxAgents)))
+		b.WriteString("\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Skip label:     %s", m.project.AutopilotSkipLabel)))
+		b.WriteString("\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Max turns:      %d", m.project.AutopilotMaxTurns)))
+		b.WriteString("\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Budget/agent:   $%.2f", m.project.AutopilotMaxBudgetUSD)))
+		b.WriteString("\n\n")
+		b.WriteString(mutedStyle().Render("  Press s to change settings before proceeding."))
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	// Confirm state: issue scan completed, awaiting launch confirmation.
+	if m.autopilotMode == "confirm" {
+		b.WriteString("\n")
+		b.WriteString(headerStyle().Render("  Autopilot — Ready to Launch"))
+		b.WriteString("\n\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  %d issues found, %d unblocked",
+			m.autopilotTotal, m.autopilotUnblocked)))
+		b.WriteString("\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Will launch up to %d agents", m.project.AutopilotMaxAgents)))
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	// Stop-confirm state.
+	if m.autopilotMode == "stop-confirm" {
+		b.WriteString(m.renderAutopilotRunningContent())
+		return b.String()
+	}
+
+	// Running state.
+	if m.autopilotMode == "running" {
+		b.WriteString(m.renderAutopilotRunningContent())
+		return b.String()
+	}
+
+	return b.String()
+}
+
+// renderAutopilotRunningContent renders slot status and task list for the running/stop-confirm states.
+func (m Model) renderAutopilotRunningContent() string {
+	var b strings.Builder
+
+	// Slot section (compact, top of tab).
+	if m.autopilotSupervisor != nil {
+		slots := m.autopilotSupervisor.SlotStatus()
+		b.WriteString(headerStyle().Render("Slots"))
+		b.WriteString("\n")
+		for _, slot := range slots {
+			if slot.Status == "idle" {
+				b.WriteString(mutedStyle().Render(fmt.Sprintf("  Slot %d: idle", slot.SlotNum)))
+			} else {
+				elapsed := slot.RunningFor.Round(time.Second)
+				b.WriteString(statusRunningStyle().Render(fmt.Sprintf("  Slot %d: #%d  %s",
+					slot.SlotNum, slot.IssueNumber, elapsed)))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// Task list header.
+	expandHint := "e: expand"
+	if m.autopilotTasksExpanded {
+		expandHint = "e: collapse"
+	}
+	b.WriteString(headerStyle().Render("Tasks"))
+	b.WriteString("  ")
+	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
+	b.WriteString("\n")
+	b.WriteString(m.autopilotTaskVP.View())
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+// rebuildAutopilotTaskContent refreshes the task list viewport from the database.
+func (m *Model) rebuildAutopilotTaskContent() {
+	tasks, err := m.store.GetAutopilotTasks(m.project.ID)
+	if err != nil || len(tasks) == 0 {
+		m.autopilotTaskVP.SetContent(mutedStyle().Render("  (no tasks)"))
+		return
+	}
+
+	// Sort tasks by status priority: running → queued → blocked → review → done → bailed.
+	statusOrder := map[string]int{
+		"running": 0,
+		"queued":  1,
+		"blocked": 2,
+		"review":  3,
+		"done":    4,
+		"bailed":  5,
+		"stopped": 6,
+	}
+	sortedTasks := make([]db.AutopilotTask, len(tasks))
+	copy(sortedTasks, tasks)
+	for i := 0; i < len(sortedTasks); i++ {
+		for j := i + 1; j < len(sortedTasks); j++ {
+			oi := statusOrder[sortedTasks[i].Status]
+			oj := statusOrder[sortedTasks[j].Status]
+			if oi > oj {
+				sortedTasks[i], sortedTasks[j] = sortedTasks[j], sortedTasks[i]
+			}
+		}
+	}
+
+	var lines []string
+	for _, t := range sortedTasks {
+		title := t.IssueTitle
+		maxTitle := m.width - 30
+		if maxTitle < 10 {
+			maxTitle = 10
+		}
+		if len(title) > maxTitle {
+			title = title[:maxTitle-3] + "..."
+		}
+
+		var context string
+		switch t.Status {
+		case "blocked":
+			context = m.taskBlockedContext(t)
+		case "review":
+			if t.PRNumber > 0 {
+				context = fmt.Sprintf("PR #%d", t.PRNumber)
+			}
+		}
+
+		statusStr := m.taskStatusDisplay(t.Status)
+		line := fmt.Sprintf("  #%-5d %s  %s", t.IssueNumber, statusStr, title)
+		if context != "" {
+			line += "  " + mutedStyle().Render(context)
+		}
+		lines = append(lines, line)
+	}
+
+	m.autopilotTaskVP.SetContentLines(lines)
+}
+
+// taskStatusDisplay returns a styled status string for an autopilot task.
+func (m Model) taskStatusDisplay(status string) string {
+	switch status {
+	case "running":
+		return statusRunningStyle().Render("● running")
+	case "queued":
+		return textStyle().Render("○ queued ")
+	case "blocked":
+		return mutedStyle().Render("◌ blocked")
+	case "review":
+		return broadcastStyle().Render("◎ review ")
+	case "done":
+		return statusRunningStyle().Render("✓ done   ")
+	case "bailed":
+		return errorStyle().Render("✗ bailed ")
+	case "stopped":
+		return errorStyle().Render("✗ stopped")
+	default:
+		return mutedStyle().Render(fmt.Sprintf("  %-7s", status))
+	}
+}
+
+// taskBlockedContext returns a description of what blocks a task.
+func (m Model) taskBlockedContext(t db.AutopilotTask) string {
+	if t.Dependencies == "" || t.Dependencies == "[]" {
+		return ""
+	}
+	var deps []int
+	// Parse JSON array of ints.
+	depStr := strings.Trim(t.Dependencies, "[]")
+	if depStr == "" {
+		return ""
+	}
+	for _, s := range strings.Split(depStr, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			var n int
+			if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+				deps = append(deps, n)
+			}
+		}
+	}
+	if len(deps) == 0 {
+		return ""
+	}
+	if len(deps) == 1 {
+		return fmt.Sprintf("waiting on #%d", deps[0])
+	}
+	parts := make([]string, len(deps))
+	for i, d := range deps {
+		parts[i] = fmt.Sprintf("#%d", d)
+	}
+	return fmt.Sprintf("waiting on %s", strings.Join(parts, ", "))
 }
 
 // renderHeader returns the compact 2-line header with inline repo/topic counts.
@@ -531,31 +746,34 @@ func (m *Model) rebuildAnalysisContent() {
 	m.analysisVP.SetContent(b.String())
 }
 
-// resizeViewports computes the height budget and resizes both viewports.
+// resizeViewports computes the height budget and resizes all viewports.
 func (m *Model) resizeViewports() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
 
-	analysisH, eventLogH := m.computeHeightBudget()
+	analysisH, eventLogH, autopilotTaskH := m.computeHeightBudget()
 
 	m.analysisVP.SetWidth(m.width)
 	m.analysisVP.SetHeight(analysisH)
 	m.eventLogVP.SetWidth(m.width)
 	m.eventLogVP.SetHeight(eventLogH)
+	m.autopilotTaskVP.SetWidth(m.width)
+	m.autopilotTaskVP.SetHeight(autopilotTaskH)
 }
 
-// computeHeightBudget calculates the height for analysis and event log viewports.
-// Only the active tab's viewport gets meaningful space; the other gets a minimum.
-func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
+// computeHeightBudget calculates the height for analysis, event log, and autopilot task viewports.
+// Only the active tab's viewport gets meaningful space; others get a minimum.
+func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) {
 	fixed := 2 // header (title + goal)
 	fixed += 1 // blank line after header
 	fixed += 1 // tab bar
 	fixed += 1 // blank line after tab bar
 	fixed += m.bottomBarHeight()
 
-	if m.activeTab == tabOperations {
-		// Operations tab: tracked + worktrees + autopilot + event log header + VP
+	switch m.activeTab {
+	case tabOperations:
+		// Operations tab: tracked + worktrees + event log header + VP
 		trackedContent := m.renderTrackedStrip()
 		if trackedContent != "" {
 			fixed += strings.Count(trackedContent, "\n")
@@ -570,14 +788,6 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 			}
 		}
 
-		if m.autopilotMode == "running" && m.autopilotSupervisor != nil {
-			apContent := m.renderAutopilotSlots()
-			if apContent != "" {
-				fixed += strings.Count(apContent, "\n")
-				fixed += 1
-			}
-		}
-
 		fixed += 1 // event log header
 		fixed += 1 // trailing newline
 
@@ -586,8 +796,10 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 			remaining = 4
 		}
 		eventLogH = remaining
-		analysisH = 2 // minimal for off-screen tab
-	} else {
+		analysisH = 2
+		autopilotTaskH = 2
+
+	case tabAnalysis:
 		// Analysis tab: concerns + analysis header + VP + poll summary
 		concernContent := m.renderConcerns()
 		if concernContent != "" {
@@ -612,7 +824,40 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 				analysisH = remaining
 			}
 		}
-		eventLogH = 2 // minimal for off-screen tab
+		eventLogH = 2
+		autopilotTaskH = 2
+
+	case tabAutopilot:
+		// Autopilot tab: slot section + task list header + VP
+		if m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" {
+			// Slot section.
+			if m.autopilotSupervisor != nil {
+				slots := m.autopilotSupervisor.SlotStatus()
+				fixed += 1 // "Slots" header
+				fixed += len(slots)
+			}
+			fixed += 1 // "Tasks" header
+			fixed += 1 // trailing newline
+
+			remaining := m.height - fixed
+			if remaining < 5 {
+				remaining = 5
+			}
+
+			if m.autopilotTasksExpanded {
+				autopilotTaskH = remaining
+			} else {
+				autopilotTaskH = 5
+				if autopilotTaskH > remaining {
+					autopilotTaskH = remaining
+				}
+			}
+		} else {
+			// Non-running states use static content, no viewport needed.
+			autopilotTaskH = 2
+		}
+		analysisH = 2
+		eventLogH = 2
 	}
 
 	if analysisH < 2 {
@@ -621,8 +866,11 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 	if eventLogH < 2 {
 		eventLogH = 2
 	}
+	if autopilotTaskH < 2 {
+		autopilotTaskH = 2
+	}
 
-	return analysisH, eventLogH
+	return analysisH, eventLogH, autopilotTaskH
 }
 
 // bottomBarHeight returns the number of terminal lines the bottom bar will occupy.
@@ -810,21 +1058,13 @@ func (m Model) renderBottomBar() string {
 			b.WriteString("\n")
 			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
 			b.WriteString("\n")
-		} else if m.autopilotMode == "scan-confirm" {
-			b.WriteString(headerStyle().Render("  Analyze tracked items for autopilot? (Requires LLM tokens)"))
-			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "scan-confirm" {
 			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
 			b.WriteString("\n")
-		} else if m.autopilotMode == "confirm" {
-			b.WriteString(headerStyle().Render(
-				fmt.Sprintf("  %d issues found, %d unblocked. Launch %d agents? (y/n)",
-					m.autopilotTotal, m.autopilotUnblocked, m.project.AutopilotMaxAgents)))
-			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "confirm" {
 			b.WriteString(helpStyle().Render("y: launch • n: cancel"))
 			b.WriteString("\n")
-		} else if m.autopilotMode == "stop-confirm" {
-			b.WriteString(concernDangerStyle().Render("  Stop all running agents? (y/n)"))
-			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "stop-confirm" {
 			b.WriteString(helpStyle().Render("y: stop • n: cancel"))
 			b.WriteString("\n")
 		} else if m.autopilotStatus != "" {
@@ -866,9 +1106,10 @@ func renderHelpBar(width, activeTab int) string {
 	}
 
 	var condensed []hint
-	if activeTab == tabAnalysis {
+	switch activeTab {
+	case tabAnalysis:
 		condensed = []hint{
-			{"1/2", "tabs"},
+			{"1/2/3", "tabs"},
 			{"R", "analyze"},
 			{"b", "batch track"},
 			{"u", "user msg"},
@@ -876,9 +1117,18 @@ func renderHelpBar(width, activeTab int) string {
 			{"q", "quit"},
 			{"?", "help"},
 		}
-	} else {
+	case tabAutopilot:
 		condensed = []hint{
-			{"1/2", "tabs"},
+			{"1/2/3", "tabs"},
+			{"a", "start"},
+			{"A", "stop"},
+			{"e", "expand"},
+			{"q", "quit"},
+			{"?", "help"},
+		}
+	default:
+		condensed = []hint{
+			{"1/2/3", "tabs"},
 			{"p", "pause"},
 			{"r", "poll"},
 			{"i", "track"},
@@ -909,7 +1159,7 @@ type helpHint struct {
 // Help hint groups for the columnar overlay.
 var (
 	globalHints = []helpHint{
-		{"1/2/tab", "switch tabs"},
+		{"1/2/3", "switch tabs"},
 		{"s", "settings"},
 		{"t", "theme"},
 		{"\u2191/\u2193", "scroll"},
@@ -925,8 +1175,6 @@ var (
 		{"b", "batch track"},
 		{"x", "expand tracked"},
 		{"w", "toggle worktrees"},
-		{"a", "launch autopilot"},
-		{"A", "stop autopilot"},
 	}
 
 	analysisHints = []helpHint{
@@ -937,41 +1185,52 @@ var (
 		{"m", "broadcast"},
 		{"o", "onboarding"},
 	}
+
+	autopilotHints = []helpHint{
+		{"a", "launch autopilot"},
+		{"A", "stop autopilot"},
+		{"e", "expand tasks"},
+	}
 )
 
 // helpOverlayHeight returns the number of lines the help body occupies.
 func helpOverlayHeight() int {
-	// 3 column headers + max of the three column lengths.
 	maxRows := len(globalHints)
-	if len(opsHints) > maxRows {
-		maxRows = len(opsHints)
-	}
-	if len(analysisHints) > maxRows {
-		maxRows = len(analysisHints)
+	for _, h := range [][]helpHint{opsHints, analysisHints, autopilotHints} {
+		if len(h) > maxRows {
+			maxRows = len(h)
+		}
 	}
 	return 1 + maxRows // 1 header row + hint rows
 }
 
-// renderHelpOverlay renders a three-column help overlay with the active tab highlighted.
+// renderHelpOverlay renders a four-column help overlay with the active tab highlighted.
 func renderHelpOverlay(width, activeTab int) string {
 	keyStyle := helpKeyStyle()
 	descStyle := helpStyle()
 
 	// Column widths.
-	colW := 26
-	if width > 0 && width/3 > colW {
-		colW = width / 3
+	colW := 22
+	if width > 0 && width/4 > colW {
+		colW = width / 4
 	}
 
 	// Build column header labels — highlight the active tab's column.
 	globalLabel := headerStyle().Render("Global")
-	var opsLabel, analysisLabel string
-	if activeTab == tabOperations {
+	var opsLabel, analysisLabel, autopilotLabel string
+	switch activeTab {
+	case tabOperations:
 		opsLabel = tabActiveStyle().Render(" Operations ")
 		analysisLabel = mutedStyle().Render("Analysis")
-	} else {
+		autopilotLabel = mutedStyle().Render("Autopilot")
+	case tabAnalysis:
 		opsLabel = mutedStyle().Render("Operations")
 		analysisLabel = tabActiveStyle().Render(" Analysis ")
+		autopilotLabel = mutedStyle().Render("Autopilot")
+	case tabAutopilot:
+		opsLabel = mutedStyle().Render("Operations")
+		analysisLabel = mutedStyle().Render("Analysis")
+		autopilotLabel = tabActiveStyle().Render(" Autopilot ")
 	}
 
 	var b strings.Builder
@@ -981,16 +1240,16 @@ func renderHelpOverlay(width, activeTab int) string {
 	// Column headers.
 	fmt.Fprintf(&b, "  %-*s", colW, globalLabel)
 	fmt.Fprintf(&b, "%-*s", colW, opsLabel)
-	b.WriteString(analysisLabel)
+	fmt.Fprintf(&b, "%-*s", colW, analysisLabel)
+	b.WriteString(autopilotLabel)
 	b.WriteString("\n")
 
 	// Determine row count from longest column.
 	maxRows := len(globalHints)
-	if len(opsHints) > maxRows {
-		maxRows = len(opsHints)
-	}
-	if len(analysisHints) > maxRows {
-		maxRows = len(analysisHints)
+	for _, h := range [][]helpHint{opsHints, analysisHints, autopilotHints} {
+		if len(h) > maxRows {
+			maxRows = len(h)
+		}
 	}
 
 	dimStyle := lipgloss.NewStyle().Foreground(currentTheme().Border) // Surface2 — very faded
@@ -1022,6 +1281,7 @@ func renderHelpOverlay(width, activeTab int) string {
 		b.WriteString(fmtHint(globalHints, i, true))
 		b.WriteString(fmtHint(opsHints, i, activeTab == tabOperations))
 		b.WriteString(fmtHint(analysisHints, i, activeTab == tabAnalysis))
+		b.WriteString(fmtHint(autopilotHints, i, activeTab == tabAutopilot))
 		b.WriteString("\n")
 	}
 

@@ -120,6 +120,8 @@ type idleCheckMsg time.Time
 const (
 	tabOperations = 0
 	tabAnalysis   = 1
+	tabAutopilot  = 2
+	tabCount      = 3
 )
 
 // Model is the root bubbletea model for the dashboard.
@@ -131,8 +133,9 @@ type Model struct {
 	height  int
 
 	// Tab state.
-	activeTab      int  // tabOperations or tabAnalysis
-	analysisHasNew bool // true when new analysis arrived while on Ops tab
+	activeTab       int  // tabOperations, tabAnalysis, or tabAutopilot
+	analysisHasNew  bool // true when new analysis arrived while on Ops tab
+	autopilotHasNew bool // true when autopilot state changed while on another tab
 
 	// State.
 	events   []poller.Event
@@ -191,12 +194,14 @@ type Model struct {
 	pollConfirm bool
 
 	// Autopilot.
-	autopilotSupervisor *autopilot.Supervisor
-	autopilotMode       string // "", "scan-confirm", "confirm", "running", "stop-confirm"
-	autopilotStatus     string
-	autopilotTotal      int
-	autopilotUnblocked  int
-	origPollInterval    time.Duration // saved to restore after autopilot stops
+	autopilotSupervisor    *autopilot.Supervisor
+	autopilotMode          string // "", "scan-confirm", "confirm", "running", "stop-confirm"
+	autopilotStatus        string
+	autopilotTotal         int
+	autopilotUnblocked     int
+	origPollInterval       time.Duration // saved to restore after autopilot stops
+	autopilotTasksExpanded bool          // 'e' toggles 5-line minimum vs expanded task list
+	autopilotTaskVP        viewport.Model
 
 	// Auto-pause on idle.
 	lastUserInput time.Time
@@ -256,21 +261,27 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	eVP.SoftWrap = true
 	eVP.FillHeight = true
 
+	apVP := viewport.New()
+	apVP.KeyMap = safeViewportKeyMap()
+	apVP.SoftWrap = true
+	apVP.FillHeight = true
+
 	m := Model{
-		project:        project,
-		store:          store,
-		poller:         p,
-		events:         make([]poller.Event, 0, 64),
-		mode:           "normal",
-		activeTab:      tabOperations,
-		broadcastInput: bi,
-		userMsgInput:   ta,
-		onboardInput:   oi,
-		spinner:        sp,
-		polling:        true, // initial status check starts immediately
-		analysisVP:     aVP,
-		eventLogVP:     eVP,
-		lastUserInput:  time.Now(),
+		project:         project,
+		store:           store,
+		poller:          p,
+		events:          make([]poller.Event, 0, 64),
+		mode:            "normal",
+		activeTab:       tabOperations,
+		broadcastInput:  bi,
+		userMsgInput:    ta,
+		onboardInput:    oi,
+		spinner:         sp,
+		polling:         true, // initial status check starts immediately
+		analysisVP:      aVP,
+		eventLogVP:      eVP,
+		autopilotTaskVP: apVP,
+		lastUserInput:   time.Now(),
 	}
 	m.applyTextareaTheme()
 	return m
@@ -521,6 +532,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autopilotUnblocked = msg.unblocked
 		m.autopilotMode = "confirm"
 		m.autopilotStatus = ""
+		if m.activeTab != tabAutopilot {
+			m.autopilotHasNew = true
+		}
 		return m, nil
 
 	case autopilotEventMsg:
@@ -539,6 +553,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.events = m.events[len(m.events)-50:]
 		}
 		m.rebuildEventLogContent()
+		// Flag new autopilot activity if user is on another tab.
+		if m.activeTab != tabAutopilot {
+			m.autopilotHasNew = true
+		}
+		m.rebuildAutopilotTaskContent()
 		if event.Type == "stopped" {
 			m.autopilotMode = ""
 			// Restore status interval.
@@ -680,8 +699,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Autopilot scan-confirm mode: confirm before expensive LLM scan.
-	if m.autopilotMode == "scan-confirm" {
+	// Autopilot confirm modes: only intercept y/n/esc when on tab 3.
+	// Tab switching keys always pass through so users can browse freely.
+	if m.autopilotMode == "scan-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
 		case "y":
 			return m.prepareAutopilot()
@@ -691,10 +711,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.autopilotStatus = ""
 			return m, nil
 		}
-		return m, nil
 	}
-	// Autopilot confirm mode intercepts y/n/esc.
-	if m.autopilotMode == "confirm" {
+	if m.autopilotMode == "confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
 		case "y":
 			return m.confirmAutopilot()
@@ -704,9 +722,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.autopilotStatus = ""
 			return m, nil
 		}
-		return m, nil
 	}
-	if m.autopilotMode == "stop-confirm" {
+	if m.autopilotMode == "stop-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
 		case "y":
 			return m.confirmStopAutopilot()
@@ -714,7 +731,6 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.autopilotMode = "running"
 			return m, nil
 		}
-		return m, nil
 	}
 
 	switch msg.String() {
@@ -727,22 +743,19 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.analysisHasNew = false
 		m.resizeViewports()
 		return m, nil
+	case "3":
+		m.activeTab = tabAutopilot
+		m.autopilotHasNew = false
+		m.resizeViewports()
+		return m, nil
 	case "tab":
-		if m.activeTab == tabOperations {
-			m.activeTab = tabAnalysis
-			m.analysisHasNew = false
-		} else {
-			m.activeTab = tabOperations
-		}
+		m.activeTab = (m.activeTab + 1) % tabCount
+		m.clearTabIndicator()
 		m.resizeViewports()
 		return m, nil
 	case "shift+tab":
-		if m.activeTab == tabAnalysis {
-			m.activeTab = tabOperations
-		} else {
-			m.activeTab = tabAnalysis
-			m.analysisHasNew = false
-		}
+		m.activeTab = (m.activeTab + tabCount - 1) % tabCount
+		m.clearTabIndicator()
 		m.resizeViewports()
 		return m, nil
 	case "?":
@@ -771,11 +784,16 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.pollConfirm = true
 		return m, nil
 	case "e":
-		if m.activeTab != tabAnalysis {
+		if m.activeTab == tabAnalysis {
+			m.analysisExpanded = !m.analysisExpanded
+			m.resizeViewports()
 			return m, nil
 		}
-		m.analysisExpanded = !m.analysisExpanded
-		m.resizeViewports()
+		if m.activeTab == tabAutopilot {
+			m.autopilotTasksExpanded = !m.autopilotTasksExpanded
+			m.resizeViewports()
+			return m, nil
+		}
 		return m, nil
 	case "i":
 		ghRepos := m.poller.GitHubRepos()
@@ -907,14 +925,23 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.onboardInput.Focus()
 		return m, cmd
 	case "a":
+		if m.activeTab != tabAutopilot {
+			return m, nil
+		}
 		return m.startAutopilot()
 	case "A":
+		if m.activeTab != tabAutopilot {
+			return m, nil
+		}
 		return m.stopAutopilot()
 	case "up", "down", "pgup", "pgdown":
 		var cmd tea.Cmd
-		if m.activeTab == tabAnalysis {
+		switch m.activeTab {
+		case tabAnalysis:
 			m.analysisVP, cmd = m.analysisVP.Update(msg)
-		} else {
+		case tabAutopilot:
+			m.autopilotTaskVP, cmd = m.autopilotTaskVP.Update(msg)
+		default:
 			m.eventLogVP, cmd = m.eventLogVP.Update(msg)
 		}
 		return m, cmd
@@ -1539,6 +1566,16 @@ func (m Model) effectiveStatus(item db.TrackedItem) string {
 		return "Baild"
 	}
 	return item.LastStatus
+}
+
+// clearTabIndicator clears the new-data indicator for the currently active tab.
+func (m *Model) clearTabIndicator() {
+	switch m.activeTab {
+	case tabAnalysis:
+		m.analysisHasNew = false
+	case tabAutopilot:
+		m.autopilotHasNew = false
+	}
 }
 
 // formatDuration returns a human-readable duration string like "4h" or "30m".
