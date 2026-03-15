@@ -647,6 +647,16 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 		s.emitEvent("discovered", fmt.Sprintf("New task #%d: %s", t.IssueNumber, t.IssueTitle), nil)
 	}
 
+	// Warn that the dependency graph (built once during Prepare) may be stale.
+	// Dynamically discovered tasks are queued without deps, but they could
+	// affect ordering of already-queued tasks. The user can stop and re-launch
+	// autopilot to rebuild the full dep graph with an LLM call.
+	var nums []string
+	for _, t := range newTasks {
+		nums = append(nums, fmt.Sprintf("#%d", t.IssueNumber))
+	}
+	s.emitEvent("warning", fmt.Sprintf("New tasks discovered (%s) — dependency graph may be stale. Stop and re-launch autopilot (A then a) to rebuild deps.", strings.Join(nums, ", ")), nil)
+
 	return added
 }
 
