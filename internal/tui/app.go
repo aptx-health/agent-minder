@@ -585,6 +585,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "started", "completed", "bailed", "stopped", "finished":
 			p := m.poller
 			cmds = append(cmds, func() tea.Msg {
+				time.Sleep(4 * time.Second)
 				p.StatusNow(context.Background())
 				return nil
 			})
