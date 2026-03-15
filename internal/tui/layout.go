@@ -464,7 +464,7 @@ func (m Model) renderTaskDetail() string {
 	b.WriteString("\n")
 
 	// Status.
-	b.WriteString(fmt.Sprintf("  Status: %s", m.taskStatusDisplay(task.Status)))
+	fmt.Fprintf(&b, "  Status: %s", m.taskStatusDisplay(task.Status))
 	b.WriteString("\n")
 
 	// Dependencies.
