@@ -31,6 +31,7 @@ type Project struct {
 	AutopilotMaxBudgetUSD float64 `db:"autopilot_max_budget_usd"`
 	AutopilotSkipLabel    string  `db:"autopilot_skip_label"`
 	AutopilotBaseBranch   string  `db:"autopilot_base_branch"`
+	LLMFallbackProvider   string  `db:"llm_fallback_provider"`
 	CreatedAt             string  `db:"created_at"`
 }
 
@@ -187,6 +188,38 @@ type AutopilotTask struct {
 	AgentLog     string `db:"agent_log"`
 	StartedAt    string `db:"started_at"`
 	CompletedAt  string `db:"completed_at"`
+}
+
+// ProviderStat tracks per-provider, per-model success/error rates and latency.
+type ProviderStat struct {
+	ID              int64  `db:"id"`
+	ProjectID       int64  `db:"project_id"`
+	Provider        string `db:"provider"`
+	Model           string `db:"model"`
+	SuccessCount    int    `db:"success_count"`
+	ErrorCount      int    `db:"error_count"`
+	TotalLatencyMs  int64  `db:"total_latency_ms"`
+	TotalInputToks  int64  `db:"total_input_toks"`
+	TotalOutputToks int64  `db:"total_output_toks"`
+	LastError       string `db:"last_error"`
+	UpdatedAt       string `db:"updated_at"`
+}
+
+// ErrorRate returns the fraction of calls that failed (0.0–1.0).
+func (s *ProviderStat) ErrorRate() float64 {
+	total := s.SuccessCount + s.ErrorCount
+	if total == 0 {
+		return 0
+	}
+	return float64(s.ErrorCount) / float64(total)
+}
+
+// AvgLatencyMs returns the average latency per successful call.
+func (s *ProviderStat) AvgLatencyMs() float64 {
+	if s.SuccessCount == 0 {
+		return 0
+	}
+	return float64(s.TotalLatencyMs) / float64(s.SuccessCount)
 }
 
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.

@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 11
+const currentVersion = 12
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	autopilot_max_budget_usd REAL DEFAULT 3.00,
 	autopilot_skip_label   TEXT DEFAULT 'no-agent',
 	autopilot_base_branch  TEXT DEFAULT '',
+	llm_fallback_provider  TEXT DEFAULT '',
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -141,6 +142,21 @@ CREATE TABLE IF NOT EXISTS completed_items (
 	summary      TEXT NOT NULL DEFAULT '',
 	completed_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS provider_stats (
+	id              INTEGER PRIMARY KEY,
+	project_id      INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	provider        TEXT NOT NULL,
+	model           TEXT NOT NULL,
+	success_count   INTEGER NOT NULL DEFAULT 0,
+	error_count     INTEGER NOT NULL DEFAULT 0,
+	total_latency_ms INTEGER NOT NULL DEFAULT 0,
+	total_input_toks  INTEGER NOT NULL DEFAULT 0,
+	total_output_toks INTEGER NOT NULL DEFAULT 0,
+	last_error      TEXT NOT NULL DEFAULT '',
+	updated_at      TEXT DEFAULT (datetime('now')),
+	UNIQUE(project_id, provider, model)
+);
 `
 
 // Open opens (or creates) the agent-minder SQLite database and runs migrations,
@@ -235,6 +251,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 11 {
 		if err := migrateV11(db); err != nil {
 			return fmt.Errorf("apply migration v11: %w", err)
+		}
+	}
+
+	if version < 12 {
+		if err := migrateV12(db); err != nil {
+			return fmt.Errorf("apply migration v12: %w", err)
 		}
 	}
 
@@ -449,6 +471,38 @@ func migrateV11(db *sqlx.DB) error {
 	// Copy existing refresh_interval_sec into analysis_interval_sec for migration continuity.
 	if _, err := db.Exec(`UPDATE projects SET analysis_interval_sec = refresh_interval_sec WHERE refresh_interval_sec > 0`); err != nil {
 		return fmt.Errorf("copy refresh_interval to analysis_interval: %w", err)
+	}
+	return nil
+}
+
+func migrateV12(db *sqlx.DB) error {
+	// Create provider_stats table.
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS provider_stats (
+			id              INTEGER PRIMARY KEY,
+			project_id      INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			provider        TEXT NOT NULL,
+			model           TEXT NOT NULL,
+			success_count   INTEGER NOT NULL DEFAULT 0,
+			error_count     INTEGER NOT NULL DEFAULT 0,
+			total_latency_ms INTEGER NOT NULL DEFAULT 0,
+			total_input_toks  INTEGER NOT NULL DEFAULT 0,
+			total_output_toks INTEGER NOT NULL DEFAULT 0,
+			last_error      TEXT NOT NULL DEFAULT '',
+			updated_at      TEXT DEFAULT (datetime('now')),
+			UNIQUE(project_id, provider, model)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create provider_stats table: %w", err)
+	}
+
+	// Add fallback provider column to projects.
+	if _, err := db.Exec(`ALTER TABLE projects ADD COLUMN llm_fallback_provider TEXT DEFAULT ''`); err != nil {
+		return fmt.Errorf("add llm_fallback_provider: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE projects SET llm_fallback_provider = '' WHERE llm_fallback_provider IS NULL`); err != nil {
+		return fmt.Errorf("null-fill llm_fallback_provider: %w", err)
 	}
 	return nil
 }

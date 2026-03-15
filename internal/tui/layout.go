@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/dustinlange/agent-minder/internal/db"
+	"github.com/dustinlange/agent-minder/internal/llm"
 )
 
 // View renders the TUI dashboard with height-budgeted sections.
@@ -116,6 +117,12 @@ func (m Model) renderOperationsTab() string {
 		}
 	}
 
+	// Provider stats (if any).
+	if stats := m.renderProviderStats(); stats != "" {
+		b.WriteString(stats)
+		b.WriteString("\n")
+	}
+
 	// Event log section.
 	b.WriteString(headerStyle().Render("Event Log"))
 	scrollHint := ""
@@ -129,6 +136,45 @@ func (m Model) renderOperationsTab() string {
 	b.WriteString("\n")
 	b.WriteString(m.eventLogVP.View())
 	b.WriteString("\n")
+
+	return b.String()
+}
+
+// renderProviderStats renders a compact line of provider stats if available.
+func (m Model) renderProviderStats() string {
+	stats, err := m.store.GetProviderStats(m.project.ID)
+	if err != nil || len(stats) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(headerStyle().Render("Provider Stats"))
+	b.WriteString("\n")
+
+	for _, s := range stats {
+		total := s.SuccessCount + s.ErrorCount
+		if total == 0 {
+			continue
+		}
+		cost := llm.LookupCost(s.Model)
+		totalCost := cost.Cost(int(s.TotalInputToks), int(s.TotalOutputToks))
+
+		line := fmt.Sprintf("  %s/%s: %d calls, %.1f%% err, %.0fms avg, $%.4f total",
+			s.Provider, s.Model,
+			total,
+			s.ErrorRate()*100,
+			s.AvgLatencyMs(),
+			totalCost,
+		)
+		if s.ErrorRate() > 0.5 {
+			b.WriteString(concernDangerStyle().Render(line))
+		} else if s.ErrorRate() > 0.1 {
+			b.WriteString(concernWarningStyle().Render(line))
+		} else {
+			b.WriteString(mutedStyle().Render(line))
+		}
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }

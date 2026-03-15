@@ -33,14 +33,14 @@ func (s *Store) CreateProject(p *Project) error {
 			idle_pause_sec, analyzer_focus,
 			autopilot_filter_type, autopilot_filter_value, autopilot_max_agents,
 			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label,
-			autopilot_base_branch)
+			autopilot_base_branch, llm_fallback_provider)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
 			:llm_summarizer_model, :llm_analyzer_model, :status_interval_sec, :analysis_interval_sec,
 			:idle_pause_sec, :analyzer_focus,
 			:autopilot_filter_type, :autopilot_filter_value, :autopilot_max_agents,
 			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label,
-			:autopilot_base_branch)
+			:autopilot_base_branch, :llm_fallback_provider)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -104,7 +104,8 @@ func (s *Store) UpdateProject(p *Project) error {
 			autopilot_max_turns = :autopilot_max_turns,
 			autopilot_max_budget_usd = :autopilot_max_budget_usd,
 			autopilot_skip_label = :autopilot_skip_label,
-			autopilot_base_branch = :autopilot_base_branch
+			autopilot_base_branch = :autopilot_base_branch,
+			llm_fallback_provider = :llm_fallback_provider
 		WHERE id = :id
 	`, p)
 	return err
@@ -839,6 +840,52 @@ func parseDependencies(deps string) []int {
 		}
 	}
 	return result
+}
+
+// --- Provider Stats ---
+
+// RecordProviderCall upserts a provider stat row after an LLM call.
+func (s *Store) RecordProviderCall(projectID int64, provider, model string, latencyMs int64, inputToks, outputToks int, callErr error) error {
+	errMsg := ""
+	if callErr != nil {
+		errMsg = callErr.Error()
+	}
+
+	// Use INSERT OR REPLACE with computed values. SQLite UPSERT via ON CONFLICT.
+	_, err := s.db.Exec(`
+		INSERT INTO provider_stats (project_id, provider, model, success_count, error_count,
+			total_latency_ms, total_input_toks, total_output_toks, last_error, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+		ON CONFLICT(project_id, provider, model) DO UPDATE SET
+			success_count = provider_stats.success_count + excluded.success_count,
+			error_count = provider_stats.error_count + excluded.error_count,
+			total_latency_ms = provider_stats.total_latency_ms + excluded.total_latency_ms,
+			total_input_toks = provider_stats.total_input_toks + excluded.total_input_toks,
+			total_output_toks = provider_stats.total_output_toks + excluded.total_output_toks,
+			last_error = CASE WHEN excluded.last_error != '' THEN excluded.last_error ELSE provider_stats.last_error END,
+			updated_at = datetime('now')
+	`, projectID, provider, model,
+		boolToInt(callErr == nil), boolToInt(callErr != nil),
+		latencyMs, int64(inputToks), int64(outputToks), errMsg)
+	return err
+}
+
+// GetProviderStats returns all provider stats for a project.
+func (s *Store) GetProviderStats(projectID int64) ([]ProviderStat, error) {
+	var stats []ProviderStat
+	if err := s.db.Select(&stats, `
+		SELECT * FROM provider_stats WHERE project_id = ? ORDER BY provider, model
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("get provider stats: %w", err)
+	}
+	return stats, nil
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // LastPoll returns the most recent poll for a project, or nil if none.

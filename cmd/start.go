@@ -44,7 +44,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("project %q not found — run 'agent-minder init' first", projectName)
 	}
 
-	// Create LLM provider, using config-sourced API key if available.
+	// Create LLM provider(s), using config-sourced API key if available.
 	var providerOpts []llm.Option
 	if apiKey := config.GetProviderAPIKey(project.LLMProvider); apiKey != "" {
 		providerOpts = append(providerOpts, llm.WithAPIKey(apiKey))
@@ -52,10 +52,29 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if baseURL := config.GetProviderBaseURL(project.LLMProvider); baseURL != "" {
 		providerOpts = append(providerOpts, llm.WithBaseURL(baseURL))
 	}
-	provider, err := llm.NewProvider(project.LLMProvider, providerOpts...)
+	primaryProvider, err := llm.NewProvider(project.LLMProvider, providerOpts...)
 	if err != nil {
 		return fmt.Errorf("creating LLM provider: %w", err)
 	}
+
+	// Build failover chain: primary + optional fallback provider.
+	providers := []llm.Provider{primaryProvider}
+	if project.LLMFallbackProvider != "" && project.LLMFallbackProvider != project.LLMProvider {
+		var fbOpts []llm.Option
+		if apiKey := config.GetProviderAPIKey(project.LLMFallbackProvider); apiKey != "" {
+			fbOpts = append(fbOpts, llm.WithAPIKey(apiKey))
+		}
+		if baseURL := config.GetProviderBaseURL(project.LLMFallbackProvider); baseURL != "" {
+			fbOpts = append(fbOpts, llm.WithBaseURL(baseURL))
+		}
+		fbProvider, fbErr := llm.NewProvider(project.LLMFallbackProvider, fbOpts...)
+		if fbErr != nil {
+			log.Printf("Warning: fallback provider %q unavailable: %v", project.LLMFallbackProvider, fbErr)
+		} else {
+			providers = append(providers, fbProvider)
+		}
+	}
+	provider := llm.NewFailoverProvider(providers, store, project.ID)
 
 	// Create bus publisher (non-fatal if unavailable).
 	var publisher *msgbus.Publisher
