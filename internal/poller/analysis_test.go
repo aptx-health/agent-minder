@@ -52,7 +52,6 @@ func TestParseAnalysisEmpty(t *testing.T) {
 	}
 }
 
-
 func TestValidSeverity(t *testing.T) {
 	tests := []struct {
 		input, want string
@@ -113,5 +112,37 @@ func TestRelativeAge_InvalidTimestamp(t *testing.T) {
 	got := relativeAge("not-a-timestamp")
 	if got != "??" {
 		t.Errorf("relativeAge(invalid) = %q, want %q", got, "??")
+	}
+}
+
+func TestRelativeAge_FutureTimestamp(t *testing.T) {
+	// Future timestamps produce negative durations; should still return seconds
+	// (graceful handling — no panic, returns a string).
+	ts := time.Now().Add(10 * time.Minute).UTC().Format("2006-01-02 15:04:05")
+	got := relativeAge(ts)
+	if got == "" || got == "??" {
+		t.Errorf("relativeAge(future) = %q, expected non-empty non-error result", got)
+	}
+}
+
+func TestRelativeAge_VeryOld(t *testing.T) {
+	// Timestamps over a year old should return days.
+	ts := time.Now().Add(-400 * 24 * time.Hour).UTC().Format("2006-01-02 15:04:05")
+	got := relativeAge(ts)
+	if got != "400d" {
+		t.Errorf("relativeAge(400 days ago) = %q, want %q", got, "400d")
+	}
+}
+
+func TestRelativeAge_ZeroTime(t *testing.T) {
+	// Zero-value time (0001-01-01) is parseable and very old; should not panic.
+	ts := time.Time{}.Format("2006-01-02 15:04:05")
+	got := relativeAge(ts)
+	if got == "" {
+		t.Error("relativeAge(zero time) returned empty string")
+	}
+	// Should return a large number of days (not panic or error).
+	if got == "??" {
+		t.Error("relativeAge(zero time) returned ?? but zero time is a valid format")
 	}
 }
