@@ -1291,37 +1291,6 @@ func renderHelpOverlay(width, activeTab int) string {
 	return b.String()
 }
 
-// renderAutopilotSlots returns a display of autopilot agent slot status.
-func (m Model) renderAutopilotSlots() string {
-	if m.autopilotSupervisor == nil {
-		return ""
-	}
-
-	slots := m.autopilotSupervisor.SlotStatus()
-	var b strings.Builder
-	b.WriteString(headerStyle().Render("Autopilot Agents"))
-	b.WriteString("  ")
-	b.WriteString(mutedStyle().Render("[A: stop]"))
-	b.WriteString("\n")
-
-	for _, slot := range slots {
-		if slot.Status == "idle" {
-			b.WriteString(mutedStyle().Render(fmt.Sprintf("  Slot %d: idle", slot.SlotNum)))
-		} else {
-			elapsed := slot.RunningFor.Round(time.Second)
-			title := slot.IssueTitle
-			if len(title) > 40 {
-				title = title[:37] + "..."
-			}
-			b.WriteString(statusRunningStyle().Render(fmt.Sprintf("  Slot %d: #%d %s (%s)",
-				slot.SlotNum, slot.IssueNumber, title, elapsed)))
-		}
-		b.WriteString("\n")
-	}
-
-	return b.String()
-}
-
 // truncateLine truncates a string to maxWidth characters, adding "..." if truncated.
 func truncateLine(s string, maxWidth int) string {
 	if maxWidth <= 0 {
