@@ -77,8 +77,12 @@ func TestRemoveStaleFiles(t *testing.T) {
 		}
 	}
 
-	if err := removeStaleFiles(dbPath); err != nil {
+	removed, err := removeStaleFiles(dbPath)
+	if err != nil {
 		t.Fatalf("removeStaleFiles: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Errorf("removed = %v, want both -shm and -wal", removed)
 	}
 
 	// Both should be gone.
@@ -94,8 +98,12 @@ func TestRemoveStaleFilesNoFiles(t *testing.T) {
 	dbPath := filepath.Join(dir, "nonexistent.db")
 
 	// Should not error when files don't exist.
-	if err := removeStaleFiles(dbPath); err != nil {
+	removed, err := removeStaleFiles(dbPath)
+	if err != nil {
 		t.Fatalf("removeStaleFiles on missing files: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want empty", removed)
 	}
 }
 

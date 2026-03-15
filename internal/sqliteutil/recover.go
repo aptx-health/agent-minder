@@ -28,12 +28,13 @@ func CheckAndRecover(db *sqlx.DB, dbPath string) (bool, error) {
 	if err := db.Ping(); err != nil {
 		if isIOError(err) {
 			_ = db.Close()
-			if removeErr := removeStaleFiles(dbPath); removeErr != nil {
-				return false, fmt.Errorf("WAL recovery failed for %s: %w (original: %v)", dbPath, removeErr, err)
+			removed, removeErr := removeStaleFiles(dbPath)
+			if removeErr != nil {
+				return false, fmt.Errorf("WAL recovery failed for %s (removed %v): %w", dbPath, removed, removeErr)
 			}
 			return false, nil
 		}
-		return false, fmt.Errorf("ping failed: %w", err)
+		return false, fmt.Errorf("ping failed for %s: %w", dbPath, err)
 	}
 
 	// Deeper check: integrity_check catches corrupted WAL state that ping misses.
@@ -41,16 +42,17 @@ func CheckAndRecover(db *sqlx.DB, dbPath string) (bool, error) {
 	if err := db.Get(&result, "PRAGMA integrity_check"); err != nil {
 		if isIOError(err) {
 			_ = db.Close()
-			if removeErr := removeStaleFiles(dbPath); removeErr != nil {
-				return false, fmt.Errorf("WAL recovery failed for %s: %w (original: %v)", dbPath, removeErr, err)
+			removed, removeErr := removeStaleFiles(dbPath)
+			if removeErr != nil {
+				return false, fmt.Errorf("WAL recovery failed for %s (removed %v): %w", dbPath, removed, removeErr)
 			}
 			return false, nil
 		}
-		return false, fmt.Errorf("integrity check failed: %w", err)
+		return false, fmt.Errorf("integrity check failed for %s: %w", dbPath, err)
 	}
 
 	if result != "ok" {
-		return false, fmt.Errorf("integrity check returned: %s", result)
+		return false, fmt.Errorf("integrity check for %s returned: %s", dbPath, result)
 	}
 
 	return true, nil
@@ -59,20 +61,24 @@ func CheckAndRecover(db *sqlx.DB, dbPath string) (bool, error) {
 // removeStaleFiles removes -shm and -wal files for a database path.
 // These files are safe to remove when no process has the database open,
 // and their removal allows SQLite to rebuild them on next connection.
-func removeStaleFiles(dbPath string) error {
+// Returns the list of files that were detected and removed.
+func removeStaleFiles(dbPath string) ([]string, error) {
+	var removed []string
 	var errs []string
 	for _, suffix := range []string{"-shm", "-wal"} {
 		path := dbPath + suffix
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
 				errs = append(errs, fmt.Sprintf("remove %s: %v", path, err))
+			} else {
+				removed = append(removed, suffix)
 			}
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("%s", strings.Join(errs, "; "))
+		return removed, fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
-	return nil
+	return removed, nil
 }
 
 // isIOError checks if an error is a SQLite disk I/O error (code 10).
