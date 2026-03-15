@@ -29,6 +29,19 @@ func renderPrompt(task *db.AutopilotTask, baseBranch, owner, repo string) string
 	b.WriteString("3. Read the full issue and any linked issues for context\n")
 	b.WriteString("4. Explore the codebase to understand the relevant code\n\n")
 
+	b.WriteString("## Pre-check: assess complexity before writing any code\n\n")
+	b.WriteString("After exploring the codebase but BEFORE making any changes, assess this task:\n")
+	b.WriteString("- How many files will need to change?\n")
+	b.WriteString("- Does this require architectural decisions or design trade-offs?\n")
+	b.WriteString("- Is this a cross-cutting refactor that touches many subsystems?\n\n")
+	b.WriteString("If ANY of the following are true, do NOT proceed with implementation:\n")
+	b.WriteString("- The change requires modifying more than 8 files\n")
+	b.WriteString("- The task requires significant architectural decisions not specified in the issue\n")
+	b.WriteString("- You are unsure how the pieces fit together after exploring the code\n\n")
+	b.WriteString("Instead, bail immediately: skip to the \"If you cannot proceed\" section below.\n")
+	b.WriteString("In your bail comment, include a detailed implementation plan with the specific files and changes needed,\n")
+	b.WriteString("so a human (or a future agent session with more context) can pick it up.\n\n")
+
 	b.WriteString("## Your decision\n\n")
 	b.WriteString("After exploring, decide:\n\n")
 

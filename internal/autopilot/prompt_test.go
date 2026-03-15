@@ -32,6 +32,12 @@ func TestRenderPrompt(t *testing.T) {
 		"--add-label \"in-progress\"",
 		"--add-label \"blocked\"",
 		"-R myorg/myrepo",
+		"Pre-check: assess complexity",
+		"BEFORE making any changes",
+		"more than 8 files",
+		"architectural decisions",
+		"bail immediately",
+		"detailed implementation plan",
 	}
 
 	for _, check := range checks {
