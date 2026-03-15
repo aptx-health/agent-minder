@@ -142,7 +142,6 @@ type Model struct {
 	analysisVP       viewport.Model
 	eventLogVP       viewport.Model
 	analysisExpanded bool // 'e' toggles 3-line vs proportional
-	showInfo         bool // 'i' toggles repos/topics detail
 
 	// Tracked items (refreshed on poll results).
 	trackedItems     []db.TrackedItem
@@ -205,6 +204,9 @@ type Model struct {
 
 	// Help overlay.
 	showHelp bool
+
+	// Warning banner (persistent, dismissible with 'w').
+	warningBanner string
 }
 
 // safeViewportKeyMap returns a viewport KeyMap that only uses arrow keys and
@@ -363,6 +365,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.events) > 50 {
 			m.events = m.events[len(m.events)-50:]
 		}
+		if event.Type == "warning" {
+			m.warningBanner = event.Summary
+		}
 		if event.Type == "polling" {
 			m.polling = true
 		}
@@ -517,9 +522,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case autopilotEventMsg:
 		event := autopilot.Event(msg)
+		eventType := "autopilot"
+		if event.Type == "warning" {
+			eventType = "warning"
+			m.warningBanner = event.Summary
+		}
 		m.events = append(m.events, poller.Event{
 			Time:    event.Time,
-			Type:    "autopilot",
+			Type:    eventType,
 			Summary: fmt.Sprintf("[%s] %s", event.Type, event.Summary),
 		})
 		if len(m.events) > 50 {
@@ -736,6 +746,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = !m.showHelp
 		m.resizeViewports()
 		return m, nil
+	case "d":
+		m.warningBanner = ""
+		return m, nil
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "p":
@@ -852,10 +865,6 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.settingsState.textarea.SetStyles(s)
 		m.settingsStatus = ""
 		m.mode = "settings"
-		m.resizeViewports()
-		return m, nil
-	case "d":
-		m.showInfo = !m.showInfo
 		m.resizeViewports()
 		return m, nil
 	case "t":

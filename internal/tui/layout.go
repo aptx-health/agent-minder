@@ -21,15 +21,21 @@ func (m Model) View() tea.View {
 	b.WriteString(m.renderHeader())
 	b.WriteString("\n")
 
-	// Info detail (repos/topics) — only when toggled.
-	if m.showInfo {
-		b.WriteString(m.renderInfoDetail())
-		b.WriteString("\n")
-	}
-
 	// Tab bar.
 	b.WriteString(m.renderTabBar())
 	b.WriteString("\n")
+
+	// Warning banner (persistent, dismiss with 'd').
+	if m.warningBanner != "" {
+		bannerText := fmt.Sprintf(" ⚠ %s  (press d to dismiss)", m.warningBanner)
+		maxW := m.width
+		if maxW <= 0 {
+			maxW = 80
+		}
+		banner := warningStyle().Width(maxW).Render(bannerText)
+		b.WriteString(banner)
+		b.WriteString("\n")
+	}
 
 	// Tab content: modal modes overlay tab content.
 	if m.mode == "settings" {
@@ -220,32 +226,6 @@ func (m Model) renderHeader() string {
 	// Line 2: goal.
 	goalText := fmt.Sprintf("  %s \u2014 %s", m.project.GoalType, m.project.GoalDescription)
 	b.WriteString(mutedStyle().Width(m.width).Render(goalText))
-	b.WriteString("\n")
-
-	return b.String()
-}
-
-// renderInfoDetail returns the expanded repos/topics listing (shown when showInfo is true).
-func (m Model) renderInfoDetail() string {
-	var b strings.Builder
-
-	repos, _ := m.store.GetRepos(m.project.ID)
-	b.WriteString(headerStyle().Render("Repos"))
-	b.WriteString("\n")
-	for _, r := range repos {
-		b.WriteString(textStyle().Render(fmt.Sprintf("  %s (%s)", r.ShortName, r.Path)))
-		b.WriteString("\n")
-	}
-
-	topics, _ := m.store.GetTopics(m.project.ID)
-	if len(topics) > 0 {
-		b.WriteString(headerStyle().Render("Topics"))
-		b.WriteString("\n")
-		for _, t := range topics {
-			b.WriteString(textStyle().Render(fmt.Sprintf("  %s", t.Name)))
-			b.WriteString("\n")
-		}
-	}
 	b.WriteString("\n")
 
 	return b.String()
@@ -515,6 +495,8 @@ func (m *Model) rebuildEventLogContent() {
 			style = userMsgStyle()
 		case "broadcast":
 			style = broadcastStyle()
+		case "warning":
+			style = warningStyle()
 		case "error":
 			style = errorStyle()
 		default:
@@ -568,17 +550,6 @@ func (m *Model) resizeViewports() {
 func (m Model) computeHeightBudget() (analysisH, eventLogH int) {
 	fixed := 2 // header (title + goal)
 	fixed += 1 // blank line after header
-
-	if m.showInfo {
-		repos, _ := m.store.GetRepos(m.project.ID)
-		topics, _ := m.store.GetTopics(m.project.ID)
-		fixed += 1 + len(repos) // "Repos" header + repo lines
-		if len(topics) > 0 {
-			fixed += 1 + len(topics) // "Topics" header + topic lines
-		}
-		fixed += 1 // blank line after info
-	}
-
 	fixed += 1 // tab bar
 	fixed += 1 // blank line after tab bar
 	fixed += m.bottomBarHeight()
@@ -940,7 +911,6 @@ var (
 	globalHints = []helpHint{
 		{"1/2/tab", "switch tabs"},
 		{"s", "settings"},
-		{"d", "details"},
 		{"t", "theme"},
 		{"\u2191/\u2193", "scroll"},
 		{"?", "close help"},
