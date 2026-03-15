@@ -273,6 +273,8 @@ func (m Model) renderAutopilotRunningContent() string {
 		}
 	}
 
+	b.WriteString("\n")
+
 	// Task list header.
 	expandHint := "e: expand"
 	if m.autopilotTasksExpanded {
@@ -840,6 +842,7 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 				slots := m.autopilotSupervisor.SlotStatus()
 				fixed += 1 // "Slots" header
 				fixed += len(slots)
+				fixed += 1 // blank line between slots and tasks
 			}
 			fixed += 1 // "Tasks" header
 			fixed += 1 // trailing newline
@@ -1070,7 +1073,11 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render("enter: launch • esc: cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "stop-confirm" {
-			b.WriteString(helpStyle().Render("enter: stop • esc: cancel"))
+			b.WriteString(warningStyle().Render("  ⚠ Stop all running agents? "))
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": stop • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.autopilotStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))

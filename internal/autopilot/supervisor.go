@@ -484,6 +484,10 @@ func (s *Supervisor) convertTrackedItems(ctx context.Context) ([]*db.AutopilotTa
 		if hasLabel(liveStatus.Labels, skipLabel) {
 			continue
 		}
+		// Skip issues already being worked on, awaiting review, or blocked.
+		if hasLabel(liveStatus.Labels, "in-progress") || hasLabel(liveStatus.Labels, "needs-review") || hasLabel(liveStatus.Labels, "blocked") {
+			continue
+		}
 
 		// Fetch issue body.
 		body := ""
@@ -675,6 +679,11 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 		return
 	}
 
+	// Don't launch new agents if the context is cancelled (e.g. Stop() was called).
+	if ctx.Err() != nil {
+		return
+	}
+
 	for i, slot := range s.slots {
 		if slot != nil {
 			continue // Slot occupied.
@@ -740,6 +749,10 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 			continue
 		}
 		if hasLabel(liveStatus.Labels, skipLabel) {
+			continue
+		}
+		// Skip issues already being worked on, awaiting review, or blocked.
+		if hasLabel(liveStatus.Labels, "in-progress") || hasLabel(liveStatus.Labels, "needs-review") || hasLabel(liveStatus.Labels, "blocked") {
 			continue
 		}
 

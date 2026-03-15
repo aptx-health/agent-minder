@@ -788,7 +788,7 @@ func (s *Store) ResetStaleAutopilotTasks(projectID int64) (int, error) {
 	result, err := s.db.Exec(`
 		UPDATE autopilot_tasks
 		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
-		    started_at = NULL, completed_at = NULL
+		    started_at = '', completed_at = ''
 		WHERE project_id = ? AND (
 			status = 'running'
 			OR (status = 'bailed' AND completed_at IS NULL)
@@ -806,7 +806,7 @@ func (s *Store) ResetAutopilotTask(id int64) error {
 	_, err := s.db.Exec(`
 		UPDATE autopilot_tasks
 		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
-		    started_at = NULL, completed_at = NULL, pr_number = 0
+		    started_at = '', completed_at = '', pr_number = 0
 		WHERE id = ?
 	`, id)
 	return err
