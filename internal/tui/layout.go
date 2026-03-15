@@ -38,6 +38,14 @@ func (m Model) View() tea.View {
 		b.WriteString("\n")
 	}
 
+	// Log viewer overlay: full-screen modal that replaces all tab content.
+	if m.showLogViewer {
+		b.WriteString(m.renderLogViewerOverlay())
+		v := tea.NewView(b.String())
+		v.AltScreen = true
+		return v
+	}
+
 	// Tab content: modal modes overlay tab content.
 	if m.mode == "settings" {
 		b.WriteString(m.renderSettingsView())

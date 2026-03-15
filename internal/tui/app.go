@@ -220,6 +220,15 @@ type Model struct {
 	// Help overlay.
 	showHelp bool
 
+	// Log viewer overlay.
+	showLogViewer     bool
+	logViewerTask     *db.AutopilotTask
+	logViewerVP       viewport.Model
+	logViewerContent  string
+	logViewerFileSize int64
+	logViewerAtBottom bool
+	logViewerStatus   string
+
 	// Warning banner (persistent, dismissible with 'w').
 	warningBanner string
 }
@@ -329,6 +338,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resizeViewports()
+		if m.showLogViewer {
+			m.logViewerVP.SetWidth(m.width)
+			m.logViewerVP.SetHeight(m.height - 4)
+		}
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -345,6 +358,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.rebuildEventLogContent()
 			// Fall through to handle the keypress normally.
+		}
+
+		// Log viewer overlay captures all keys when open.
+		if m.showLogViewer {
+			return m.updateLogViewer(msg)
 		}
 
 		switch m.mode {
@@ -594,6 +612,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearAutopilotStatusMsg:
 		m.autopilotStatus = ""
+		return m, nil
+
+	case logRefreshMsg:
+		if !m.showLogViewer {
+			return m, nil
+		}
+		m.refreshLogContent()
+		// Check if task is still running (refresh task status from our list).
+		stillRunning := false
+		if m.logViewerTask != nil {
+			for _, t := range m.autopilotTasks {
+				if t.IssueNumber == m.logViewerTask.IssueNumber {
+					m.logViewerTask.Status = t.Status
+					stillRunning = t.Status == "running"
+					break
+				}
+			}
+		}
+		if stillRunning {
+			return m, logRefreshTick()
+		}
+		return m, nil
+
+	case clearLogViewerStatusMsg:
+		m.logViewerStatus = ""
 		return m, nil
 
 	case filterChoicesMsg:
@@ -1092,13 +1135,18 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		task := m.selectedAutopilotTask()
-		if task == nil || task.AgentLog == "" {
+		if task == nil {
 			return m, nil
 		}
-		m.autopilotStatus = "Log viewer coming soon — log at: " + task.AgentLog
-		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
-			return clearAutopilotStatusMsg{}
-		})
+		if task.AgentLog == "" {
+			m.autopilotStatus = "No log available for this task"
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		taskCopy := *task
+		cmd := m.openLogViewer(&taskCopy)
+		return m, cmd
 
 	case "D":
 		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
@@ -1118,6 +1166,26 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return clearAutopilotStatusMsg{}
 		})
 	}
+	return m, nil
+}
+
+func (m Model) updateLogViewer(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc":
+		m.closeLogViewer()
+		m.resizeViewports()
+		return m, nil
+	case "c":
+		cmd := m.copyLogPath()
+		return m, cmd
+	case "up", "down", "pgup", "pgdown":
+		var cmd tea.Cmd
+		m.logViewerVP, cmd = m.logViewerVP.Update(msg)
+		// Track whether user is at the bottom for auto-scroll.
+		m.logViewerAtBottom = m.logViewerVP.AtBottom()
+		return m, cmd
+	}
+	// Swallow all other keys — modal overlay.
 	return m, nil
 }
 
