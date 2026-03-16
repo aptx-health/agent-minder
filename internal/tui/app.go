@@ -103,9 +103,9 @@ type clearTrackStatusMsg struct{}
 
 // autopilotPrepareResultMsg is sent when autopilot issue fetch completes.
 type autopilotPrepareResultMsg struct {
-	total     int
-	unblocked int
-	err       error
+	total   int
+	options []autopilot.DepOption
+	err     error
 }
 
 // autopilotEventMsg wraps an autopilot supervisor event.
@@ -116,8 +116,21 @@ type clearAutopilotStatusMsg struct{}
 
 // rebuildDepsResultMsg is sent when a dep graph rebuild completes.
 type rebuildDepsResultMsg struct {
+	options []autopilot.DepOption
+	err     error
+}
+
+// applyDepOptionResultMsg is sent when a dep option is applied (during running rebuild).
+type applyDepOptionResultMsg struct {
 	result autopilot.RebuildResult
 	err    error
+}
+
+// autopilotApplyResultMsg is sent when a dep option is applied during initial prepare flow.
+type autopilotApplyResultMsg struct {
+	total     int
+	unblocked int
+	err       error
 }
 
 // reviewSessionResultMsg is sent when a review session launch completes.
@@ -211,7 +224,7 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor       *autopilot.Supervisor
-	autopilotMode             string // "", "scan-confirm", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "review-confirm", "completed"
+	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "review-confirm", "completed"
 	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
 	autopilotStatus           string
 	autopilotTotal            int
@@ -221,11 +234,13 @@ type Model struct {
 	autopilotTaskVP           viewport.Model
 
 	// Autopilot task list cursor and navigation.
-	autopilotTasks         []db.AutopilotTask // sorted task list for navigation
-	autopilotCursor        int                // index into autopilotTasks
-	autopilotSelectedIssue int                // issue number for pinning cursor across refreshes
-	autopilotPaused        bool               // tracks pause state for display
-	autopilotDepGuidance   string             // user guidance for dep graph analysis
+	autopilotTasks         []db.AutopilotTask    // sorted task list for navigation
+	autopilotCursor        int                   // index into autopilotTasks
+	autopilotSelectedIssue int                   // issue number for pinning cursor across refreshes
+	autopilotPaused        bool                  // tracks pause state for display
+	autopilotDepGuidance   string                // user guidance for dep graph analysis
+	autopilotDepOptions    []autopilot.DepOption // dep graph options from LLM
+	autopilotDepSelection  int                   // 0-2, index into autopilotDepOptions
 
 	// Rebuild deps mode.
 	rebuildDepsInput  textarea.Model
@@ -503,7 +518,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
-	case rebuildDepsResultMsg:
+	case applyDepOptionResultMsg:
 		if msg.err != nil {
 			m.rebuildDepsStatus = fmt.Sprintf("Error: %v", msg.err)
 		} else {
@@ -521,26 +536,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.rebuildAutopilotTaskContent()
-		// Update confirm screen counts if still on confirm.
-		if m.autopilotMode == "confirm" && m.autopilotSupervisor != nil {
-			allTasks, err := m.store.GetAutopilotTasks(m.project.ID)
-			if err == nil {
-				active := 0
-				for _, t := range allTasks {
-					if t.Status != "skipped" {
-						active++
-					}
-				}
-				m.autopilotTotal = active
-			}
-			unblockedTasks, err := m.store.QueuedUnblockedTasks(m.project.ID)
-			if err == nil {
-				m.autopilotUnblocked = len(unblockedTasks)
-			}
+		return m, nil
+
+	case rebuildDepsResultMsg:
+		if msg.err != nil {
+			m.rebuildDepsStatus = fmt.Sprintf("Error: %v", msg.err)
+			return m, nil
 		}
-		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
-			return clearRebuildDepsStatusMsg{}
-		})
+		// Got new options — enter dep-select mode.
+		m.autopilotDepOptions = msg.options
+		m.autopilotDepSelection = 0
+		m.rebuildDepsStatus = ""
+		if len(msg.options) > 0 {
+			m.autopilotUnblocked = msg.options[0].Unblocked
+		}
+		// If we were in running/completed mode, go to dep-select for rebuild.
+		if m.autopilotMode == "running" || m.autopilotMode == "completed" || m.autopilotMode == "confirm" {
+			m.autopilotMode = "dep-select"
+		}
+		m.rebuildAutopilotTaskContent()
+		return m, nil
+
+	case autopilotApplyResultMsg:
+		m.polling = false
+		if msg.err != nil {
+			m.autopilotStatus = fmt.Sprintf("Error applying deps: %v", msg.err)
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		m.autopilotTotal = msg.total
+		m.autopilotUnblocked = msg.unblocked
+		m.autopilotMode = "confirm"
+		m.autopilotStatus = ""
+		m.autopilotDepOptions = nil
+		m.rebuildAutopilotTaskContent()
+		return m, nil
 
 	case clearRebuildDepsStatusMsg:
 		m.rebuildDepsStatus = ""
@@ -652,8 +685,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.autopilotTotal = msg.total
-		m.autopilotUnblocked = msg.unblocked
-		m.autopilotMode = "confirm"
+		m.autopilotDepOptions = msg.options
+		m.autopilotDepSelection = 0
+		if len(msg.options) > 0 {
+			m.autopilotUnblocked = msg.options[0].Unblocked
+		}
+		m.autopilotMode = "dep-select"
 		m.autopilotStatus = ""
 		m.rebuildAutopilotTaskContent() // populate task list for dep graph display
 		if m.activeTab != tabAutopilot {
@@ -887,6 +924,39 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.resizeViewports()
 			return m, m.rebuildDepsInput.Focus()
+		}
+	}
+	if m.autopilotMode == "dep-select" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "left":
+			if n := len(m.autopilotDepOptions); n > 0 {
+				m.autopilotDepSelection = (m.autopilotDepSelection - 1 + n) % n
+				m.autopilotUnblocked = m.autopilotDepOptions[m.autopilotDepSelection].Unblocked
+			}
+			return m, nil
+		case "right":
+			if n := len(m.autopilotDepOptions); n > 0 {
+				m.autopilotDepSelection = (m.autopilotDepSelection + 1) % n
+				m.autopilotUnblocked = m.autopilotDepOptions[m.autopilotDepSelection].Unblocked
+			}
+			return m, nil
+		case "enter":
+			return m.applyDepSelection()
+		case "G":
+			m.mode = "dep-guidance"
+			m.rebuildDepsStatus = ""
+			m.rebuildDepsInput.Reset()
+			if m.width > 4 {
+				m.rebuildDepsInput.SetWidth(m.width - 4)
+			}
+			m.resizeViewports()
+			return m, m.rebuildDepsInput.Focus()
+		case "esc":
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			m.autopilotStatus = ""
+			m.autopilotDepOptions = nil
+			return m, nil
 		}
 	}
 	if m.autopilotMode == "confirm" && m.activeTab == tabAutopilot {
@@ -1440,6 +1510,10 @@ func (m Model) updateDepGuidance(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.rebuildDepsInput.Blur()
 		m.resizeViewports()
 		if strings.TrimSpace(m.autopilotDepGuidance) != "" {
+			// If we're in dep-select or scan-confirm with options, regenerate immediately.
+			if m.autopilotMode == "dep-select" && m.autopilotSupervisor != nil {
+				return m.prepareAutopilot()
+			}
 			m.autopilotStatus = "Guidance saved — will apply during analysis"
 		} else {
 			m.autopilotStatus = ""
@@ -1467,8 +1541,8 @@ func (m Model) updateRebuildDeps(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.rebuildDepsInput.Blur()
 		sup := m.autopilotSupervisor
 		return m, func() tea.Msg {
-			result, err := sup.RebuildDependencies(context.Background(), guidance)
-			return rebuildDepsResultMsg{result: result, err: err}
+			options, err := sup.RebuildDependencies(context.Background(), guidance)
+			return rebuildDepsResultMsg{options: options, err: err}
 		}
 	}
 
@@ -1918,8 +1992,59 @@ func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
 	guidance := m.autopilotDepGuidance
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-		total, unblocked, err := sup.Prepare(context.Background(), guidance)
-		return autopilotPrepareResultMsg{total: total, unblocked: unblocked, err: err}
+		total, options, err := sup.Prepare(context.Background(), guidance)
+		return autopilotPrepareResultMsg{total: total, options: options, err: err}
+	})
+}
+
+// applyDepSelection applies the selected dep option and transitions to confirm.
+func (m Model) applyDepSelection() (tea.Model, tea.Cmd) {
+	sup := m.autopilotSupervisor
+	if sup == nil || len(m.autopilotDepOptions) == 0 {
+		m.autopilotMode = ""
+		return m, nil
+	}
+
+	idx := m.autopilotDepSelection
+	if idx >= len(m.autopilotDepOptions) {
+		idx = 0
+	}
+	opt := m.autopilotDepOptions[idx]
+
+	// If we came from a running rebuild, use ApplyRebuildDepOption.
+	if m.autopilotSupervisor != nil && m.autopilotSupervisor.IsActive() {
+		m.autopilotMode = "running"
+		m.autopilotDepOptions = nil
+		return m, func() tea.Msg {
+			result, err := sup.ApplyRebuildDepOption(context.Background(), opt)
+			return applyDepOptionResultMsg{result: result, err: err}
+		}
+	}
+
+	// Initial prepare flow — apply and go to confirm.
+	m.autopilotStatus = "Applying dependencies..."
+	m.polling = true
+	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+		err := sup.ApplyDepOption(context.Background(), opt)
+		if err != nil {
+			return autopilotApplyResultMsg{err: err}
+		}
+		// Count active and unblocked tasks.
+		allTasks, err := m.store.GetAutopilotTasks(m.project.ID)
+		if err != nil {
+			return autopilotApplyResultMsg{err: err}
+		}
+		active := 0
+		for _, t := range allTasks {
+			if t.Status != "skipped" {
+				active++
+			}
+		}
+		unblockedTasks, err := m.store.QueuedUnblockedTasks(m.project.ID)
+		if err != nil {
+			return autopilotApplyResultMsg{err: err}
+		}
+		return autopilotApplyResultMsg{total: active, unblocked: len(unblockedTasks)}
 	})
 }
 
