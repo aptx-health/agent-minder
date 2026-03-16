@@ -109,8 +109,8 @@ func newSettingsState(project *db.Project) *settingsState {
 				unit:        "USD",
 			},
 			{
-				label:       "Autopilot skip label",
-				description: "Issues with this label are excluded",
+				label:       "Autopilot skip label(s)",
+				description: "Comma-separated labels to exclude from autopilot",
 				value:       project.AutopilotSkipLabel,
 			},
 			{
@@ -180,6 +180,14 @@ func (m Model) updateSettingsSelectField(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 		}
 		ss.step = settingsStepEditValue
 		ss.input.SetValue(field.value)
+		// Widen char limit for skip labels (comma-separated).
+		if field.label == "Autopilot skip label(s)" {
+			ss.input.CharLimit = 200
+			ss.input.SetWidth(60)
+		} else {
+			ss.input.CharLimit = 10
+			ss.input.SetWidth(20)
+		}
 		cmd := ss.input.Focus()
 		return m, cmd
 	}
@@ -244,7 +252,7 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 			}
 			m.project.AutopilotMaxBudgetUSD = f
 			return m.saveSettingsField(ss, field.label, fmt.Sprintf("%.2f", f))
-		case "Autopilot skip label":
+		case "Autopilot skip label(s)":
 			m.project.AutopilotSkipLabel = strings.TrimSpace(raw)
 			return m.saveSettingsField(ss, field.label, strings.TrimSpace(raw))
 		case "Autopilot base branch":
@@ -337,6 +345,23 @@ func (m Model) saveSettingsField(ss *settingsState, label, displayValue string) 
 	}
 }
 
+// parseSkipLabels splits a comma-separated label string, trims whitespace,
+// drops empties, and returns ["no-agent"] when the result is empty.
+// This mirrors the runtime skipMatcher logic without importing autopilot.
+func parseSkipLabels(raw string) []string {
+	var labels []string
+	for _, part := range strings.Split(raw, ",") {
+		s := strings.TrimSpace(part)
+		if s != "" {
+			labels = append(labels, s)
+		}
+	}
+	if len(labels) == 0 {
+		return []string{"no-agent"}
+	}
+	return labels
+}
+
 // renderSettingsView renders the settings dialog.
 func (m Model) renderSettingsView() string {
 	ss := m.settingsState
@@ -375,11 +400,25 @@ func (m Model) renderSettingsView() string {
 
 	case settingsStepEditValue:
 		f := ss.fields[ss.fieldIdx]
-		b.WriteString(textStyle().Render(fmt.Sprintf("  %s (%s):", f.label, f.unit)))
+		if f.unit != "" {
+			b.WriteString(textStyle().Render(fmt.Sprintf("  %s (%s):", f.label, f.unit)))
+		} else {
+			b.WriteString(textStyle().Render(fmt.Sprintf("  %s:", f.label)))
+		}
 		b.WriteString("\n")
 		b.WriteString("  ")
 		b.WriteString(ss.input.View())
 		b.WriteString("\n")
+		// Show parsed label preview for skip labels.
+		if f.label == "Autopilot skip label(s)" {
+			labels := parseSkipLabels(ss.input.Value())
+			var parts []string
+			for _, l := range labels {
+				parts = append(parts, fmt.Sprintf("[%s]", l))
+			}
+			b.WriteString(mutedStyle().Render(fmt.Sprintf("  → Will match: %s", strings.Join(parts, " "))))
+			b.WriteString("\n")
+		}
 		if ss.err != "" {
 			b.WriteString("  ")
 			b.WriteString(errorStyle().Render(ss.err))

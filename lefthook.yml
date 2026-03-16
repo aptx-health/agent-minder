@@ -3,8 +3,8 @@ pre-commit:
   commands:
     build:
       run: go build ./...
-    vet:
-      run: go vet ./...
+    lint:
+      run: golangci-lint run ./...
     fmt:
       glob: "*.go"
       run: |

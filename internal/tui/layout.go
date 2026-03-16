@@ -223,7 +223,12 @@ func (m Model) renderAutopilotTab() string {
 		b.WriteString("\n\n")
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Max agents:     %d", m.project.AutopilotMaxAgents)))
 		b.WriteString("\n")
-		b.WriteString(textStyle().Render(fmt.Sprintf("  Skip label:     %s", m.project.AutopilotSkipLabel)))
+		skipLabels := parseSkipLabels(m.project.AutopilotSkipLabel)
+		var skipParts []string
+		for _, l := range skipLabels {
+			skipParts = append(skipParts, fmt.Sprintf("[%s]", l))
+		}
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Skip label(s):  %s", strings.Join(skipParts, " "))))
 		b.WriteString("\n")
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Max turns:      %d", m.project.AutopilotMaxTurns)))
 		b.WriteString("\n")
