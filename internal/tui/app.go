@@ -599,6 +599,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autopilotUnblocked = msg.unblocked
 		m.autopilotMode = "confirm"
 		m.autopilotStatus = ""
+		m.rebuildAutopilotTaskContent() // populate task list for dep graph display
 		if m.activeTab != tabAutopilot {
 			m.autopilotHasNew = true
 		}

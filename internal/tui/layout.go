@@ -242,6 +242,12 @@ func (m Model) renderAutopilotTab() string {
 		b.WriteString("\n")
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Will launch up to %d agents", m.project.AutopilotMaxAgents)))
 		b.WriteString("\n")
+		// Show dep graph at confirm time so user can verify before launching.
+		depGraph := m.renderDepGraph()
+		if depGraph != "" {
+			b.WriteString("\n")
+			b.WriteString(depGraph)
+		}
 		return b.String()
 	}
 
