@@ -1689,3 +1689,46 @@ func TestParseDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestPerTierProviderColumns(t *testing.T) {
+	store := openTestDB(t)
+
+	// Create project without setting per-tier providers — they should default to "".
+	p := &Project{
+		Name:               "tier-test",
+		MinderIdentity:     "tier-test/minder",
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	got, err := store.GetProject("tier-test")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if got.LLMSummarizerProvider != "" {
+		t.Errorf("LLMSummarizerProvider = %q, want empty", got.LLMSummarizerProvider)
+	}
+	if got.LLMAnalyzerProvider != "" {
+		t.Errorf("LLMAnalyzerProvider = %q, want empty", got.LLMAnalyzerProvider)
+	}
+
+	// Update with per-tier providers.
+	got.LLMSummarizerProvider = "openai"
+	got.LLMAnalyzerProvider = "anthropic"
+	if err := store.UpdateProject(got); err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+
+	got2, _ := store.GetProjectByID(got.ID)
+	if got2.LLMSummarizerProvider != "openai" {
+		t.Errorf("after update LLMSummarizerProvider = %q, want %q", got2.LLMSummarizerProvider, "openai")
+	}
+	if got2.LLMAnalyzerProvider != "anthropic" {
+		t.Errorf("after update LLMAnalyzerProvider = %q, want %q", got2.LLMAnalyzerProvider, "anthropic")
+	}
+}
