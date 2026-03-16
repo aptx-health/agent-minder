@@ -156,7 +156,31 @@ func runInit(cmd *cobra.Command, args []string) error {
 	idlePauseMin := promptMinutes(reader, "Auto-pause after idle (minutes, 0=disabled)", 240, 0, 1440)
 	idlePauseSec := int(idlePauseMin.Seconds())
 
-	// 7. Select LLM provider from configured providers.
+	// 7. Autopilot skip label(s).
+	fmt.Printf("\nAutopilot skip label(s) [no-agent]:\n")
+	fmt.Printf("  (comma-separated, e.g. \"no-agent, manual, human-only\")\n> ")
+	skipLabelInput := readLine(reader)
+	skipLabel := ""
+	if skipLabelInput != "" {
+		skipLabel = skipLabelInput
+		// Show a preview of parsed labels.
+		var parsed []string
+		for _, part := range strings.Split(skipLabel, ",") {
+			s := strings.TrimSpace(part)
+			if s != "" {
+				parsed = append(parsed, s)
+			}
+		}
+		if len(parsed) > 0 {
+			var parts []string
+			for _, l := range parsed {
+				parts = append(parts, fmt.Sprintf("[%s]", l))
+			}
+			fmt.Printf("  Will match: %s\n", strings.Join(parts, " "))
+		}
+	}
+
+	// 8. Select LLM provider from configured providers.
 	llmProvider := "anthropic"
 	configured := config.ConfiguredProviders()
 	if len(configured) == 0 {
@@ -177,7 +201,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 8. Write to database.
+	// 9. Write to database.
 	project := &db.Project{
 		Name:                projectName,
 		GoalType:            goal.Name,
@@ -187,6 +211,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		MessageTTLSec:       int(ttl.Seconds()),
 		AutoEnrollWorktrees: autoEnrollBool,
 		IdlePauseSec:        idlePauseSec,
+		AutopilotSkipLabel:  skipLabel,
 		MinderIdentity:      projectName + "/minder",
 		LLMProvider:         llmProvider,
 		LLMModel:            "claude-haiku-4-5",
