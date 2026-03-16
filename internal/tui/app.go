@@ -116,8 +116,8 @@ type clearAutopilotStatusMsg struct{}
 
 // rebuildDepsResultMsg is sent when a dep graph rebuild completes.
 type rebuildDepsResultMsg struct {
-	unblocked int
-	err       error
+	result autopilot.RebuildResult
+	err    error
 }
 
 // autopilotTickMsg triggers periodic refresh of task list and slot status.
@@ -496,14 +496,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rebuildDepsResultMsg:
 		if msg.err != nil {
 			m.rebuildDepsStatus = fmt.Sprintf("Error: %v", msg.err)
-		} else if msg.unblocked == 0 {
-			m.rebuildDepsStatus = "Dep graph rebuilt — no tasks unblocked"
 		} else {
-			m.rebuildDepsStatus = fmt.Sprintf("Dep graph rebuilt — %d tasks unblocked", msg.unblocked)
+			var parts []string
+			if msg.result.Unblocked > 0 {
+				parts = append(parts, fmt.Sprintf("%d unblocked", msg.result.Unblocked))
+			}
+			if msg.result.Skipped > 0 {
+				parts = append(parts, fmt.Sprintf("%d skipped", msg.result.Skipped))
+			}
+			if len(parts) == 0 {
+				m.rebuildDepsStatus = "Dep graph rebuilt — no changes"
+			} else {
+				m.rebuildDepsStatus = fmt.Sprintf("Dep graph rebuilt — %s", strings.Join(parts, ", "))
+			}
 		}
 		m.rebuildAutopilotTaskContent()
 		// Update confirm screen counts if still on confirm.
 		if m.autopilotMode == "confirm" && m.autopilotSupervisor != nil {
+			allTasks, err := m.store.GetAutopilotTasks(m.project.ID)
+			if err == nil {
+				m.autopilotTotal = len(allTasks)
+			}
 			unblockedTasks, err := m.store.QueuedUnblockedTasks(m.project.ID)
 			if err == nil {
 				m.autopilotUnblocked = len(unblockedTasks)
@@ -1367,8 +1380,8 @@ func (m Model) updateRebuildDeps(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.rebuildDepsInput.Blur()
 		sup := m.autopilotSupervisor
 		return m, func() tea.Msg {
-			unblocked, err := sup.RebuildDependencies(context.Background(), guidance)
-			return rebuildDepsResultMsg{unblocked: unblocked, err: err}
+			result, err := sup.RebuildDependencies(context.Background(), guidance)
+			return rebuildDepsResultMsg{result: result, err: err}
 		}
 	}
 

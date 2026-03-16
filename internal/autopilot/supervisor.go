@@ -1134,13 +1134,18 @@ func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, max
 	return args
 }
 
+// RebuildResult holds the outcome of a dependency graph rebuild.
+type RebuildResult struct {
+	Unblocked int
+	Skipped   int
+}
+
 // RebuildDependencies re-analyzes the dependency graph for queued and blocked tasks,
 // incorporating user guidance. Running/done/review tasks are untouched.
-// Returns the number of tasks that became unblocked.
-func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string) (int, error) {
+func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string) (RebuildResult, error) {
 	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
-		return 0, fmt.Errorf("get tasks: %w", err)
+		return RebuildResult{}, fmt.Errorf("get tasks: %w", err)
 	}
 
 	// Partition tasks: rebuildable (queued + blocked) vs context-only (running, done, bailed, stopped, review).
@@ -1156,7 +1161,7 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 	}
 
 	if len(rebuildable) == 0 {
-		return 0, nil
+		return RebuildResult{}, nil
 	}
 
 	// Build issue numbers set for rebuildable tasks.
@@ -1235,8 +1240,10 @@ Dependencies can include issues from ALL sections — a queued task can depend o
 
 	promptParts = append(promptParts, `Respond with ONLY a JSON object. Keys are issue numbers (only for issues being re-analyzed), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
 
-IMPORTANT: Use integer values in the arrays, not strings.
-Example: {"42": [], "38": [42], "15": [42, 38]}
+If the user asks to skip or exclude an issue from autopilot, set its value to the string "skip" instead of an array.
+
+IMPORTANT: Use integer values in dependency arrays, not strings.
+Example: {"42": [], "38": [42], "15": "skip"}
 
 Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`)
 
@@ -1255,7 +1262,7 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 			Temperature: 0,
 		})
 		if err != nil {
-			return 0, fmt.Errorf("LLM call: %w", err)
+			return RebuildResult{}, fmt.Errorf("LLM call: %w", err)
 		}
 
 		content = strings.TrimSpace(resp.Content)
@@ -1281,18 +1288,28 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 				)
 				continue
 			}
-			return 0, fmt.Errorf("parse dep graph: %w", err)
+			return RebuildResult{}, fmt.Errorf("parse dep graph: %w", err)
 		}
 		break
 	}
 
 	// Update deps for rebuildable tasks.
+	var skipped int
 	for _, t := range rebuildable {
 		key := strconv.Itoa(t.IssueNumber)
 		rawDeps, ok := rawGraph[key]
 		if !ok {
 			// LLM didn't mention this task — clear its deps.
 			_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
+			continue
+		}
+
+		// Check for "skip" directive — user asked to exclude this task.
+		var skipStr string
+		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
+			_ = s.store.DeleteAutopilotTask(t.ID)
+			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
+			skipped++
 			continue
 		}
 
@@ -1321,7 +1338,7 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 	// Rebuild status map from fresh DB state.
 	freshTasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
-		return 0, fmt.Errorf("refresh tasks: %w", err)
+		return RebuildResult{}, fmt.Errorf("refresh tasks: %w", err)
 	}
 	statusMap := make(map[int]string, len(freshTasks))
 	for _, t := range freshTasks {
@@ -1369,9 +1386,9 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 		s.fillSlots(s.parentCtx)
 	}
 
-	s.emitEvent("completed", fmt.Sprintf("Dep graph rebuilt — %d tasks unblocked", unblocked), nil)
+	s.emitEvent("completed", fmt.Sprintf("Dep graph rebuilt — %d unblocked, %d skipped", unblocked, skipped), nil)
 
-	return unblocked, nil
+	return RebuildResult{Unblocked: unblocked, Skipped: skipped}, nil
 }
 
 // parseDeps parses a JSON dependency array into issue numbers.
