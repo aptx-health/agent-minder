@@ -819,10 +819,11 @@ func (m Model) renderDepGraph() string {
 			if len(title) > 50 {
 				title = title[:47] + "..."
 			}
-			suffix := ""
-			if t.status == "skipped" {
+			var suffix string
+			switch t.status {
+			case "skipped":
 				suffix = " [SKIPPED]"
-			} else if t.status == "manual" {
+			case "manual":
 				suffix = " [MANUAL]"
 			}
 			line := fmt.Sprintf("  %s #%d  %s%s", icon, t.issueNumber, title, suffix)
@@ -1030,10 +1031,11 @@ func (m Model) renderDepGraphFromOption(opt autopilot.DepOption) string {
 			if len(title) > 50 {
 				title = title[:47] + "..."
 			}
-			suffix := ""
-			if t.status == "skipped" {
+			var suffix string
+			switch t.status {
+			case "skipped":
 				suffix = " [SKIPPED]"
-			} else if t.status == "manual" {
+			case "manual":
 				suffix = " [MANUAL]"
 			}
 			line := fmt.Sprintf("    %s #%d  %s%s", icon, t.issueNumber, title, suffix)
