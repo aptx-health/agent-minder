@@ -1,0 +1,3 @@
+setup:
+  project: agent-minder
+  config: dev_personal
