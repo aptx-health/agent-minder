@@ -371,14 +371,22 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, o
 		s.emitEvent("error", fmt.Sprintf("Dependency graph failed: %v — falling back to sequential order", err), nil)
 		// Build a single sequential fallback option.
 		graph := make(map[string]json.RawMessage, len(tasks))
-		for i, t := range tasks {
+		var prevAgent int
+		firstAgent := true
+		for _, t := range tasks {
 			key := strconv.Itoa(t.IssueNumber)
-			if i == 0 {
+			if t.Status == "manual" {
+				graph[key] = json.RawMessage(`"manual"`)
+				continue
+			}
+			if firstAgent {
 				graph[key] = json.RawMessage("[]")
+				firstAgent = false
 			} else {
-				deps, _ := json.Marshal([]int{tasks[i-1].IssueNumber})
+				deps, _ := json.Marshal([]int{prevAgent})
 				graph[key] = json.RawMessage(deps)
 			}
+			prevAgent = t.IssueNumber
 		}
 		options = []DepOption{{
 			Name:      "Sequential (fallback)",
@@ -406,11 +414,17 @@ func (s *Supervisor) ApplyDepOption(ctx context.Context, opt DepOption) error {
 			continue
 		}
 
-		// Check for "skip" directive.
-		var skipStr string
-		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
-			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
-			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), &t)
+		// Check for string directives: "skip" or "manual".
+		var strVal string
+		if json.Unmarshal(rawDeps, &strVal) == nil {
+			switch strVal {
+			case "skip":
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
+				s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), &t)
+			case "manual":
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "manual")
+				s.emitEvent("warning", fmt.Sprintf("Task #%d is manual (non-AI) — watching for completion", t.IssueNumber), &t)
+			}
 			continue
 		}
 
@@ -535,8 +549,10 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.emitEvent("finished", "Autopilot cancelled", nil)
 				return
 			case <-reviewCheckTicker.C:
-				promoted := s.checkReviewTasks(ctx)
-				if promoted > 0 {
+				s.checkReviewTasks(ctx)
+				s.checkManualTasks(ctx)
+				unblocked := s.unblockSatisfiedTasks()
+				if unblocked > 0 {
 					s.fillSlots(ctx)
 				}
 			case <-discoveryTicker.C:
@@ -564,14 +580,15 @@ func (s *Supervisor) Launch(ctx context.Context) {
 			}
 			s.mu.Unlock()
 
-			// Check if there's any work left (running agents, queued tasks, or tasks in review).
+			// Check if there's any work left (running agents, queued tasks, tasks in review, or manual tasks being watched).
 			// Critical: paused + queued tasks must keep the loop alive — otherwise the
 			// supervisor exits when running agents finish during pause, losing queued work.
+			// Manual tasks keep the loop alive because dependents may unblock when they close.
 			hasWork := anyRunning
 			if !hasWork {
 				tasks, _ := s.store.GetAutopilotTasks(s.project.ID)
 				for _, t := range tasks {
-					if t.Status == "queued" || t.Status == "review" {
+					if t.Status == "queued" || t.Status == "review" || t.Status == "manual" || t.Status == "blocked" {
 						hasWork = true
 						break
 					}
@@ -676,7 +693,7 @@ func (s *Supervisor) StatusBlock() string {
 
 	// Summary counts.
 	tasks, _ := s.store.GetAutopilotTasks(s.project.ID)
-	var queued, running, review, done, bailed, stopped int
+	var queued, running, review, done, bailed, stopped, manual int
 	for _, t := range tasks {
 		switch t.Status {
 		case "queued":
@@ -691,9 +708,15 @@ func (s *Supervisor) StatusBlock() string {
 			bailed++
 		case "stopped":
 			stopped++
+		case "manual":
+			manual++
 		}
 	}
-	fmt.Fprintf(&b, "\nTask summary: %d queued, %d running, %d in review, %d done, %d bailed, %d stopped\n", queued, running, review, done, bailed, stopped)
+	summary := fmt.Sprintf("\nTask summary: %d queued, %d running, %d in review, %d done, %d bailed, %d stopped", queued, running, review, done, bailed, stopped)
+	if manual > 0 {
+		summary += fmt.Sprintf(", %d manual (watching)", manual)
+	}
+	fmt.Fprintf(&b, "%s\n", summary)
 
 	return b.String()
 }
@@ -720,22 +743,28 @@ func (s *Supervisor) DepGraph() string {
 	fmt.Fprintf(&b, "Generated: %s ago\n", time.Since(preparedAt).Round(time.Second))
 
 	// Summary counts.
-	var queued, running, review, done, bailed int
+	var dQueued, dRunning, dReview, dDone, dBailed, dManual int
 	for _, t := range tasks {
 		switch t.Status {
 		case "queued":
-			queued++
+			dQueued++
 		case "running":
-			running++
+			dRunning++
 		case "review":
-			review++
+			dReview++
 		case "done":
-			done++
+			dDone++
 		case "bailed":
-			bailed++
+			dBailed++
+		case "manual":
+			dManual++
 		}
 	}
-	fmt.Fprintf(&b, "Tasks: %d queued, %d running, %d review, %d done, %d bailed\n", queued, running, review, done, bailed)
+	depSummary := fmt.Sprintf("Tasks: %d queued, %d running, %d review, %d done, %d bailed", dQueued, dRunning, dReview, dDone, dBailed)
+	if dManual > 0 {
+		depSummary += fmt.Sprintf(", %d manual", dManual)
+	}
+	fmt.Fprintf(&b, "%s\n", depSummary)
 
 	// Compact adjacency list: #N (status) → [deps]
 	for _, t := range tasks {
@@ -761,18 +790,15 @@ func (s *Supervisor) DepGraph() string {
 }
 
 // convertTrackedItems reads the user's already-tracked issues and creates autopilot tasks.
+// Issues with the skip label are included as "manual" tasks — they won't get agent slots
+// but can block automated tasks and are watched for completion.
 func (s *Supervisor) convertTrackedItems(ctx context.Context) ([]*db.AutopilotTask, error) {
 	items, err := s.store.GetTrackedItems(s.project.ID)
 	if err != nil {
 		return nil, fmt.Errorf("get tracked items: %w", err)
 	}
 
-	// Filter out issues with the skip label, non-open items, and PRs.
-	skipLabel := s.project.AutopilotSkipLabel
-	if skipLabel == "" {
-		skipLabel = "no-agent"
-	}
-
+	matcher := newSkipMatcher(s.project.AutopilotSkipLabel)
 	ghClient := ghpkg.NewClient(s.ghToken)
 
 	var tasks []*db.AutopilotTask
@@ -790,11 +816,31 @@ func (s *Supervisor) convertTrackedItems(ctx context.Context) ([]*db.AutopilotTa
 		if liveStatus.State != "open" {
 			continue
 		}
-		if hasLabel(liveStatus.Labels, skipLabel) {
-			continue
-		}
-		// Skip issues already being worked on, awaiting review, or blocked.
-		if hasLabel(liveStatus.Labels, "in-progress") || hasLabel(liveStatus.Labels, "needs-review") || hasLabel(liveStatus.Labels, "blocked") {
+
+		// Issues with the skip label, or already being worked on externally
+		// (in-progress, needs-review, blocked), become manual tasks.
+		// They won't get agent slots but appear in the dep graph and are
+		// watched for completion so dependents auto-unblock.
+		isManual := matcher.matches(liveStatus.Labels) ||
+			hasLabel(liveStatus.Labels, "in-progress") ||
+			hasLabel(liveStatus.Labels, "needs-review") ||
+			hasLabel(liveStatus.Labels, "blocked")
+		if isManual {
+			body := ""
+			content, err := ghClient.FetchItemContent(ctx, item.Owner, item.Repo, item.Number, "issue")
+			if err == nil {
+				body = content.Body
+			}
+			tasks = append(tasks, &db.AutopilotTask{
+				ProjectID:    s.project.ID,
+				Owner:        item.Owner,
+				Repo:         item.Repo,
+				IssueNumber:  item.Number,
+				IssueTitle:   liveStatus.Title,
+				IssueBody:    body,
+				Dependencies: "[]",
+				Status:       "manual",
+			})
 			continue
 		}
 
@@ -838,11 +884,76 @@ func hasLabel(labels []string, target string) bool {
 	return false
 }
 
+// skipMatcher checks whether a label set matches the configured skip pattern.
+// The pattern supports:
+//   - Single label: "no-agent"
+//   - Comma-separated: "no-agent, manual, human-only"
+//   - Regex (future): "/no-agent|manual-.*/"
+//
+// Returns the first matching label (useful for logging) or "" if no match.
+type skipMatcher struct {
+	labels []string
+}
+
+func newSkipMatcher(pattern string) skipMatcher {
+	if pattern == "" {
+		return skipMatcher{labels: []string{"no-agent"}}
+	}
+	var labels []string
+	for _, part := range strings.Split(pattern, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			labels = append(labels, part)
+		}
+	}
+	if len(labels) == 0 {
+		labels = []string{"no-agent"}
+	}
+	return skipMatcher{labels: labels}
+}
+
+// matches returns true if any label in the set matches a skip label.
+func (sm skipMatcher) matches(labels []string) bool {
+	for _, l := range labels {
+		for _, skip := range sm.labels {
+			if l == skip {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *Supervisor) buildDepOptions(ctx context.Context, tasks []*db.AutopilotTask, guidance string) ([]DepOption, error) {
-	if len(tasks) <= 1 {
-		// Single task: return one option with no deps.
+	// Separate agent tasks from manual tasks.
+	var agentTasks, manualTasks []*db.AutopilotTask
+	for _, t := range tasks {
+		if t.Status == "manual" {
+			manualTasks = append(manualTasks, t)
+		} else {
+			agentTasks = append(agentTasks, t)
+		}
+	}
+
+	if len(agentTasks) == 0 {
+		// Only manual tasks — nothing for agents to do.
+		// Still build a graph with manual entries so they're visible.
+		graph := make(map[string]json.RawMessage, len(manualTasks))
+		for _, t := range manualTasks {
+			graph[strconv.Itoa(t.IssueNumber)] = json.RawMessage(`"manual"`)
+		}
+		return []DepOption{{
+			Name:      "No agent tasks",
+			Rationale: "Only manual (non-AI) tasks — watching for completion.",
+			Graph:     graph,
+			Unblocked: 0,
+		}}, nil
+	}
+
+	if len(agentTasks) <= 1 && len(manualTasks) == 0 {
+		// Single agent task, no manual tasks: return trivial option.
 		graph := make(map[string]json.RawMessage, 1)
-		graph[strconv.Itoa(tasks[0].IssueNumber)] = json.RawMessage("[]")
+		graph[strconv.Itoa(agentTasks[0].IssueNumber)] = json.RawMessage("[]")
 		return []DepOption{{
 			Name:      "No dependencies",
 			Rationale: "Only one task — no dependencies possible.",
@@ -860,7 +971,7 @@ func (s *Supervisor) buildDepOptions(ctx context.Context, tasks []*db.AutopilotT
 	// Build issue list for the LLM — include tasks being worked on.
 	var issueList strings.Builder
 	issueList.WriteString("## Issues to be worked on by agents:\n")
-	for _, t := range tasks {
+	for _, t := range agentTasks {
 		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
 		if t.IssueBody != "" {
 			body := t.IssueBody
@@ -871,7 +982,22 @@ func (s *Supervisor) buildDepOptions(ctx context.Context, tasks []*db.AutopilotT
 		}
 	}
 
-	// Include other tracked issues as context (skipped, closed, etc.)
+	// Include manual (non-AI) tasks — these are human-driven but can block agent tasks.
+	if len(manualTasks) > 0 {
+		issueList.WriteString("\n## Manual tasks (non-AI, human-driven — can block agent tasks, will be watched for completion):\n")
+		for _, t := range manualTasks {
+			fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+			if t.IssueBody != "" {
+				body := t.IssueBody
+				if len(body) > 200 {
+					body = body[:200] + "..."
+				}
+				fmt.Fprintf(&issueList, "  %s\n", body)
+			}
+		}
+	}
+
+	// Include other tracked issues as context (closed, etc.)
 	// so the LLM can identify external dependencies.
 	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
 	var contextList strings.Builder
@@ -894,27 +1020,28 @@ func (s *Supervisor) buildDepOptions(ctx context.Context, tasks []*db.AutopilotT
 	prompt := fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
 A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
 
-Dependencies can include issues from BOTH sections — an agent task can depend on a non-agent issue if that issue's work must be done first.
+Dependencies can include issues from ALL sections — an agent task can depend on a manual task or other tracked issue if that issue's work must be done first.
 
 %s%s
 Respond with ONLY a JSON array of exactly 3 dependency graph options, ranked from most likely correct to least likely. Each option has a "name", "rationale", and "graph" field.
 
-The "graph" is an object where keys are issue numbers (only for issues being worked on by agents), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+The "graph" is an object where:
+- Keys for AGENT tasks: values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+- Keys for MANUAL tasks: value MUST be the string "manual" — these are human-driven tasks that agents may depend on.
+- If the user asks to skip or exclude an issue, set its value to the string "skip" instead of an array.
 
-If the user asks to skip or exclude an issue, set its value to the string "skip" instead of an array.
-
-IMPORTANT: Use integer values in dependency arrays, not strings.
+IMPORTANT: Use integer values in dependency arrays, not strings. Agent tasks CAN depend on manual task issue numbers.
 
 The 3 options should represent meaningfully different dependency strategies:
 - Option 1: Your best analysis of actual dependencies
 - Option 2: An alternative interpretation (e.g., more conservative or more parallel)
 - Option 3: A different trade-off (e.g., maximum parallelism or stricter ordering)
 
-Example response:
+Example response (where #99 is a manual task):
 [
-  {"name": "Conservative — minimal deps", "rationale": "Only blocks issues that truly depend on schema changes.", "graph": {"42": [], "38": [42], "15": []}},
-  {"name": "Moderate — logical grouping", "rationale": "Groups related features; UI issues wait on API changes.", "graph": {"42": [], "38": [42], "15": [42]}},
-  {"name": "Maximum parallelism", "rationale": "All issues can start independently.", "graph": {"42": [], "38": [], "15": []}}
+  {"name": "Conservative — minimal deps", "rationale": "API work must wait for manual schema migration.", "graph": {"99": "manual", "42": [99], "38": [42], "15": []}},
+  {"name": "Moderate — logical grouping", "rationale": "Groups related features; UI issues wait on API changes.", "graph": {"99": "manual", "42": [99], "38": [42], "15": [42]}},
+  {"name": "Maximum parallelism", "rationale": "All agent issues can start independently.", "graph": {"99": "manual", "42": [], "38": [], "15": []}}
 ]`, issueList.String(), guidanceSection)
 
 	messages := []llm.Message{{Role: "user", Content: prompt}}
@@ -985,20 +1112,25 @@ Example response:
 	return options, nil
 }
 
-// countUnblocked counts how many tasks have no unsatisfied dependencies in a graph.
+// countUnblocked counts how many agent tasks have no unsatisfied dependencies in a graph.
+// Manual and skipped tasks are excluded from the count.
 func countUnblocked(graph map[string]json.RawMessage, tasks []*db.AutopilotTask) int {
 	count := 0
 	for _, t := range tasks {
+		// Manual tasks are not agent tasks — don't count them.
+		if t.Status == "manual" {
+			continue
+		}
 		key := strconv.Itoa(t.IssueNumber)
 		rawDeps, ok := graph[key]
 		if !ok {
 			count++ // not in graph = no deps
 			continue
 		}
-		// Check for "skip".
-		var skipStr string
-		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
-			continue // skipped tasks don't count as unblocked
+		// Check for "skip" or "manual".
+		var strVal string
+		if json.Unmarshal(rawDeps, &strVal) == nil && (strVal == "skip" || strVal == "manual") {
+			continue
 		}
 		var deps []int
 		if err := json.Unmarshal(rawDeps, &deps); err != nil {
@@ -1076,10 +1208,7 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 		return 0
 	}
 
-	skipLabel := s.project.AutopilotSkipLabel
-	if skipLabel == "" {
-		skipLabel = "no-agent"
-	}
+	matcher := newSkipMatcher(s.project.AutopilotSkipLabel)
 	ghClient := ghpkg.NewClient(s.ghToken)
 
 	var newTasks []*db.AutopilotTask
@@ -1096,11 +1225,29 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 		if err != nil || liveStatus.State != "open" {
 			continue
 		}
-		if hasLabel(liveStatus.Labels, skipLabel) {
-			continue
-		}
-		// Skip issues already being worked on, awaiting review, or blocked.
-		if hasLabel(liveStatus.Labels, "in-progress") || hasLabel(liveStatus.Labels, "needs-review") || hasLabel(liveStatus.Labels, "blocked") {
+
+		// Issues with skip label or already being worked on externally
+		// become manual tasks (watched for completion).
+		isManual := matcher.matches(liveStatus.Labels) ||
+			hasLabel(liveStatus.Labels, "in-progress") ||
+			hasLabel(liveStatus.Labels, "needs-review") ||
+			hasLabel(liveStatus.Labels, "blocked")
+		if isManual {
+			body := ""
+			content, err := ghClient.FetchItemContent(ctx, item.Owner, item.Repo, item.Number, "issue")
+			if err == nil {
+				body = content.Body
+			}
+			newTasks = append(newTasks, &db.AutopilotTask{
+				ProjectID:    s.project.ID,
+				Owner:        item.Owner,
+				Repo:         item.Repo,
+				IssueNumber:  item.Number,
+				IssueTitle:   liveStatus.Title,
+				IssueBody:    body,
+				Dependencies: "[]",
+				Status:       "manual",
+			})
 			continue
 		}
 
@@ -1132,7 +1279,11 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 	}
 
 	for _, t := range newTasks {
-		s.emitEvent("discovered", fmt.Sprintf("New task #%d: %s", t.IssueNumber, t.IssueTitle), nil)
+		if t.Status == "manual" {
+			s.emitEvent("discovered", fmt.Sprintf("New manual task #%d: %s (watching for completion)", t.IssueNumber, t.IssueTitle), nil)
+		} else {
+			s.emitEvent("discovered", fmt.Sprintf("New task #%d: %s", t.IssueNumber, t.IssueTitle), nil)
+		}
 	}
 
 	// Warn that the dependency graph (built once during Prepare) may be stale.
@@ -1184,8 +1335,9 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.mu.Lock()
 		s.slots[slotIdx] = nil
 		s.mu.Unlock()
-		// Try to fill slots with newly unblocked work.
+		// Re-evaluate blocked tasks and fill slots with newly unblocked work.
 		// Use parentCtx (not the slot ctx which may be cancelled by StopAgent).
+		s.unblockSatisfiedTasks()
 		s.fillSlots(s.parentCtx)
 	}()
 
@@ -1357,6 +1509,86 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 	return promoted
 }
 
+// unblockSatisfiedTasks re-evaluates blocked tasks and promotes them to queued
+// when all their dependencies are satisfied. Returns the number of tasks unblocked.
+func (s *Supervisor) unblockSatisfiedTasks() int {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0
+	}
+
+	statusMap := make(map[int]string, len(tasks))
+	for _, t := range tasks {
+		statusMap[t.IssueNumber] = t.Status
+	}
+
+	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
+	trackedState := make(map[int]string, len(trackedItems))
+	for _, item := range trackedItems {
+		trackedState[item.Number] = item.State
+	}
+
+	unblocked := 0
+	for _, t := range tasks {
+		if t.Status != "blocked" {
+			continue
+		}
+		deps := parseDeps(t.Dependencies)
+		allSatisfied := true
+		for _, dep := range deps {
+			if taskStatus, ok := statusMap[dep]; ok {
+				if taskStatus != "done" {
+					allSatisfied = false
+					break
+				}
+			} else if state, ok := trackedState[dep]; ok {
+				if state == "open" {
+					allSatisfied = false
+					break
+				}
+			}
+		}
+		if allSatisfied {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+			s.emitEvent("warning", fmt.Sprintf("Task #%d unblocked — dependencies satisfied", t.IssueNumber), &t)
+			unblocked++
+		}
+	}
+	return unblocked
+}
+
+// checkManualTasks checks if any manual (non-AI) tasks have had their GitHub issues closed.
+// When a manual task's issue is closed, it's promoted to "done" so dependents unblock.
+// Returns the number of tasks promoted.
+func (s *Supervisor) checkManualTasks(ctx context.Context) int {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0
+	}
+
+	ghClient := ghpkg.NewClient(s.ghToken)
+	promoted := 0
+
+	for _, task := range tasks {
+		if task.Status != "manual" {
+			continue
+		}
+
+		item, err := ghClient.FetchItem(ctx, task.Owner, task.Repo, task.IssueNumber)
+		if err != nil {
+			continue
+		}
+
+		if item.State != "open" {
+			_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
+			promoted++
+			s.emitEvent("completed", fmt.Sprintf("Manual task #%d closed — dependents unblocked", task.IssueNumber), &task)
+		}
+	}
+
+	return promoted
+}
+
 func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask, exitCode int) string {
 	// Check if a PR was opened for this branch.
 	ghClient := ghpkg.NewClient(s.ghToken)
@@ -1466,13 +1698,14 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 		return nil, fmt.Errorf("get tasks: %w", err)
 	}
 
-	// Partition tasks: rebuildable (queued + blocked + skipped) vs context-only (running, done, bailed, stopped, review).
+	// Partition tasks: rebuildable (queued + blocked + skipped + manual) vs context-only (running, done, bailed, stopped, review).
 	// Skipped tasks are included so the user can un-skip them via guidance.
+	// Manual tasks are included so the LLM can wire them into the dep graph.
 	var rebuildable []*db.AutopilotTask
 	var contextTasks []*db.AutopilotTask
 	for i := range allTasks {
 		switch allTasks[i].Status {
-		case "queued", "blocked", "skipped":
+		case "queued", "blocked", "skipped", "manual":
 			rebuildable = append(rebuildable, &allTasks[i])
 		default:
 			contextTasks = append(contextTasks, &allTasks[i])
@@ -1483,10 +1716,20 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 		return nil, nil
 	}
 
+	// Separate agent tasks from manual tasks for distinct prompt sections.
+	var agentRebuildable, manualRebuildable []*db.AutopilotTask
+	for _, t := range rebuildable {
+		if t.Status == "manual" {
+			manualRebuildable = append(manualRebuildable, t)
+		} else {
+			agentRebuildable = append(agentRebuildable, t)
+		}
+	}
+
 	// Build issue list for the LLM.
 	var issueList strings.Builder
-	issueList.WriteString("## Issues to re-analyze dependencies for:\n")
-	for _, t := range rebuildable {
+	issueList.WriteString("## Agent issues to re-analyze dependencies for:\n")
+	for _, t := range agentRebuildable {
 		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
 		if t.IssueBody != "" {
 			body := t.IssueBody
@@ -1494,6 +1737,21 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 				body = body[:200] + "..."
 			}
 			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	// Include manual tasks in their own section.
+	if len(manualRebuildable) > 0 {
+		issueList.WriteString("\n## Manual tasks (non-AI, human-driven — can block agent tasks, watched for completion):\n")
+		for _, t := range manualRebuildable {
+			fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+			if t.IssueBody != "" {
+				body := t.IssueBody
+				if len(body) > 200 {
+					body = body[:200] + "..."
+				}
+				fmt.Fprintf(&issueList, "  %s\n", body)
+			}
 		}
 	}
 
@@ -1539,7 +1797,7 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 	promptParts = append(promptParts, fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
 A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
 
-Dependencies can include issues from ALL sections — a queued task can depend on a running, bailed, or external issue.
+Dependencies can include issues from ALL sections — an agent task can depend on a manual task, running task, or external issue.
 
 %s`, issueList.String()))
 
@@ -1553,22 +1811,23 @@ Dependencies can include issues from ALL sections — a queued task can depend o
 
 	promptParts = append(promptParts, `Respond with ONLY a JSON array of exactly 3 dependency graph options, ranked from most likely correct to least likely. Each option has a "name", "rationale", and "graph" field.
 
-The "graph" is an object where keys are issue numbers (only for issues being re-analyzed), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+The "graph" is an object where:
+- Keys for AGENT tasks: values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+- Keys for MANUAL tasks: value MUST be the string "manual" — these are human-driven tasks that agents may depend on.
+- If the user asks to skip or exclude an issue, set its value to the string "skip" instead of an array.
 
-If the user asks to skip or exclude an issue from autopilot, set its value to the string "skip" instead of an array.
-
-IMPORTANT: Use integer values in dependency arrays, not strings.
+IMPORTANT: Use integer values in dependency arrays, not strings. Agent tasks CAN depend on manual task issue numbers.
 
 The 3 options should represent meaningfully different dependency strategies:
 - Option 1: Your best analysis of actual dependencies
 - Option 2: An alternative interpretation (e.g., more conservative or more parallel)
 - Option 3: A different trade-off (e.g., maximum parallelism or stricter ordering)
 
-Example response:
+Example response (where #99 is a manual task):
 [
-  {"name": "Conservative — minimal deps", "rationale": "Only blocks issues that truly depend on schema changes.", "graph": {"42": [], "38": [42], "15": []}},
-  {"name": "Moderate — logical grouping", "rationale": "Groups related features; UI issues wait on API changes.", "graph": {"42": [], "38": [42], "15": [42]}},
-  {"name": "Maximum parallelism", "rationale": "All issues can start independently.", "graph": {"42": [], "38": [], "15": []}}
+  {"name": "Conservative — minimal deps", "rationale": "API work must wait for manual schema migration.", "graph": {"99": "manual", "42": [99], "38": [42], "15": []}},
+  {"name": "Moderate — logical grouping", "rationale": "Groups related features; UI issues wait on API changes.", "graph": {"99": "manual", "42": [99], "38": [42], "15": [42]}},
+  {"name": "Maximum parallelism", "rationale": "All agent issues can start independently.", "graph": {"99": "manual", "42": [], "38": [], "15": []}}
 ]`)
 
 	prompt := strings.Join(promptParts, "\n\n")
@@ -1649,11 +1908,11 @@ func (s *Supervisor) ApplyRebuildDepOption(ctx context.Context, opt DepOption) (
 		return RebuildResult{}, fmt.Errorf("get tasks: %w", err)
 	}
 
-	// Only update rebuildable tasks (queued, blocked, skipped).
+	// Only update rebuildable tasks (queued, blocked, skipped, manual).
 	var skipped int
 	for _, t := range allTasks {
 		switch t.Status {
-		case "queued", "blocked", "skipped":
+		case "queued", "blocked", "skipped", "manual":
 			// proceed
 		default:
 			continue
@@ -1667,15 +1926,22 @@ func (s *Supervisor) ApplyRebuildDepOption(ctx context.Context, opt DepOption) (
 			if t.Status == "skipped" {
 				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
 			}
+			// Manual tasks stay manual even if not mentioned.
 			continue
 		}
 
-		// Check for "skip" directive.
-		var skipStr string
-		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
-			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
-			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), &t)
-			skipped++
+		// Check for string directives: "skip" or "manual".
+		var strVal string
+		if json.Unmarshal(rawDeps, &strVal) == nil {
+			switch strVal {
+			case "skip":
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
+				s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), &t)
+				skipped++
+			case "manual":
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "manual")
+				s.emitEvent("warning", fmt.Sprintf("Task #%d is manual (non-AI) — watching for completion", t.IssueNumber), &t)
+			}
 			continue
 		}
 
@@ -1699,7 +1965,7 @@ func (s *Supervisor) ApplyRebuildDepOption(ctx context.Context, opt DepOption) (
 		}
 		_ = s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON))
 
-		// Un-skip if needed.
+		// Un-skip if needed (but don't un-manual).
 		if t.Status == "skipped" {
 			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
 		}

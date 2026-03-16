@@ -443,15 +443,17 @@ func (m *Model) rebuildAutopilotTaskContent() {
 		return
 	}
 
-	// Sort tasks by status priority: running → queued → blocked → review → done → bailed.
+	// Sort tasks by status priority: running → queued → blocked → manual → review → done → bailed → skipped.
 	statusOrder := map[string]int{
 		"running": 0,
 		"queued":  1,
 		"blocked": 2,
-		"review":  3,
-		"done":    4,
-		"bailed":  5,
-		"stopped": 6,
+		"manual":  3,
+		"review":  4,
+		"done":    5,
+		"bailed":  6,
+		"stopped": 7,
+		"skipped": 8,
 	}
 	sortedTasks := make([]db.AutopilotTask, len(tasks))
 	copy(sortedTasks, tasks)
@@ -530,7 +532,22 @@ func (m *Model) rebuildAutopilotTaskContent() {
 			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", t.Owner, t.Repo, t.IssueNumber)
 			issueRef = fmt.Sprintf("\033]8;;%s\033\\%s\033]8;;\033\\", ghURL, issueRef)
 		}
-		line := fmt.Sprintf("%s%s %s  %s", cursor, issueRef, statusStr, title)
+
+		// Style the title to match status for pre-lifecycle tasks.
+		var styledTitle string
+		switch t.Status {
+		case "queued":
+			styledTitle = textStyle().Render(title)
+		case "manual":
+			styledTitle = broadcastStyle().Render(title)
+		case "skipped":
+			styledTitle = errorStyle().Render(title)
+		default:
+			// Lifecycle statuses (running, done, review, etc.) keep default rendering.
+			styledTitle = title
+		}
+
+		line := fmt.Sprintf("%s%s %s  %s", cursor, issueRef, statusStr, styledTitle)
 		if extra != "" {
 			line += "  " + mutedStyle().Render(extra)
 		}
@@ -557,7 +574,17 @@ func (m Model) renderTaskDetail() string {
 		ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", task.Owner, task.Repo, task.IssueNumber)
 		issueLabel = fmt.Sprintf("\033]8;;%s\033\\#%d\033]8;;\033\\", ghURL, task.IssueNumber)
 	}
-	b.WriteString(textStyle().Render(fmt.Sprintf("  %s  %s", issueLabel, task.IssueTitle)))
+	detailLine := fmt.Sprintf("  %s  %s", issueLabel, task.IssueTitle)
+	switch task.Status {
+	case "manual":
+		b.WriteString(broadcastStyle().Render(detailLine))
+	case "skipped":
+		b.WriteString(errorStyle().Render(detailLine))
+	case "queued":
+		b.WriteString(textStyle().Render(detailLine))
+	default:
+		b.WriteString(textStyle().Render(detailLine))
+	}
 	b.WriteString("\n")
 
 	// Status.
@@ -616,19 +643,23 @@ func (m Model) renderTaskDetail() string {
 func (m Model) taskStatusDisplay(status string) string {
 	switch status {
 	case "running":
-		return statusRunningStyle().Render("● running")
+		return statusRunningStyle().Render("\u25cf running")
 	case "queued":
-		return textStyle().Render("○ queued ")
+		return textStyle().Render("\u25c9 queued ")
 	case "blocked":
-		return mutedStyle().Render("◌ blocked")
+		return mutedStyle().Render("\u25cc blocked")
 	case "review":
-		return broadcastStyle().Render("◎ review ")
+		return broadcastStyle().Render("\u25ce review ")
 	case "done":
-		return statusRunningStyle().Render("✓ done   ")
+		return statusRunningStyle().Render("\u2713 done   ")
 	case "bailed":
-		return errorStyle().Render("✗ bailed ")
+		return errorStyle().Render("\u2717 bailed ")
 	case "stopped":
-		return errorStyle().Render("✗ stopped")
+		return errorStyle().Render("\u2717 stopped")
+	case "manual":
+		return broadcastStyle().Render("\u2691 manual ")
+	case "skipped":
+		return errorStyle().Render("\u2298 skipped")
 	default:
 		return mutedStyle().Render(fmt.Sprintf("  %-7s", status))
 	}
@@ -757,6 +788,8 @@ func (m Model) renderDepGraph() string {
 			return "\u25ce" // ◎
 		case "skipped":
 			return "\u2298" // ⊘
+		case "manual":
+			return "\u2691" // ⚑
 		default:
 			return "\u25cb" // ○
 		}
@@ -769,6 +802,8 @@ func (m Model) renderDepGraph() string {
 			b.WriteString(statusRunningStyle().Render(line))
 		case "bailed", "stopped", "skipped":
 			b.WriteString(errorStyle().Render(line))
+		case "manual":
+			b.WriteString(broadcastStyle().Render(line))
 		default:
 			b.WriteString(mutedStyle().Render(line))
 		}
@@ -789,9 +824,12 @@ func (m Model) renderDepGraph() string {
 			if len(title) > 50 {
 				title = title[:47] + "..."
 			}
-			suffix := ""
-			if t.status == "skipped" {
+			var suffix string
+			switch t.status {
+			case "skipped":
 				suffix = " [SKIPPED]"
+			case "manual":
+				suffix = " [MANUAL]"
 			}
 			line := fmt.Sprintf("  %s #%d  %s%s", icon, t.issueNumber, title, suffix)
 			renderStyledLine(&b, line, t.status)
@@ -853,6 +891,8 @@ func (m Model) renderDepGraph() string {
 		suffix := ""
 		if td != nil && td.status == "skipped" {
 			suffix = " [SKIPPED]"
+		} else if td != nil && td.status == "manual" {
+			suffix = " [MANUAL]"
 		}
 		line := fmt.Sprintf("  %s%s%s #%d  %s%s", prefix, connector, icon, issue, title, suffix)
 		renderStyledLine(&b, line, status)
@@ -906,10 +946,14 @@ func (m Model) renderDepGraphFromOption(opt autopilot.DepOption) string {
 			continue
 		}
 
-		// Check for skip.
-		var skipStr string
-		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
-			td := taskDep{issueNumber: issueNum, title: taskTitles[issueNum], status: "skipped"}
+		// Check for string directives: "skip" or "manual".
+		var strVal string
+		if json.Unmarshal(rawDeps, &strVal) == nil {
+			status := "skipped"
+			if strVal == "manual" {
+				status = "manual"
+			}
+			td := taskDep{issueNumber: issueNum, title: taskTitles[issueNum], status: status}
 			tasks = append(tasks, td)
 			taskMap[issueNum] = &tasks[len(tasks)-1]
 			continue
@@ -953,11 +997,30 @@ func (m Model) renderDepGraphFromOption(opt autopilot.DepOption) string {
 		switch status {
 		case "skipped":
 			return "\u2298" // ⊘
+		case "manual":
+			return "\u2691" // ⚑
 		case "blocked":
 			return "\u25cc" // ◌
+		case "queued":
+			return "\u25c9" // ◉
 		default:
 			return "\u25cb" // ○
 		}
+	}
+
+	// renderStyledLine applies status-appropriate styling to a line in the dep graph preview.
+	renderStyledLine := func(b *strings.Builder, line, status string) {
+		switch status {
+		case "queued":
+			b.WriteString(textStyle().Render(line))
+		case "manual":
+			b.WriteString(broadcastStyle().Render(line))
+		case "skipped":
+			b.WriteString(errorStyle().Render(line))
+		default:
+			b.WriteString(mutedStyle().Render(line))
+		}
+		b.WriteString("\n")
 	}
 
 	var b strings.Builder
@@ -973,13 +1036,15 @@ func (m Model) renderDepGraphFromOption(opt autopilot.DepOption) string {
 			if len(title) > 50 {
 				title = title[:47] + "..."
 			}
-			suffix := ""
-			if t.status == "skipped" {
+			var suffix string
+			switch t.status {
+			case "skipped":
 				suffix = " [SKIPPED]"
+			case "manual":
+				suffix = " [MANUAL]"
 			}
 			line := fmt.Sprintf("    %s #%d  %s%s", icon, t.issueNumber, title, suffix)
-			b.WriteString(mutedStyle().Render(line))
-			b.WriteString("\n")
+			renderStyledLine(&b, line, t.status)
 		}
 		return b.String()
 	}
@@ -1035,10 +1100,11 @@ func (m Model) renderDepGraphFromOption(opt autopilot.DepOption) string {
 		suffix := ""
 		if td != nil && td.status == "skipped" {
 			suffix = " [SKIPPED]"
+		} else if td != nil && td.status == "manual" {
+			suffix = " [MANUAL]"
 		}
 		line := fmt.Sprintf("    %s%s%s #%d  %s%s", prefix, connector, icon, issue, title, suffix)
-		b.WriteString(mutedStyle().Render(line))
-		b.WriteString("\n")
+		renderStyledLine(&b, line, status)
 
 		childPrefix := prefix
 		if isLast {
