@@ -312,7 +312,9 @@ Keep messages actionable and concise. Use the project's coordination topic.`
 
 	prompt := fmt.Sprintf("## Project Context\n%s\n\n## User Request\n%s", contextBuf.String(), userPrompt)
 
-	debugLog("llm call", "stage", "broadcast", "step", "input", "component", "analyzer", "model", model, "system_prompt", system, "user_prompt", prompt)
+	debugLog("llm call", "stage", "broadcast", "step", "input", "component", "analyzer", "model", model,
+		"system_prompt", system, "user_prompt", prompt,
+		"est_system_tokens", estimateTokens(system), "est_user_tokens", estimateTokens(prompt))
 	resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     model,
 		System:    system,
@@ -323,7 +325,7 @@ Keep messages actionable and concise. Use the project's coordination topic.`
 		debugLog("llm error", "stage", "broadcast", "step", "error", "component", "analyzer", "error", err.Error())
 		return nil, fmt.Errorf("LLM broadcast call: %w", err)
 	}
-	debugLog("llm response", "stage", "broadcast", "step", "output", "component", "analyzer", "response", resp.Content)
+	debugLog("llm response", "stage", "broadcast", "step", "output", "component", "analyzer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
 
 	parsed := parseAnalysis(resp.Content)
 	if parsed.BusMessage != nil {
@@ -437,7 +439,9 @@ Respond with ONLY a JSON object:
 		prompt = fmt.Sprintf("## Project Context\n%s\n\nGenerate a general onboarding message for any new agent joining this project.", contextBuf.String())
 	}
 
-	debugLog("llm call", "stage", "onboard", "step", "input", "component", "analyzer", "model", model, "system_prompt", system, "user_prompt", prompt)
+	debugLog("llm call", "stage", "onboard", "step", "input", "component", "analyzer", "model", model,
+		"system_prompt", system, "user_prompt", prompt,
+		"est_system_tokens", estimateTokens(system), "est_user_tokens", estimateTokens(prompt))
 	resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     model,
 		System:    system,
@@ -448,7 +452,7 @@ Respond with ONLY a JSON object:
 		debugLog("llm error", "stage", "onboard", "step", "error", "component", "analyzer", "error", err.Error())
 		return nil, fmt.Errorf("LLM onboard call: %w", err)
 	}
-	debugLog("llm response", "stage", "onboard", "step", "output", "component", "analyzer", "response", resp.Content)
+	debugLog("llm response", "stage", "onboard", "step", "output", "component", "analyzer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
 
 	parsed := parseAnalysis(resp.Content)
 	if parsed.BusMessage != nil {
@@ -566,8 +570,12 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 		}
 		result.NewCommits += len(entries)
 		fmt.Fprintf(&gitSummary, "\n### %s (%d new commits)\n", repo.ShortName, len(entries))
-		for _, e := range entries {
+		displayed, overflow := truncateSlice(entries, MaxCommitsPerRepo)
+		for _, e := range displayed {
 			fmt.Fprintf(&gitSummary, "- %s: %s (%s)\n", e.Hash[:7], e.Subject, e.Author)
+		}
+		if overflow != "" {
+			fmt.Fprintf(&gitSummary, "%s\n", overflow)
 		}
 	}
 
@@ -656,8 +664,12 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 				label = "detached"
 			}
 			fmt.Fprintf(&gitSummary, "\n### %s [%s] (%d new commits)\n", repo.ShortName, label, len(entries))
-			for _, e := range entries {
+			displayed, overflow := truncateSlice(entries, MaxCommitsPerRepo)
+			for _, e := range displayed {
 				fmt.Fprintf(&gitSummary, "- %s: %s (%s)\n", e.Hash[:7], e.Subject, e.Author)
+			}
+			if overflow != "" {
+				fmt.Fprintf(&gitSummary, "%s\n", overflow)
 			}
 		}
 		// Append active branches to git summary for LLM context.
@@ -698,9 +710,13 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 		result.NewMessages = len(filtered)
 		if len(filtered) > 0 {
 			msgSummary.WriteString("\n### Recent Messages\n")
-			for _, m := range filtered {
+			displayed, overflow := truncateSlice(filtered, MaxBusMessages)
+			for _, m := range displayed {
 				age := relativeAge(m.CreatedAt)
 				fmt.Fprintf(&msgSummary, "- (%s ago) [%s] %s: %s\n", age, m.Topic, m.Sender, m.Message)
+			}
+			if overflow != "" {
+				fmt.Fprintf(&msgSummary, "%s\n", overflow)
 			}
 		}
 	}
@@ -824,10 +840,13 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		go func() {
 			defer tier1WG.Done()
 			prompt := buildGitSummaryPrompt(p.project, gathered.repos, gathered.gitSummary)
-			debugLog("llm call", "stage", "tier1", "step", "input", "component", "git_summarizer", "model", tier1Model, "system_prompt", gitSummarizerSystemPrompt(), "user_prompt", prompt)
+			sys := gitSummarizerSystemPrompt()
+			debugLog("llm call", "stage", "tier1", "step", "input", "component", "git_summarizer", "model", tier1Model,
+				"system_prompt", sys, "user_prompt", prompt,
+				"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
 			resp, err := p.provider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
-				System:    gitSummarizerSystemPrompt(),
+				System:    sys,
 				Messages:  []llm.Message{{Role: "user", Content: prompt}},
 				MaxTokens: 256,
 			})
@@ -837,7 +856,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 				return
 			}
 			gitTier1 = resp.Content
-			debugLog("llm response", "stage", "tier1", "step", "output", "component", "git_summarizer", "response", resp.Content)
+			debugLog("llm response", "stage", "tier1", "step", "output", "component", "git_summarizer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
 		}()
 	}
 
@@ -847,10 +866,13 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		go func() {
 			defer tier1WG.Done()
 			prompt := buildBusSummaryPrompt(p.project, gathered.msgSummary)
-			debugLog("llm call", "stage", "tier1", "step", "input", "component", "bus_summarizer", "model", tier1Model, "system_prompt", busSummarizerSystemPrompt(), "user_prompt", prompt)
+			sys := busSummarizerSystemPrompt()
+			debugLog("llm call", "stage", "tier1", "step", "input", "component", "bus_summarizer", "model", tier1Model,
+				"system_prompt", sys, "user_prompt", prompt,
+				"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
 			resp, err := p.provider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
-				System:    busSummarizerSystemPrompt(),
+				System:    sys,
 				Messages:  []llm.Message{{Role: "user", Content: prompt}},
 				MaxTokens: 256,
 			})
@@ -860,7 +882,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 				return
 			}
 			busTier1 = resp.Content
-			debugLog("llm response", "stage", "tier1", "step", "output", "component", "bus_summarizer", "response", resp.Content)
+			debugLog("llm response", "stage", "tier1", "step", "output", "component", "bus_summarizer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
 		}()
 	}
 
@@ -903,11 +925,14 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	}
 
 	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, gathered.trackedChanges, gathered.prStatusSection, concerns, gathered.trackedItems, completedItems)
-	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model, "system_prompt", tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus), "user_prompt", tier2Prompt)
+	tier2System := tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus)
+	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model,
+		"system_prompt", tier2System, "user_prompt", tier2Prompt,
+		"est_system_tokens", estimateTokens(tier2System), "est_user_tokens", estimateTokens(tier2Prompt))
 
 	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
 		Model:     tier2Model,
-		System:    tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus),
+		System:    tier2System,
 		Messages:  []llm.Message{{Role: "user", Content: tier2Prompt}},
 		MaxTokens: 1024,
 	})
@@ -919,7 +944,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		return result, nil
 	}
 
-	debugLog("llm response", "stage", "tier2", "step", "output", "component", "analyzer", "response", tier2Resp.Content)
+	debugLog("llm response", "stage", "tier2", "step", "output", "component", "analyzer", "response", tier2Resp.Content, "input_tokens", tier2Resp.InputToks, "output_tokens", tier2Resp.OutputToks)
 
 	// Parse tier 2 structured response.
 	analysis := parseAnalysis(tier2Resp.Content)
@@ -1066,48 +1091,29 @@ func buildBusSummaryPrompt(project *db.Project, msgActivity string) string {
 // --- Tier 2 System Prompt (Opus analyzer) ---
 
 func tier2SystemPrompt(projectName, analyzerFocus string) string {
-	base := fmt.Sprintf(`You are an AI project analyzer for %q. You receive focused summaries of recent git activity and bus messages (from separate summarizer agents), plus full tracked issue/PR context from sweep agents. Produce a structured analysis.
+	base := fmt.Sprintf(`You are an AI project analyzer for %q. Synthesize git, bus, and tracked item data into a structured analysis.
 
-Respond with a JSON object (no markdown fences):
-{
-  "analysis": "Your 2-4 sentence analysis with actionable insights",
-  "concerns": [
-    {"severity": "info|warning|danger", "message": "concise description of concern"}
-  ],
-  "bus_message": {
-    "topic": "%s/coord",
-    "message": "message to broadcast to other agents"
-  }
-}
+Respond with JSON (no fences):
+{"analysis":"2-4 sentence status update","concerns":[{"severity":"info|warning|danger","message":"..."}],"bus_message":{"topic":"%s/coord","message":"..."}}
 
-Rules:
-- "analysis": Provide a clear, actionable status update. Synthesize across git, bus, and tracked item context.
+## Output rules
 
-- "concerns": Return the FULL list of currently valid concerns. You are given the existing active concerns with timestamps — use them as your starting point. ACTIVELY reconcile each existing concern against ALL current evidence before carrying it forward:
-  - If ANY part of a concern is contradicted by new evidence (e.g., a branch now has a PR, an item was merged), you MUST either rewrite the concern to remove the resolved part or drop it entirely.
-  - Do NOT carry forward concerns verbatim if the facts have changed — always rewrite to reflect current state.
-  - Remove concerns that are fully resolved. Rewrite concerns that are partially resolved (e.g., if a concern mentions 2 branches without PRs but 1 now has a PR, rewrite to mention only the remaining branch).
-  - Add new concerns as needed. Update severity or wording if the situation has changed. If there are no concerns, return an empty array.
-  - Severity levels: "info" (awareness, no action needed), "warning" (potential issue, monitor), "danger" (blocking or critical, needs immediate attention)
-  - Keep each concern to 1-2 sentences. Be specific, not exhaustive.
-  - Do NOT raise concerns about closed/merged items — they are done.
-  - A "Recently Completed Work" section may be present showing items that were previously tracked and have since been completed. Use this as evidence of forward progress — do NOT flag lack of progress if completed items show recent work.
-  - For PRs: Use draft/review state to assess lifecycle. A draft PR is work-in-progress. "changes_requested" means the author needs to address feedback. "approved" means ready to merge. "pending" means awaiting review.
+analysis: Clear, actionable status update synthesizing all inputs.
 
-- "bus_message": ONLY include when there is something genuinely actionable that other agents need to know (e.g., breaking changes, coordination needed, blocking issues). Most polls should NOT produce a bus message. Omit this field if not needed.
+concerns: Return the FULL currently-valid list. Reconcile each existing concern against current evidence:
+- Drop or rewrite concerns contradicted by new data (e.g., branch now has PR, item merged).
+- Never carry forward verbatim if facts changed. Remove fully resolved; rewrite partially resolved.
+- Severity: info (awareness), warning (monitor), danger (blocking/critical).
+- 1-2 sentences each. Don't flag closed/merged items. Recently completed work = forward progress.
+- PR lifecycle: draft=WIP, changes_requested=needs fixes, approved=ready to merge, pending=awaiting review.
 
-Recency standards:
-- Bus messages include relative ages. Messages older than the current poll window are historical context only — do NOT treat them as current state.
-- When a newer message or git activity contradicts an older bus message, the newer evidence takes precedence (e.g., if a merge happened after a "waiting on merge" message, the blocker is resolved).
-- Do NOT raise concerns based solely on stale bus messages that may have been superseded by newer activity.
+bus_message: Only when genuinely actionable for other agents (breaking changes, blockers). Omit for most polls.
 
-Evidence standards:
-- Related git commits in tracked items are the strongest signal of active development. If an item has recent commits, it IS being worked on.
-- Only claim something is "actively being worked on" if there is direct evidence: recent commits, PR activity, or explicit comments. Detailed specs alone do not mean work has started.
-- Base all claims on the data provided. Do not infer activity that isn't evidenced.
-- "Worktree PR Status" is authoritative for branch-to-PR association. Cross-reference it against every existing concern that mentions branches or PRs. A branch with an open PR means work has been submitted for review — you MUST remove or rewrite any concern claiming that branch has no PR, is stalled, or has unclear status. Use the PR review state (approved, changes_requested, pending) to assess readiness.
-
-Keep analysis concise and focused on cross-repo coordination.`, projectName, projectName)
+## Evidence rules
+- Newer evidence supersedes older. Don't raise concerns from stale bus messages.
+- Git commits = strongest signal of active work. Only claim "actively worked on" with direct evidence.
+- Worktree PR Status is authoritative: cross-reference against concerns about branches/PRs.
+- Base all claims on provided data only.`, projectName, projectName)
 
 	focus := analyzerFocus
 	if focus == "" {
@@ -1143,10 +1149,11 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 		fmt.Fprintf(&b, "%s\n\n", prStatus)
 	}
 
-	// Tracked items with full sweep summaries — direct from sweep agents, not compressed.
+	// Tracked items with full sweep summaries — capped to control token cost.
 	if len(trackedItems) > 0 {
 		b.WriteString("## Tracked Issues/PRs\n")
-		for _, item := range trackedItems {
+		displayedItems, itemOverflow := truncateSlice(trackedItems, MaxTrackedItemsForTier2)
+		for _, item := range displayedItems {
 			typeTag := "issue"
 			if item.ItemType == "pull_request" {
 				typeTag = "PR"
@@ -1167,13 +1174,17 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 				fmt.Fprintf(&b, "  Progress: %s\n", item.ProgressSummary)
 			}
 		}
+		if itemOverflow != "" {
+			fmt.Fprintf(&b, "%s\n", itemOverflow)
+		}
 		b.WriteString("\n")
 	}
 
 	if len(completedItems) > 0 {
 		b.WriteString("## Recently Completed Work\n")
-		b.WriteString("These items were previously tracked and have been completed. They provide context on recent progress.\n")
-		for _, ci := range completedItems {
+		b.WriteString("Previously tracked items now completed — evidence of forward progress.\n")
+		displayedCompleted, completedOverflow := truncateSlice(completedItems, MaxCompletedItemsForTier2)
+		for _, ci := range displayedCompleted {
 			typeTag := "issue"
 			if ci.ItemType == "pull_request" {
 				typeTag = "PR"
@@ -1182,6 +1193,9 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 			if ci.Summary != "" {
 				fmt.Fprintf(&b, "  %s\n", ci.Summary)
 			}
+		}
+		if completedOverflow != "" {
+			fmt.Fprintf(&b, "%s\n", completedOverflow)
 		}
 		b.WriteString("\n")
 	}
