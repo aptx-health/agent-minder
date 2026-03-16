@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 12
+const currentVersion = 13
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS projects (
 	llm_model             TEXT DEFAULT 'claude-haiku-4-5',
 	llm_summarizer_model  TEXT DEFAULT 'claude-haiku-4-5',
 	llm_analyzer_model    TEXT DEFAULT 'claude-sonnet-4-6',
+	llm_summarizer_provider TEXT DEFAULT '',
+	llm_analyzer_provider   TEXT DEFAULT '',
 	idle_pause_sec        INTEGER DEFAULT 14400,
 	analyzer_focus        TEXT DEFAULT '',
 	autopilot_filter_type  TEXT DEFAULT '',
@@ -243,6 +245,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 12 {
 		if err := migrateV12(db); err != nil {
 			return fmt.Errorf("apply migration v12: %w", err)
+		}
+	}
+
+	if version < 13 {
+		if err := migrateV13(db); err != nil {
+			return fmt.Errorf("apply migration v13: %w", err)
 		}
 	}
 
@@ -465,6 +473,19 @@ func migrateV12(db *sqlx.DB) error {
 	stmts := []string{
 		`ALTER TABLE autopilot_tasks ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE autopilot_tasks ADD COLUMN repo TEXT NOT NULL DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+func migrateV13(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE projects ADD COLUMN llm_summarizer_provider TEXT DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN llm_analyzer_provider TEXT DEFAULT ''`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

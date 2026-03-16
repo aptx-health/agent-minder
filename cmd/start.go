@@ -44,17 +44,36 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("project %q not found — run 'agent-minder init' first", projectName)
 	}
 
-	// Create LLM provider, using config-sourced API key if available.
-	var providerOpts []llm.Option
-	if apiKey := config.GetProviderAPIKey(project.LLMProvider); apiKey != "" {
-		providerOpts = append(providerOpts, llm.WithAPIKey(apiKey))
+	// Resolve effective provider names for each tier.
+	// Per-tier overrides fall back to the project-level provider.
+	summarizerProviderName := project.LLMSummarizerProvider
+	if summarizerProviderName == "" {
+		summarizerProviderName = project.LLMProvider
 	}
-	if baseURL := config.GetProviderBaseURL(project.LLMProvider); baseURL != "" {
-		providerOpts = append(providerOpts, llm.WithBaseURL(baseURL))
+	analyzerProviderName := project.LLMAnalyzerProvider
+	if analyzerProviderName == "" {
+		analyzerProviderName = project.LLMProvider
 	}
-	provider, err := llm.NewProvider(project.LLMProvider, providerOpts...)
+
+	// Create summarizer (tier 1) provider.
+	summarizerProvider, err := createProvider(summarizerProviderName)
 	if err != nil {
-		return fmt.Errorf("creating LLM provider: %w", err)
+		return fmt.Errorf("creating summarizer provider: %w", err)
+	}
+
+	// Reuse the same instance if both tiers use the same provider,
+	// otherwise create a separate analyzer (tier 2) provider.
+	analyzerProvider := summarizerProvider
+	if analyzerProviderName != summarizerProviderName {
+		analyzerProvider, err = createProvider(analyzerProviderName)
+		if err != nil {
+			return fmt.Errorf("creating analyzer provider: %w", err)
+		}
+	}
+
+	// Log provider configuration when different providers are used per tier.
+	if summarizerProviderName != analyzerProviderName {
+		log.Printf("Using %s for summarizer (tier 1), %s for analyzer (tier 2)", summarizerProviderName, analyzerProviderName)
 	}
 
 	// Create bus publisher (non-fatal if unavailable).
@@ -72,7 +91,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	p := poller.New(store, project, provider, publisher)
+	p := poller.New(store, project, summarizerProvider, analyzerProvider, publisher)
 	p.Start(ctx)
 	defer p.Stop()
 
@@ -84,4 +103,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// createProvider builds an LLM provider by name, sourcing credentials from config.
+func createProvider(name string) (llm.Provider, error) {
+	var opts []llm.Option
+	if apiKey := config.GetProviderAPIKey(name); apiKey != "" {
+		opts = append(opts, llm.WithAPIKey(apiKey))
+	}
+	if baseURL := config.GetProviderBaseURL(name); baseURL != "" {
+		opts = append(opts, llm.WithBaseURL(baseURL))
+	}
+	return llm.NewProvider(name, opts...)
 }

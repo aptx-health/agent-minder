@@ -19,7 +19,7 @@ import (
 // SweepResult holds the outcome of sweeping a single tracked item.
 type SweepResult struct {
 	Item      *db.TrackedItem
-	Changed   bool   // status changed (metadata)
+	Changed   bool // status changed (metadata)
 	OldStatus string
 	NewStatus string
 	HaikuRan  bool
@@ -299,7 +299,7 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 		// Run Haiku summarizer.
 		prompt := buildItemSweepPrompt(item, content, relatedCommits)
 		debugLog("llm call", "stage", "sweep", "step", "input", "component", "sweep_haiku", "model", haikuModel, "item", item.DisplayRef(), "system_prompt", itemSweepSystemPrompt(), "user_prompt", prompt)
-		resp, err := p.provider.Complete(ctx, &llm.Request{
+		resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
 			Model:     haikuModel,
 			System:    itemSweepSystemPrompt(),
 			Messages:  []llm.Message{{Role: "user", Content: prompt}},
