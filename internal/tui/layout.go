@@ -766,12 +766,16 @@ func (m Model) renderDepGraph() string {
 			}
 		}
 
-		line := fmt.Sprintf("  %s%s%s #%d  %s", prefix, connector, statusIcon, issue, title)
+		suffix := ""
+		if td != nil && td.status == "skipped" {
+			suffix = " [SKIPPED]"
+		}
+		line := fmt.Sprintf("  %s%s%s #%d  %s%s", prefix, connector, statusIcon, issue, title, suffix)
 		if td != nil {
 			switch td.status {
 			case "done":
 				b.WriteString(statusRunningStyle().Render(line))
-			case "bailed", "stopped":
+			case "bailed", "stopped", "skipped":
 				b.WriteString(errorStyle().Render(line))
 			case "running":
 				b.WriteString(statusRunningStyle().Render(line))
