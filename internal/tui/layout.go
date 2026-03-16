@@ -1232,7 +1232,7 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 		// Autopilot tab: slot section + task list header + VP + detail panel
 		isRunning := m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" ||
 			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" ||
-			m.autopilotMode == "completed"
+			m.autopilotMode == "review-confirm" || m.autopilotMode == "completed"
 		if isRunning {
 			// Slot section.
 			if m.autopilotSupervisor != nil {
@@ -1532,6 +1532,18 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpKeyStyle().Render("n"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "review-confirm" {
+			task := m.selectedAutopilotTask()
+			issueNum := 0
+			if task != nil {
+				issueNum = task.IssueNumber
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Launch review session for #%d? ", issueNum)))
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": launch • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
 		} else if m.autopilotStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
 			b.WriteString("\n")
@@ -1608,7 +1620,13 @@ func (m Model) renderHelpBar() string {
 					)
 				case "queued", "blocked":
 					condensed = append(condensed, hint{"D", "deps"})
-				case "review", "done":
+				case "review":
+					condensed = append(condensed,
+						hint{"r", "review"},
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "done":
 					condensed = append(condensed,
 						hint{"l", "log"},
 						hint{"c", "copy path"},
@@ -1627,8 +1645,14 @@ func (m Model) renderHelpBar() string {
 			task := m.selectedAutopilotTask()
 			if task != nil {
 				switch task.Status {
-				case "bailed", "stopped", "review", "done":
+				case "bailed", "stopped", "done":
 					condensed = append(condensed,
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "review":
+					condensed = append(condensed,
+						hint{"r", "review"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
@@ -1714,7 +1738,7 @@ var (
 		{"a", "launch autopilot"},
 		{"A", "stop all agents"},
 		{"s", "stop selected"},
-		{"r", "restart selected"},
+		{"r", "restart/review selected"},
 		{"c", "copy worktree path"},
 		{"P", "pause/resume slots"},
 		{"D", "show dependencies"},

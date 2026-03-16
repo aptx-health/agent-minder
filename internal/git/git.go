@@ -249,6 +249,13 @@ func WorktreeAdd(repoDir, worktreePath, branch string, startPoint ...string) err
 	return err
 }
 
+// WorktreeAddExisting creates a new git worktree at the given path from an existing branch.
+// Unlike WorktreeAdd, this does not create a new branch (-b).
+func WorktreeAddExisting(repoDir, worktreePath, branch string) error {
+	_, err := run(repoDir, "worktree", "add", worktreePath, branch)
+	return err
+}
+
 // WorktreeRemove removes a git worktree.
 func WorktreeRemove(repoDir, worktreePath string) error {
 	_, err := run(repoDir, "worktree", "remove", "--force", worktreePath)
