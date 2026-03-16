@@ -44,8 +44,8 @@ func TestScanStream_AssistantToolUse(t *testing.T) {
 	sup.mu.Lock()
 	defer sup.mu.Unlock()
 
-	if sup.slots[0].liveStatus.TurnCount != 3 {
-		t.Errorf("TurnCount = %d, want 3", sup.slots[0].liveStatus.TurnCount)
+	if sup.slots[0].liveStatus.StepCount != 3 {
+		t.Errorf("StepCount = %d, want 3", sup.slots[0].liveStatus.StepCount)
 	}
 	// After text-only message, tool should be cleared.
 	if sup.slots[0].liveStatus.CurrentTool != "" {
@@ -96,9 +96,6 @@ func TestScanStream_ResultEvent(t *testing.T) {
 	sup.mu.Lock()
 	defer sup.mu.Unlock()
 
-	if sup.slots[0].liveStatus.CostUSD != 0.42 {
-		t.Errorf("CostUSD = %f, want 0.42", sup.slots[0].liveStatus.CostUSD)
-	}
 	// Tool should be cleared after result.
 	if sup.slots[0].liveStatus.CurrentTool != "" {
 		t.Errorf("CurrentTool = %q, want empty after result", sup.slots[0].liveStatus.CurrentTool)
@@ -135,8 +132,8 @@ also not json {{{
 	defer sup.mu.Unlock()
 
 	// Only the valid assistant event should be counted.
-	if sup.slots[0].liveStatus.TurnCount != 1 {
-		t.Errorf("TurnCount = %d, want 1", sup.slots[0].liveStatus.TurnCount)
+	if sup.slots[0].liveStatus.StepCount != 1 {
+		t.Errorf("StepCount = %d, want 1", sup.slots[0].liveStatus.StepCount)
 	}
 	if sup.slots[0].liveStatus.CurrentTool != "Bash" {
 		t.Errorf("CurrentTool = %q, want Bash", sup.slots[0].liveStatus.CurrentTool)

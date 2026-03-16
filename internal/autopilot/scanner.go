@@ -9,10 +9,9 @@ import (
 
 // LiveStatus holds real-time agent status parsed from stream-json output.
 type LiveStatus struct {
-	CurrentTool string  // e.g. "Bash", "Read", "Edit"
-	ToolInput   string  // truncated summary of tool input
-	TurnCount   int     // incremented on each assistant message
-	CostUSD     float64 // from result event
+	CurrentTool string // e.g. "Bash", "Read", "Edit"
+	ToolInput   string // truncated summary of tool input
+	StepCount   int    // incremented on each assistant message
 }
 
 // Stream-json event types (unexported, used only by scanner).
@@ -65,8 +64,8 @@ func scanStream(r io.Reader, logFile *os.File, slotIdx int, s *Supervisor) {
 			switch evt.Type {
 			case "assistant":
 				if evt.Message != nil {
-					// Each assistant message = one turn.
-					slot.liveStatus.TurnCount++
+					// Each assistant message = one step.
+					slot.liveStatus.StepCount++
 
 					// Find the last tool_use block for display.
 					for _, block := range evt.Message.Content {
@@ -91,7 +90,6 @@ func scanStream(r io.Reader, logFile *os.File, slotIdx int, s *Supervisor) {
 				}
 
 			case "result":
-				slot.liveStatus.CostUSD = evt.TotalCost
 				slot.liveStatus.CurrentTool = ""
 				slot.liveStatus.ToolInput = ""
 			}

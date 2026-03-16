@@ -301,13 +301,7 @@ func (m Model) renderAutopilotRunningContent() string {
 				b.WriteString(mutedStyle().Render(fmt.Sprintf("  Slot %d: %s", slot.SlotNum, label)))
 			} else {
 				elapsed := slot.RunningFor.Round(time.Second)
-				line := fmt.Sprintf("  Slot %d: #%d  %s", slot.SlotNum, slot.IssueNumber, elapsed)
-				if slot.MaxTurns > 0 {
-					line += fmt.Sprintf("  %d/%d turns", slot.TurnCount, slot.MaxTurns)
-				}
-				if slot.CostUSD > 0 || slot.MaxBudget > 0 {
-					line += fmt.Sprintf("  $%.2f/$%.2f", slot.CostUSD, slot.MaxBudget)
-				}
+				line := fmt.Sprintf("  Slot %d: #%d  %s  %d steps", slot.SlotNum, slot.IssueNumber, elapsed, slot.StepCount)
 				b.WriteString(statusRunningStyle().Render(line))
 				if slot.CurrentTool != "" {
 					b.WriteString("\n")

@@ -41,6 +41,8 @@ Each poll cycle with new activity runs two sequential LLM calls:
 
 ### TUI (internal/tui)
 
+**UX patterns: see [TUI-UX-GUIDE.md](TUI-UX-GUIDE.md)** — all new/modified interactions must follow those conventions.
+
 Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `u` user msg, `m` broadcast, `o` onboard, `a` autopilot, `A` stop autopilot (with confirmation), `t` theme, `q` quit.
 
 - Spinner (bubbles/v2/spinner MiniDot) shown during manual poll (`r`), broadcast, and onboard generation
