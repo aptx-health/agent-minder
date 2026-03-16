@@ -1134,6 +1134,268 @@ func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, max
 	return args
 }
 
+// RebuildDependencies re-analyzes the dependency graph for queued and blocked tasks,
+// incorporating user guidance. Running/done/review tasks are untouched.
+// Returns the number of tasks that became unblocked.
+func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string) (int, error) {
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0, fmt.Errorf("get tasks: %w", err)
+	}
+
+	// Partition tasks: rebuildable (queued + blocked) vs context-only (running, done, bailed, stopped, review).
+	var rebuildable []*db.AutopilotTask
+	var contextTasks []*db.AutopilotTask
+	for i := range allTasks {
+		switch allTasks[i].Status {
+		case "queued", "blocked":
+			rebuildable = append(rebuildable, &allTasks[i])
+		default:
+			contextTasks = append(contextTasks, &allTasks[i])
+		}
+	}
+
+	if len(rebuildable) == 0 {
+		return 0, nil
+	}
+
+	// Build issue numbers set for rebuildable tasks.
+	rebuildIssues := make(map[int]bool, len(rebuildable))
+	for _, t := range rebuildable {
+		rebuildIssues[t.IssueNumber] = true
+	}
+
+	// Build issue list for the LLM.
+	var issueList strings.Builder
+	issueList.WriteString("## Issues to re-analyze dependencies for:\n")
+	for _, t := range rebuildable {
+		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+		if t.IssueBody != "" {
+			body := t.IssueBody
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	// Include running/done/bailed/stopped/review tasks as context.
+	if len(contextTasks) > 0 {
+		issueList.WriteString("\n## Other tasks (not being re-analyzed, but may be dependencies):\n")
+		for _, t := range contextTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s\n", t.IssueNumber, t.Status, t.IssueTitle)
+		}
+	}
+
+	// Include tracked items not in autopilot tasks as additional context.
+	allIssues := make(map[int]bool)
+	for _, t := range allTasks {
+		allIssues[t.IssueNumber] = true
+	}
+	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
+	var extContext strings.Builder
+	for _, item := range trackedItems {
+		if allIssues[item.Number] || item.ItemType != "issue" {
+			continue
+		}
+		fmt.Fprintf(&extContext, "Issue #%d [%s]: %s\n", item.Number, item.State, item.Title)
+	}
+	if extContext.Len() > 0 {
+		issueList.WriteString("\n## Other tracked issues (not autopilot tasks):\n")
+		issueList.WriteString(extContext.String())
+	}
+
+	// Build previous dep state context.
+	var prevDeps strings.Builder
+	prevDeps.WriteString("Previous dependency analysis:\n")
+	hasPrevDeps := false
+	for _, t := range rebuildable {
+		if t.Dependencies != "" && t.Dependencies != "[]" {
+			fmt.Fprintf(&prevDeps, "  #%d depends on %s\n", t.IssueNumber, t.Dependencies)
+			hasPrevDeps = true
+		}
+	}
+
+	// Build prompt.
+	var promptParts []string
+	promptParts = append(promptParts, fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
+A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
+
+Dependencies can include issues from ALL sections — a queued task can depend on a running, bailed, or external issue.
+
+%s`, issueList.String()))
+
+	if hasPrevDeps {
+		promptParts = append(promptParts, prevDeps.String())
+	}
+
+	if strings.TrimSpace(userComment) != "" {
+		promptParts = append(promptParts, fmt.Sprintf("User feedback on dependencies:\n  %q\n\nRe-analyze and update the dependency graph considering this feedback.", userComment))
+	}
+
+	promptParts = append(promptParts, `Respond with ONLY a JSON object. Keys are issue numbers (only for issues being re-analyzed), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+
+IMPORTANT: Use integer values in the arrays, not strings.
+Example: {"42": [], "38": [42], "15": [42, 38]}
+
+Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`)
+
+	prompt := strings.Join(promptParts, "\n\n")
+	messages := []llm.Message{{Role: "user", Content: prompt}}
+
+	var rawGraph map[string]json.RawMessage
+	var content string
+
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := s.provider.Complete(ctx, &llm.Request{
+			Model:       s.project.LLMAnalyzerModel,
+			System:      "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
+			Messages:    messages,
+			MaxTokens:   512,
+			Temperature: 0,
+		})
+		if err != nil {
+			return 0, fmt.Errorf("LLM call: %w", err)
+		}
+
+		content = strings.TrimSpace(resp.Content)
+		// Strip markdown fencing if present.
+		if strings.HasPrefix(content, "```") {
+			lines := strings.Split(content, "\n")
+			if len(lines) > 2 {
+				content = strings.Join(lines[1:len(lines)-1], "\n")
+			}
+		}
+		// Extract JSON object.
+		if start := strings.Index(content, "{"); start >= 0 {
+			if end := strings.LastIndex(content, "}"); end > start {
+				content = content[start : end+1]
+			}
+		}
+
+		if err := json.Unmarshal([]byte(content), &rawGraph); err != nil {
+			if attempt == 0 {
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: resp.Content},
+					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON: %v\n\nPlease respond with ONLY the JSON object, no text before or after.", err)},
+				)
+				continue
+			}
+			return 0, fmt.Errorf("parse dep graph: %w", err)
+		}
+		break
+	}
+
+	// Update deps for rebuildable tasks.
+	for _, t := range rebuildable {
+		key := strconv.Itoa(t.IssueNumber)
+		rawDeps, ok := rawGraph[key]
+		if !ok {
+			// LLM didn't mention this task — clear its deps.
+			_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
+			continue
+		}
+
+		var deps []int
+		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			var strDeps []string
+			if err2 := json.Unmarshal(rawDeps, &strDeps); err2 != nil {
+				_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
+				continue
+			}
+			for _, sd := range strDeps {
+				if n, err3 := strconv.Atoi(sd); err3 == nil {
+					deps = append(deps, n)
+				}
+			}
+		}
+
+		depsJSON, _ := json.Marshal(deps)
+		if len(deps) == 0 {
+			depsJSON = []byte("[]")
+		}
+		_ = s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON))
+	}
+
+	// Re-evaluate blocked status: check all queued/blocked tasks for unblocked deps.
+	// Rebuild status map from fresh DB state.
+	freshTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0, fmt.Errorf("refresh tasks: %w", err)
+	}
+	statusMap := make(map[int]string, len(freshTasks))
+	for _, t := range freshTasks {
+		statusMap[t.IssueNumber] = t.Status
+	}
+	trackedState := make(map[int]string, len(trackedItems))
+	for _, item := range trackedItems {
+		trackedState[item.Number] = item.State
+	}
+
+	unblocked := 0
+	for _, t := range freshTasks {
+		if t.Status != "queued" && t.Status != "blocked" {
+			continue
+		}
+
+		deps := parseDeps(t.Dependencies)
+		allSatisfied := true
+		anyDep := false
+		for _, dep := range deps {
+			anyDep = true
+			if taskStatus, ok := statusMap[dep]; ok {
+				if taskStatus != "done" {
+					allSatisfied = false
+					break
+				}
+			} else if state, ok := trackedState[dep]; ok {
+				if state == "open" {
+					allSatisfied = false
+					break
+				}
+			}
+		}
+
+		if allSatisfied && t.Status == "blocked" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+			unblocked++
+		} else if !allSatisfied && anyDep && t.Status == "queued" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "blocked")
+		}
+	}
+
+	// Fill slots with any newly unblocked tasks.
+	if unblocked > 0 && s.parentCtx != nil {
+		s.fillSlots(s.parentCtx)
+	}
+
+	s.emitEvent("completed", fmt.Sprintf("Dep graph rebuilt — %d tasks unblocked", unblocked), nil)
+
+	return unblocked, nil
+}
+
+// parseDeps parses a JSON dependency array into issue numbers.
+func parseDeps(deps string) []int {
+	if deps == "" || deps == "[]" {
+		return nil
+	}
+	depStr := strings.Trim(deps, "[]")
+	if depStr == "" {
+		return nil
+	}
+	var result []int
+	for _, s := range strings.Split(depStr, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			var n int
+			if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+				result = append(result, n)
+			}
+		}
+	}
+	return result
+}
+
 // emitEventLocked is like emitEvent but must be called while s.mu is held.
 // It uses a non-blocking send so it won't deadlock.
 func (s *Supervisor) emitEventLocked(typ, summary string, task *db.AutopilotTask) {
