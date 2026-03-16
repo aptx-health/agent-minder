@@ -502,6 +502,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildDepsStatus = fmt.Sprintf("Dep graph rebuilt — %d tasks unblocked", msg.unblocked)
 		}
 		m.rebuildAutopilotTaskContent()
+		// Update confirm screen counts if still on confirm.
+		if m.autopilotMode == "confirm" && m.autopilotSupervisor != nil {
+			unblockedTasks, err := m.store.QueuedUnblockedTasks(m.project.ID)
+			if err == nil {
+				m.autopilotUnblocked = len(unblockedTasks)
+			}
+		}
 		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 			return clearRebuildDepsStatusMsg{}
 		})
@@ -1216,7 +1223,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		})
 
 	case "G":
-		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed" && m.autopilotMode != "confirm") {
 			return m, nil
 		}
 		if m.autopilotSupervisor == nil {
