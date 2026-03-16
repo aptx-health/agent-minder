@@ -40,10 +40,7 @@ type SlotInfo struct {
 	// Live status from stream-json parsing.
 	CurrentTool string
 	ToolInput   string
-	TurnCount   int
-	MaxTurns    int
-	CostUSD     float64
-	MaxBudget   float64
+	StepCount   int
 }
 
 type slotState struct {
@@ -401,14 +398,6 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 				Paused:  s.paused,
 			}
 		} else {
-			maxTurns := s.project.AutopilotMaxTurns
-			if maxTurns < 1 {
-				maxTurns = 50
-			}
-			maxBudget := s.project.AutopilotMaxBudgetUSD
-			if maxBudget <= 0 {
-				maxBudget = 3.00
-			}
 			infos[i] = SlotInfo{
 				SlotNum:     i + 1,
 				IssueNumber: slot.task.IssueNumber,
@@ -418,10 +407,7 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 				Status:      "running",
 				CurrentTool: slot.liveStatus.CurrentTool,
 				ToolInput:   slot.liveStatus.ToolInput,
-				TurnCount:   slot.liveStatus.TurnCount,
-				MaxTurns:    maxTurns,
-				CostUSD:     slot.liveStatus.CostUSD,
-				MaxBudget:   maxBudget,
+				StepCount:   slot.liveStatus.StepCount,
 			}
 		}
 	}
@@ -449,9 +435,9 @@ func (s *Supervisor) StatusBlock() string {
 			if slot.liveStatus.CurrentTool != "" {
 				toolInfo = fmt.Sprintf(", using %s", slot.liveStatus.CurrentTool)
 			}
-			fmt.Fprintf(&b, "- Slot %d: #%d %s (%s, running %s, turn %d, $%.2f%s)\n",
+			fmt.Fprintf(&b, "- Slot %d: #%d %s (%s, running %s, step %d%s)\n",
 				i+1, slot.task.IssueNumber, slot.task.IssueTitle, slot.task.Branch,
-				elapsed, slot.liveStatus.TurnCount, slot.liveStatus.CostUSD, toolInfo)
+				elapsed, slot.liveStatus.StepCount, toolInfo)
 		}
 	}
 
