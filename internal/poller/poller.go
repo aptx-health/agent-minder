@@ -149,7 +149,7 @@ type Poller struct {
 	stopped               chan struct{}
 	statusIntervalChanged chan time.Duration
 
-	autopilotStatus func() string // optional callback for autopilot status injection
+	autopilotDepGraph func() string // optional callback for autopilot dependency graph
 }
 
 // New creates a new Poller. Publisher may be nil if bus publishing is not available.
@@ -185,11 +185,11 @@ func (p *Poller) AnalyzerProvider() llm.Provider {
 	return p.analyzerProvider
 }
 
-// SetAutopilotStatusFunc sets a callback that returns autopilot status text
+// SetAutopilotDepGraphFunc sets a callback that returns the autopilot dependency graph
 // for injection into the tier 2 analyzer prompt.
-func (p *Poller) SetAutopilotStatusFunc(fn func() string) {
+func (p *Poller) SetAutopilotDepGraphFunc(fn func() string) {
 	p.mu.Lock()
-	p.autopilotStatus = fn
+	p.autopilotDepGraph = fn
 	p.mu.Unlock()
 }
 
@@ -538,16 +538,14 @@ func (p *Poller) run(ctx context.Context) {
 
 // gatherResult holds the output of the gather phase, shared between status and analysis polls.
 type gatherResult struct {
-	result             *PollResult
-	repos              []db.Repo
-	gitSummary         string
-	msgSummary         string
-	trackedItems       []db.TrackedItem
-	trackedChanges     string
-	sweepResults       []SweepResult
-	sweepHadUpdates    bool
-	prStatusSection    string
-	worktreeBranchData []repoWorktreeBranches
+	result          *PollResult
+	repos           []db.Repo
+	gitSummary      string
+	msgSummary      string
+	trackedItems    []db.TrackedItem
+	trackedChanges  string
+	sweepResults    []SweepResult
+	sweepHadUpdates bool
 }
 
 // gatherActivity runs the mechanical status checks: git, bus, tracked items, PR status.
@@ -590,7 +588,6 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 	// Track newly-added worktree paths so we can skip their commits below —
 	// a new worktree appearing is mechanical, not new activity (#39).
 	// Also collect non-main worktree branches for PR status lookup.
-	var worktreeBranchData []repoWorktreeBranches
 	newWorktreePaths := make(map[string]bool)
 	for _, repo := range repos {
 		wtEntries, err := gitpkg.Worktrees(repo.Path)
@@ -683,19 +680,6 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 		if len(branchNames) > 1 { // Only interesting if more than just main.
 			fmt.Fprintf(&gitSummary, "\n### %s active branches: %s\n", repo.ShortName, strings.Join(branchNames, ", "))
 		}
-		// Collect non-main worktree branches for PR status lookup.
-		owner, rp := parseGitHubRemote(gitpkg.RemoteURL(repo.Path))
-		if owner != "" {
-			var branches []string
-			for _, wt := range wtEntries {
-				if !wt.IsMain && wt.Branch != "" {
-					branches = append(branches, wt.Branch)
-				}
-			}
-			if len(branches) > 0 {
-				worktreeBranchData = append(worktreeBranchData, repoWorktreeBranches{owner: owner, repo: rp, branches: branches})
-			}
-		}
 	}
 
 	debugLog("gather complete", "stage", "gather", "step", "complete", "component", "git", "commits", result.NewCommits, "worktrees", result.NewWorktrees)
@@ -767,20 +751,15 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 		}
 	}
 
-	// Gather worktree PR status (mechanical, no LLM).
-	prStatusSection := p.gatherWorktreePRStatus(ctx, worktreeBranchData)
-
 	return &gatherResult{
-		result:             result,
-		repos:              repos,
-		gitSummary:         gitSummary.String(),
-		msgSummary:         msgSummary.String(),
-		trackedItems:       trackedItems,
-		trackedChanges:     trackedChanges,
-		sweepResults:       sweepResults,
-		sweepHadUpdates:    sweepHadUpdates,
-		prStatusSection:    prStatusSection,
-		worktreeBranchData: worktreeBranchData,
+		result:          result,
+		repos:           repos,
+		gitSummary:      gitSummary.String(),
+		msgSummary:      msgSummary.String(),
+		trackedItems:    trackedItems,
+		trackedChanges:  trackedChanges,
+		sweepResults:    sweepResults,
+		sweepHadUpdates: sweepHadUpdates,
 	}, nil
 }
 
@@ -798,7 +777,7 @@ func (p *Poller) doStatusPoll(ctx context.Context) (*PollResult, error) {
 	result.StatusOnly = true
 	result.Duration = time.Since(start)
 
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates && gathered.prStatusSection == "" {
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates {
 		result.Tier1Summary = "No new activity."
 		debugLog("status poll skip", "stage", "status", "step", "skip", "project", p.project.Name)
 	} else {
@@ -821,7 +800,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	result := gathered.result
 
 	// If nothing happened, skip LLM calls.
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates && gathered.prStatusSection == "" {
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates {
 		result.Duration = time.Since(start)
 		result.Tier1Summary = "No new activity."
 		debugLog("poll skip", "stage", "gather", "step", "skip", "project", p.project.Name)
@@ -931,7 +910,10 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		p.emit("error", fmt.Sprintf("fetching completed items: %v", err), nil)
 	}
 
-	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, gathered.trackedChanges, gathered.prStatusSection, concerns, gathered.trackedItems, completedItems)
+	// Fetch autopilot tasks to tag tracked items as autopilot-managed vs manual.
+	autopilotTasks, _ := p.store.GetAutopilotTasks(p.project.ID)
+
+	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, concerns, gathered.trackedItems, completedItems, autopilotTasks)
 	tier2System := tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus)
 	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model,
 		"system_prompt", tier2System, "user_prompt", tier2Prompt,
@@ -988,71 +970,6 @@ func (p *Poller) recordPollResult(result *PollResult) {
 		Tier2Response:  result.Tier2Analysis,
 		BusMessageSent: result.BusMessageSent,
 	})
-}
-
-// repoWorktreeBranches holds owner/repo and non-main worktree branches for PR lookup.
-type repoWorktreeBranches struct {
-	owner    string
-	repo     string
-	branches []string
-}
-
-// gatherWorktreePRStatus checks each non-main worktree branch for an open GitHub PR.
-// Returns a formatted section for the tier 2 prompt, or "" if no token or no branches.
-func (p *Poller) gatherWorktreePRStatus(ctx context.Context, branchData []repoWorktreeBranches) string {
-	debugLog("pr status start", "stage", "gather", "step", "start", "component", "pr_status")
-	if len(branchData) == 0 {
-		debugLog("pr status skip", "stage", "gather", "step", "skip", "component", "pr_status", "reason", "no branch data")
-		return ""
-	}
-	token := config.GetIntegrationToken("github")
-	if token == "" {
-		debugLog("pr status skip", "stage", "gather", "step", "skip", "component", "pr_status", "reason", "no github token")
-		return ""
-	}
-	debugLog("pr status checking", "stage", "gather", "step", "input", "component", "pr_status", "repos", len(branchData))
-	gh := ghpkg.NewClient(token)
-
-	var b strings.Builder
-	b.WriteString("## Worktree PR Status")
-	found := false
-
-	for _, rd := range branchData {
-		debugLog("pr status repo", "stage", "gather", "component", "pr_status", "repo", fmt.Sprintf("%s/%s", rd.owner, rd.repo), "branches", strings.Join(rd.branches, ","))
-		for _, branch := range rd.branches {
-			pr, err := gh.FetchPRForBranch(ctx, rd.owner, rd.repo, branch)
-			if err != nil {
-				debugLog("pr status error", "stage", "gather", "step", "error", "component", "pr_status", "branch", branch, "error", err.Error())
-				p.emit("error", fmt.Sprintf("PR lookup for %s/%s branch %q: %v", rd.owner, rd.repo, branch, err), nil)
-				fmt.Fprintf(&b, "\n- %s: error checking PR", branch)
-				found = true
-				continue
-			}
-			if pr == nil {
-				debugLog("pr status none", "stage", "gather", "component", "pr_status", "branch", branch, "result", "no PR")
-				fmt.Fprintf(&b, "\n- %s: no PR", branch)
-				found = true
-				continue
-			}
-			debugLog("pr status found", "stage", "gather", "step", "output", "component", "pr_status", "branch", branch, "pr_number", pr.Number, "title", pr.Title, "state", pr.State, "draft", pr.Draft, "review", pr.ReviewState)
-			parts := []string{pr.State}
-			if pr.Draft {
-				parts = append(parts, "draft")
-			}
-			if pr.ReviewState != "" {
-				parts = append(parts, "review: "+pr.ReviewState)
-			}
-			fmt.Fprintf(&b, "\n- %s: PR #%d %q (%s)", branch, pr.Number, pr.Title, strings.Join(parts, ", "))
-			found = true
-		}
-	}
-
-	if !found {
-		debugLog("pr status empty", "stage", "gather", "step", "complete", "component", "pr_status", "result", "no branches found")
-		return ""
-	}
-	debugLog("pr status complete", "stage", "gather", "step", "complete", "component", "pr_status", "result", b.String())
-	return b.String()
 }
 
 // --- Tier 1 Haiku Agent Prompts (focused, parallel) ---
@@ -1112,15 +1029,19 @@ concerns: Return the FULL currently-valid list. Reconcile each existing concern 
 - Never carry forward verbatim if facts changed. Remove fully resolved; rewrite partially resolved.
 - Severity: info (awareness), warning (monitor), danger (blocking/critical).
 - 1-2 sentences each. Don't flag closed/merged items. Recently completed work = forward progress.
-- PR lifecycle: draft=WIP, changes_requested=needs fixes, approved=ready to merge, pending=awaiting review.
 
 bus_message: Only when genuinely actionable for other agents (breaking changes, blockers). Omit for most polls.
 
 ## Evidence rules
 - Newer evidence supersedes older. Don't raise concerns from stale bus messages.
 - Git commits = strongest signal of active work. Only claim "actively worked on" with direct evidence.
-- Worktree PR Status is authoritative: cross-reference against concerns about branches/PRs.
-- Base all claims on provided data only.`, projectName, projectName)
+- Base all claims on provided data only.
+
+## Work tracking context
+- The project owner routinely clears completed work from tracking. A smaller tracked items list indicates progress, not stagnation. Never raise velocity concerns based on shrinking item counts.
+- Items tagged [autopilot] have an explicit dependency graph and execution plan. Do not raise velocity concerns about queued autopilot tasks — they are intentionally waiting on dependencies.
+- Items tagged [manual] are not managed by autopilot and may need human attention.
+- When a dependency graph is present, use it to reason about blockers and ordering. Queued tasks waiting on running tasks are working as intended.`, projectName, projectName)
 
 	focus := analyzerFocus
 	if focus == "" {
@@ -1135,28 +1056,28 @@ bus_message: Only when genuinely actionable for other agents (breaking changes, 
 // It reflects the analyzer's built-in engineering coordinator persona.
 const DefaultAnalyzerFocus = `Focus on cross-repo coordination and engineering progress. Be concise, evidence-based, and actionable. Prioritize blockers and coordination needs. Use direct, professional language.`
 
-func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStatus string, concerns []db.Concern, trackedItems []db.TrackedItem, completedItems []db.CompletedItem) string {
+func (p *Poller) buildTier2Prompt(gitSummary, busSummary string, concerns []db.Concern, trackedItems []db.TrackedItem, completedItems []db.CompletedItem, autopilotTasks []db.AutopilotTask) string {
+	// Build lookup of autopilot-managed issues: owner/repo#number → status.
+	autopilotIndex := make(map[string]string, len(autopilotTasks))
+	for _, t := range autopilotTasks {
+		key := fmt.Sprintf("%s/%s#%d", t.Owner, t.Repo, t.IssueNumber)
+		autopilotIndex[key] = t.Status
+	}
+
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Project Context\n")
 	fmt.Fprintf(&b, "Project: %s\n", p.project.Name)
 	fmt.Fprintf(&b, "Goal: %s — %s\n\n", p.project.GoalType, p.project.GoalDescription)
 
-	// Separate sections from each tier 1 agent.
 	if gitSummary != "" {
 		fmt.Fprintf(&b, "## Git Activity Summary\n%s\n\n", gitSummary)
 	}
 	if busSummary != "" {
 		fmt.Fprintf(&b, "## Bus Activity Summary\n%s\n\n", busSummary)
 	}
-	if trackedChanges != "" {
-		fmt.Fprintf(&b, "## Tracked Item Status Changes\n%s\n\n", trackedChanges)
-	}
-	if prStatus != "" {
-		fmt.Fprintf(&b, "%s\n\n", prStatus)
-	}
 
-	// Tracked items with full sweep summaries — capped to control token cost.
+	// Tracked items with autopilot/manual tags.
 	if len(trackedItems) > 0 {
 		b.WriteString("## Tracked Issues/PRs\n")
 		displayedItems, itemOverflow := truncateSlice(trackedItems, MaxTrackedItemsForTier2)
@@ -1165,7 +1086,13 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 			if item.ItemType == "pull_request" {
 				typeTag = "PR"
 			}
-			fmt.Fprintf(&b, "- [%s] [%s] %s: %s\n", item.LastStatus, typeTag, item.DisplayRef(), item.Title)
+			// Tag as autopilot-managed or manual.
+			ref := item.DisplayRef()
+			managedTag := "manual"
+			if apStatus, ok := autopilotIndex[ref]; ok {
+				managedTag = "autopilot:" + apStatus
+			}
+			fmt.Fprintf(&b, "- [%s] [%s] [%s] %s: %s\n", item.LastStatus, typeTag, managedTag, ref, item.Title)
 			if item.ItemType == "pull_request" && item.State == "open" {
 				if item.IsDraft {
 					b.WriteString("  Draft: yes\n")
@@ -1173,9 +1100,6 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 				if item.ReviewState != "" {
 					fmt.Fprintf(&b, "  Review: %s\n", item.ReviewState)
 				}
-			}
-			if item.ObjectiveSummary != "" {
-				fmt.Fprintf(&b, "  Objective: %s\n", item.ObjectiveSummary)
 			}
 			if item.ProgressSummary != "" {
 				fmt.Fprintf(&b, "  Progress: %s\n", item.ProgressSummary)
@@ -1189,7 +1113,7 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 
 	if len(completedItems) > 0 {
 		b.WriteString("## Recently Completed Work\n")
-		b.WriteString("Previously tracked items now completed — evidence of forward progress.\n")
+		b.WriteString("Items are routinely archived after completion. A shrinking tracked items list indicates progress, not stagnation.\n")
 		displayedCompleted, completedOverflow := truncateSlice(completedItems, MaxCompletedItemsForTier2)
 		for _, ci := range displayedCompleted {
 			typeTag := "issue"
@@ -1207,13 +1131,13 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary, trackedChanges, prStat
 		b.WriteString("\n")
 	}
 
-	// Autopilot status injection (mechanical, from supervisor callback).
+	// Autopilot dependency graph (from supervisor callback).
 	p.mu.Lock()
-	autopilotFn := p.autopilotStatus
+	depGraphFn := p.autopilotDepGraph
 	p.mu.Unlock()
-	if autopilotFn != nil {
-		if statusBlock := autopilotFn(); statusBlock != "" {
-			b.WriteString(statusBlock)
+	if depGraphFn != nil {
+		if graph := depGraphFn(); graph != "" {
+			b.WriteString(graph)
 			b.WriteString("\n")
 		}
 	}
