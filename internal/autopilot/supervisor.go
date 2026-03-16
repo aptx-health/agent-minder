@@ -185,11 +185,13 @@ func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSe
 	)
 
 	// Launch claude -p with stream-json so we can capture the session ID.
+	// Use --dangerously-skip-permissions so gh commands run without approval.
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--max-turns", "3",
+		"--dangerously-skip-permissions",
 		prompt,
 	}
 
