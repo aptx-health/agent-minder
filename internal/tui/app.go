@@ -553,12 +553,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autopilotStatus = fmt.Sprintf("Review session failed: %v", msg.err)
 		} else if msg.result.SessionID != "" {
 			m.autopilotStatus = fmt.Sprintf(
-				"Review ready for #%d — run: cd %s && claude --resume %s",
+				"Review ready for #%d\n  cd %s\n  claude --resume %s",
 				msg.result.IssueNumber, msg.result.WorktreePath, msg.result.SessionID,
 			)
 		} else {
 			m.autopilotStatus = fmt.Sprintf(
-				"Worktree restored for #%d — run: cd %s && claude",
+				"Worktree restored for #%d\n  cd %s\n  claude",
 				msg.result.IssueNumber, msg.result.WorktreePath,
 			)
 		}
