@@ -248,6 +248,9 @@ func (m Model) renderAutopilotTab() string {
 			b.WriteString("\n")
 			b.WriteString(depGraph)
 		}
+		b.WriteString("\n")
+		b.WriteString(mutedStyle().Render("  Press G to rebuild dependencies with guidance, s to change settings."))
+		b.WriteString("\n")
 		return b.String()
 	}
 
