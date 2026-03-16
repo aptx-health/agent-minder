@@ -202,7 +202,8 @@ func (s *Supervisor) IsPaused() bool {
 
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
 // Always starts fresh — clears previous tasks, cleans up orphaned worktrees.
-func (s *Supervisor) Prepare(ctx context.Context) (total, unblocked int, err error) {
+// Optional guidance is passed to the LLM during dependency analysis.
+func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total, unblocked int, err error) {
 	// Validate configured base branch exists in at least one enrolled repo.
 	if s.project.AutopilotBaseBranch != "" {
 		repos, err := s.store.GetRepos(s.project.ID)
@@ -237,17 +238,29 @@ func (s *Supervisor) Prepare(ctx context.Context) (total, unblocked int, err err
 	}
 
 	// Build dependency graph.
-	if err := s.buildDependencyGraph(ctx, tasks); err != nil {
+	if err := s.buildDependencyGraph(ctx, tasks, guidance); err != nil {
 		s.emitEvent("error", fmt.Sprintf("Dependency graph failed: %v — falling back to sequential order", err), nil)
 		s.setSequentialDeps(tasks)
 	}
 
-	unblockedTasks, err := s.store.QueuedUnblockedTasks(s.project.ID)
+	// Refresh tasks to get accurate counts (some may have been skipped).
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
-		return len(tasks), 0, fmt.Errorf("count unblocked: %w", err)
+		return 0, 0, fmt.Errorf("refresh tasks: %w", err)
+	}
+	activeTasks := 0
+	for _, t := range allTasks {
+		if t.Status != "skipped" {
+			activeTasks++
+		}
 	}
 
-	return len(tasks), len(unblockedTasks), nil
+	unblockedTasks, err := s.store.QueuedUnblockedTasks(s.project.ID)
+	if err != nil {
+		return activeTasks, 0, fmt.Errorf("count unblocked: %w", err)
+	}
+
+	return activeTasks, len(unblockedTasks), nil
 }
 
 // cleanOrphanedWorktrees removes worktrees left behind by interrupted agents.
@@ -543,7 +556,7 @@ func hasLabel(labels []string, target string) bool {
 	return false
 }
 
-func (s *Supervisor) buildDependencyGraph(ctx context.Context, tasks []*db.AutopilotTask) error {
+func (s *Supervisor) buildDependencyGraph(ctx context.Context, tasks []*db.AutopilotTask, guidance string) error {
 	if len(tasks) <= 1 {
 		return nil // No dependencies possible with 0-1 tasks.
 	}
@@ -583,19 +596,25 @@ func (s *Supervisor) buildDependencyGraph(ctx context.Context, tasks []*db.Autop
 		issueList.WriteString(contextList.String())
 	}
 
+	var guidanceSection string
+	if strings.TrimSpace(guidance) != "" {
+		guidanceSection = fmt.Sprintf("\nUser guidance on dependencies:\n  %q\n\nConsider this feedback when analyzing. If the user asks to skip or exclude an issue, set its value to the string \"skip\".\n", guidance)
+	}
+
 	prompt := fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
 A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
 
 Dependencies can include issues from BOTH sections — an agent task can depend on a non-agent issue if that issue's work must be done first.
 
-%s
-
+%s%s
 Respond with ONLY a JSON object. Keys are issue numbers (only for issues being worked on by agents), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
 
-IMPORTANT: Use integer values in the arrays, not strings.
-Example: {"42": [], "38": [42], "15": [42, 38]}
+If the user asks to skip or exclude an issue, set its value to the string "skip" instead of an array.
 
-Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`, issueList.String())
+IMPORTANT: Use integer values in dependency arrays, not strings.
+Example: {"42": [], "38": [42], "15": "skip"}
+
+Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`, issueList.String(), guidanceSection)
 
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
@@ -648,6 +667,14 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 		key := strconv.Itoa(t.IssueNumber)
 		rawDeps, ok := rawGraph[key]
 		if !ok {
+			continue
+		}
+
+		// Check for "skip" directive — mark as skipped so discoverNewTasks won't re-add.
+		var skipStr string
+		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
+			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
 			continue
 		}
 
@@ -1118,6 +1145,294 @@ func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, max
 	}
 
 	return args
+}
+
+// RebuildResult holds the outcome of a dependency graph rebuild.
+type RebuildResult struct {
+	Unblocked int
+	Skipped   int
+}
+
+// RebuildDependencies re-analyzes the dependency graph for queued and blocked tasks,
+// incorporating user guidance. Running/done/review tasks are untouched.
+func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string) (RebuildResult, error) {
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return RebuildResult{}, fmt.Errorf("get tasks: %w", err)
+	}
+
+	// Partition tasks: rebuildable (queued + blocked + skipped) vs context-only (running, done, bailed, stopped, review).
+	// Skipped tasks are included so the user can un-skip them via guidance.
+	var rebuildable []*db.AutopilotTask
+	var contextTasks []*db.AutopilotTask
+	for i := range allTasks {
+		switch allTasks[i].Status {
+		case "queued", "blocked", "skipped":
+			rebuildable = append(rebuildable, &allTasks[i])
+		default:
+			contextTasks = append(contextTasks, &allTasks[i])
+		}
+	}
+
+	if len(rebuildable) == 0 {
+		return RebuildResult{}, nil
+	}
+
+	// Build issue numbers set for rebuildable tasks.
+	rebuildIssues := make(map[int]bool, len(rebuildable))
+	for _, t := range rebuildable {
+		rebuildIssues[t.IssueNumber] = true
+	}
+
+	// Build issue list for the LLM.
+	var issueList strings.Builder
+	issueList.WriteString("## Issues to re-analyze dependencies for:\n")
+	for _, t := range rebuildable {
+		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+		if t.IssueBody != "" {
+			body := t.IssueBody
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	// Include running/done/bailed/stopped/review tasks as context.
+	if len(contextTasks) > 0 {
+		issueList.WriteString("\n## Other tasks (not being re-analyzed, but may be dependencies):\n")
+		for _, t := range contextTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s\n", t.IssueNumber, t.Status, t.IssueTitle)
+		}
+	}
+
+	// Include tracked items not in autopilot tasks as additional context.
+	allIssues := make(map[int]bool)
+	for _, t := range allTasks {
+		allIssues[t.IssueNumber] = true
+	}
+	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
+	var extContext strings.Builder
+	for _, item := range trackedItems {
+		if allIssues[item.Number] || item.ItemType != "issue" {
+			continue
+		}
+		fmt.Fprintf(&extContext, "Issue #%d [%s]: %s\n", item.Number, item.State, item.Title)
+	}
+	if extContext.Len() > 0 {
+		issueList.WriteString("\n## Other tracked issues (not autopilot tasks):\n")
+		issueList.WriteString(extContext.String())
+	}
+
+	// Build previous dep state context.
+	var prevDeps strings.Builder
+	prevDeps.WriteString("Previous dependency analysis:\n")
+	hasPrevDeps := false
+	for _, t := range rebuildable {
+		if t.Dependencies != "" && t.Dependencies != "[]" {
+			fmt.Fprintf(&prevDeps, "  #%d depends on %s\n", t.IssueNumber, t.Dependencies)
+			hasPrevDeps = true
+		}
+	}
+
+	// Build prompt.
+	var promptParts []string
+	promptParts = append(promptParts, fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
+A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
+
+Dependencies can include issues from ALL sections — a queued task can depend on a running, bailed, or external issue.
+
+%s`, issueList.String()))
+
+	if hasPrevDeps {
+		promptParts = append(promptParts, prevDeps.String())
+	}
+
+	if strings.TrimSpace(userComment) != "" {
+		promptParts = append(promptParts, fmt.Sprintf("User feedback on dependencies:\n  %q\n\nRe-analyze and update the dependency graph considering this feedback.", userComment))
+	}
+
+	promptParts = append(promptParts, `Respond with ONLY a JSON object. Keys are issue numbers (only for issues being re-analyzed), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+
+If the user asks to skip or exclude an issue from autopilot, set its value to the string "skip" instead of an array.
+
+IMPORTANT: Use integer values in dependency arrays, not strings.
+Example: {"42": [], "38": [42], "15": "skip"}
+
+Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`)
+
+	prompt := strings.Join(promptParts, "\n\n")
+	messages := []llm.Message{{Role: "user", Content: prompt}}
+
+	var rawGraph map[string]json.RawMessage
+	var content string
+
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := s.provider.Complete(ctx, &llm.Request{
+			Model:       s.project.LLMAnalyzerModel,
+			System:      "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
+			Messages:    messages,
+			MaxTokens:   512,
+			Temperature: 0,
+		})
+		if err != nil {
+			return RebuildResult{}, fmt.Errorf("LLM call: %w", err)
+		}
+
+		content = strings.TrimSpace(resp.Content)
+		// Strip markdown fencing if present.
+		if strings.HasPrefix(content, "```") {
+			lines := strings.Split(content, "\n")
+			if len(lines) > 2 {
+				content = strings.Join(lines[1:len(lines)-1], "\n")
+			}
+		}
+		// Extract JSON object.
+		if start := strings.Index(content, "{"); start >= 0 {
+			if end := strings.LastIndex(content, "}"); end > start {
+				content = content[start : end+1]
+			}
+		}
+
+		if err := json.Unmarshal([]byte(content), &rawGraph); err != nil {
+			if attempt == 0 {
+				messages = append(messages,
+					llm.Message{Role: "assistant", Content: resp.Content},
+					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON: %v\n\nPlease respond with ONLY the JSON object, no text before or after.", err)},
+				)
+				continue
+			}
+			return RebuildResult{}, fmt.Errorf("parse dep graph: %w", err)
+		}
+		break
+	}
+
+	// Update deps for rebuildable tasks.
+	var skipped int
+	for _, t := range rebuildable {
+		key := strconv.Itoa(t.IssueNumber)
+		rawDeps, ok := rawGraph[key]
+		if !ok {
+			// LLM didn't mention this task — clear its deps and un-skip if needed.
+			_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
+			if t.Status == "skipped" {
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+			}
+			continue
+		}
+
+		// Check for "skip" directive — mark as skipped so discoverNewTasks won't re-add.
+		var skipStr string
+		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
+			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
+			skipped++
+			continue
+		}
+
+		var deps []int
+		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			var strDeps []string
+			if err2 := json.Unmarshal(rawDeps, &strDeps); err2 != nil {
+				_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
+				continue
+			}
+			for _, sd := range strDeps {
+				if n, err3 := strconv.Atoi(sd); err3 == nil {
+					deps = append(deps, n)
+				}
+			}
+		}
+
+		depsJSON, _ := json.Marshal(deps)
+		if len(deps) == 0 {
+			depsJSON = []byte("[]")
+		}
+		_ = s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON))
+
+		// Un-skip: if task was skipped but LLM now gave it deps, restore to queued.
+		if t.Status == "skipped" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+		}
+	}
+
+	// Re-evaluate blocked status: check all queued/blocked tasks for unblocked deps.
+	// Rebuild status map from fresh DB state.
+	freshTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return RebuildResult{}, fmt.Errorf("refresh tasks: %w", err)
+	}
+	statusMap := make(map[int]string, len(freshTasks))
+	for _, t := range freshTasks {
+		statusMap[t.IssueNumber] = t.Status
+	}
+	trackedState := make(map[int]string, len(trackedItems))
+	for _, item := range trackedItems {
+		trackedState[item.Number] = item.State
+	}
+
+	unblocked := 0
+	for _, t := range freshTasks {
+		if t.Status != "queued" && t.Status != "blocked" {
+			continue
+		}
+
+		deps := parseDeps(t.Dependencies)
+		allSatisfied := true
+		anyDep := false
+		for _, dep := range deps {
+			anyDep = true
+			if taskStatus, ok := statusMap[dep]; ok {
+				if taskStatus != "done" {
+					allSatisfied = false
+					break
+				}
+			} else if state, ok := trackedState[dep]; ok {
+				if state == "open" {
+					allSatisfied = false
+					break
+				}
+			}
+		}
+
+		if allSatisfied && t.Status == "blocked" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+			unblocked++
+		} else if !allSatisfied && anyDep && t.Status == "queued" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "blocked")
+		}
+	}
+
+	// Fill slots with any newly unblocked tasks.
+	if unblocked > 0 && s.parentCtx != nil {
+		s.fillSlots(s.parentCtx)
+	}
+
+	s.emitEvent("completed", fmt.Sprintf("Dep graph rebuilt — %d unblocked, %d skipped", unblocked, skipped), nil)
+
+	return RebuildResult{Unblocked: unblocked, Skipped: skipped}, nil
+}
+
+// parseDeps parses a JSON dependency array into issue numbers.
+func parseDeps(deps string) []int {
+	if deps == "" || deps == "[]" {
+		return nil
+	}
+	depStr := strings.Trim(deps, "[]")
+	if depStr == "" {
+		return nil
+	}
+	var result []int
+	for _, s := range strings.Split(depStr, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			var n int
+			if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+				result = append(result, n)
+			}
+		}
+	}
+	return result
 }
 
 // emitEventLocked is like emitEvent but must be called while s.mu is held.

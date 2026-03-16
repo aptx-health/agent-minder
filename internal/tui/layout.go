@@ -227,8 +227,12 @@ func (m Model) renderAutopilotTab() string {
 		b.WriteString("\n")
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Budget/agent:   $%.2f", m.project.AutopilotMaxBudgetUSD)))
 		b.WriteString("\n\n")
-		b.WriteString(mutedStyle().Render("  Press s to change settings before proceeding."))
+		b.WriteString(mutedStyle().Render("  Press s to change settings, G to add instructions for the dependency analyzer."))
 		b.WriteString("\n")
+		if m.autopilotDepGuidance != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  Guidance: %q", m.autopilotDepGuidance)))
+			b.WriteString("\n")
+		}
 		return b.String()
 	}
 
@@ -241,6 +245,15 @@ func (m Model) renderAutopilotTab() string {
 			m.autopilotTotal, m.autopilotUnblocked)))
 		b.WriteString("\n")
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Will launch up to %d agents", m.project.AutopilotMaxAgents)))
+		b.WriteString("\n")
+		// Show dep graph at confirm time so user can verify before launching.
+		depGraph := m.renderDepGraph()
+		if depGraph != "" {
+			b.WriteString("\n")
+			b.WriteString(depGraph)
+		}
+		b.WriteString("\n")
+		b.WriteString(mutedStyle().Render("  Press G to rebuild dependencies with guidance, s to change settings."))
 		b.WriteString("\n")
 		return b.String()
 	}
@@ -328,6 +341,13 @@ func (m Model) renderAutopilotRunningContent() string {
 		b.WriteString(detail)
 	}
 
+	// Dep graph section.
+	depGraph := m.renderDepGraph()
+	if depGraph != "" {
+		b.WriteString("\n")
+		b.WriteString(depGraph)
+	}
+
 	return b.String()
 }
 
@@ -351,6 +371,13 @@ func (m Model) renderAutopilotCompletedContent() string {
 	if detail != "" {
 		b.WriteString("\n")
 		b.WriteString(detail)
+	}
+
+	// Dep graph section.
+	depGraph := m.renderDepGraph()
+	if depGraph != "" {
+		b.WriteString("\n")
+		b.WriteString(depGraph)
 	}
 
 	return b.String()
@@ -493,6 +520,11 @@ func (m Model) renderTaskDetail() string {
 		b.WriteString(mutedStyle().Render(fmt.Sprintf("  Deps: %s", deps)))
 		b.WriteString("\n")
 	}
+	blocks := m.taskBlocksContext(*task)
+	if blocks != "" {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("  %s", blocks)))
+		b.WriteString("\n")
+	}
 
 	// Worktree path.
 	if task.WorktreePath != "" {
@@ -583,6 +615,190 @@ func (m Model) taskBlockedContext(t db.AutopilotTask) string {
 		parts[i] = fmt.Sprintf("#%d", d)
 	}
 	return fmt.Sprintf("waiting on %s", strings.Join(parts, ", "))
+}
+
+// taskBlocksContext returns a description of what tasks this one blocks (reverse deps).
+func (m Model) taskBlocksContext(t db.AutopilotTask) string {
+	var blockedBy []int
+	for _, other := range m.autopilotTasks {
+		if other.IssueNumber == t.IssueNumber {
+			continue
+		}
+		if other.Dependencies == "" || other.Dependencies == "[]" {
+			continue
+		}
+		depStr := strings.Trim(other.Dependencies, "[]")
+		for _, s := range strings.Split(depStr, ",") {
+			s = strings.TrimSpace(s)
+			if s != "" {
+				var n int
+				if _, err := fmt.Sscanf(s, "%d", &n); err == nil && n == t.IssueNumber {
+					blockedBy = append(blockedBy, other.IssueNumber)
+					break
+				}
+			}
+		}
+	}
+	if len(blockedBy) == 0 {
+		return ""
+	}
+	parts := make([]string, len(blockedBy))
+	for i, n := range blockedBy {
+		parts[i] = fmt.Sprintf("#%d", n)
+	}
+	return fmt.Sprintf("blocks %s", strings.Join(parts, ", "))
+}
+
+// renderDepGraph renders a dependency tree view of all tasks.
+func (m Model) renderDepGraph() string {
+	if len(m.autopilotTasks) == 0 {
+		return ""
+	}
+
+	// Parse all deps and check if any exist.
+	type taskDep struct {
+		issueNumber int
+		title       string
+		status      string
+		deps        []int
+	}
+
+	tasks := make([]taskDep, 0, len(m.autopilotTasks))
+	hasDeps := false
+	taskMap := make(map[int]*taskDep)
+
+	for _, t := range m.autopilotTasks {
+		depStr := strings.Trim(t.Dependencies, "[]")
+		var deps []int
+		if depStr != "" {
+			for _, s := range strings.Split(depStr, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					var n int
+					if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+						deps = append(deps, n)
+						hasDeps = true
+					}
+				}
+			}
+		}
+		td := taskDep{
+			issueNumber: t.IssueNumber,
+			title:       t.IssueTitle,
+			status:      t.Status,
+			deps:        deps,
+		}
+		tasks = append(tasks, td)
+		taskMap[t.IssueNumber] = &tasks[len(tasks)-1]
+	}
+
+	if !hasDeps {
+		return ""
+	}
+
+	// Build children map (parent → children that depend on it).
+	children := make(map[int][]int)
+	hasParent := make(map[int]bool)
+	for _, t := range tasks {
+		for _, dep := range t.deps {
+			children[dep] = append(children[dep], t.issueNumber)
+			hasParent[t.issueNumber] = true
+		}
+	}
+
+	// Root nodes: tasks with no dependencies.
+	var roots []int
+	for _, t := range tasks {
+		if !hasParent[t.issueNumber] {
+			roots = append(roots, t.issueNumber)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(headerStyle().Render("Dependencies"))
+	b.WriteString("\n")
+
+	// Render tree recursively.
+	visited := make(map[int]bool)
+	var renderNode func(issue int, prefix string, isLast bool)
+	renderNode = func(issue int, prefix string, isLast bool) {
+		if visited[issue] {
+			return
+		}
+		visited[issue] = true
+
+		connector := "\u251c\u2500 " // ├─
+		if isLast {
+			connector = "\u2514\u2500 " // └─
+		}
+
+		statusIcon := "\u25cb" // ○
+		td := taskMap[issue]
+		if td != nil {
+			switch td.status {
+			case "done":
+				statusIcon = "\u2713" // ✓
+			case "bailed", "stopped":
+				statusIcon = "\u2717" // ✗
+			case "running":
+				statusIcon = "\u25cf" // ●
+			case "blocked":
+				statusIcon = "\u25cc" // ◌
+			case "review":
+				statusIcon = "\u25ce" // ◎
+			case "skipped":
+				statusIcon = "\u2298" // ⊘
+			}
+		}
+
+		title := ""
+		if td != nil {
+			title = td.title
+			maxTitle := 50
+			if len(title) > maxTitle {
+				title = title[:maxTitle-3] + "..."
+			}
+		}
+
+		suffix := ""
+		if td != nil && td.status == "skipped" {
+			suffix = " [SKIPPED]"
+		}
+		line := fmt.Sprintf("  %s%s%s #%d  %s%s", prefix, connector, statusIcon, issue, title, suffix)
+		if td != nil {
+			switch td.status {
+			case "done":
+				b.WriteString(statusRunningStyle().Render(line))
+			case "bailed", "stopped", "skipped":
+				b.WriteString(errorStyle().Render(line))
+			case "running":
+				b.WriteString(statusRunningStyle().Render(line))
+			default:
+				b.WriteString(mutedStyle().Render(line))
+			}
+		} else {
+			b.WriteString(mutedStyle().Render(line))
+		}
+		b.WriteString("\n")
+
+		childPrefix := prefix
+		if isLast {
+			childPrefix += "   "
+		} else {
+			childPrefix += "\u2502  " // │
+		}
+
+		kids := children[issue]
+		for i, kid := range kids {
+			renderNode(kid, childPrefix, i == len(kids)-1)
+		}
+	}
+
+	for i, root := range roots {
+		renderNode(root, "", i == len(roots)-1)
+	}
+
+	return b.String()
 }
 
 // renderHeader returns the compact 2-line header with inline repo/topic counts.
@@ -1162,6 +1378,33 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render("ctrl+d: generate & publish \u2022 esc: cancel (leave empty for generic onboarding)"))
 		}
 		b.WriteString("\n")
+	case "dep-guidance":
+		b.WriteString(headerStyle().Render("  Dependency analyzer guidance:"))
+		b.WriteString("\n")
+		b.WriteString("  ")
+		b.WriteString(m.rebuildDepsInput.View())
+		b.WriteString("\n")
+		b.WriteString(helpStyle().Render("ctrl+d: save guidance \u2022 esc: cancel"))
+		b.WriteString("\n")
+	case "rebuild-deps":
+		if m.rebuildDepsStatus != "" && m.rebuildDepsStatus != "Rebuilding dependency graph..." {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.rebuildDepsStatus)))
+		} else if m.rebuildDepsStatus == "Rebuilding dependency graph..." {
+			b.WriteString("  ")
+			b.WriteString(m.spinner.View())
+			b.WriteString(" ")
+			b.WriteString(broadcastStyle().Render("Rebuilding dependency graph..."))
+		} else {
+			b.WriteString(headerStyle().Render("  Rebuild dep graph \u2014 add optional guidance:"))
+			b.WriteString("\n")
+			b.WriteString("  ")
+			b.WriteString(m.rebuildDepsInput.View())
+		}
+		b.WriteString("\n")
+		if m.rebuildDepsStatus == "" {
+			b.WriteString(helpStyle().Render("ctrl+d: rebuild \u2022 esc: cancel (leave empty to re-analyze with current state)"))
+		}
+		b.WriteString("\n")
 	case "track", "untrack":
 		if m.trackStep == trackStepCleanupConfirm {
 			b.WriteString(headerStyle().Render(fmt.Sprintf("  Clean up %d done items? (y/n)", m.trackCleanupCount)))
@@ -1475,6 +1718,7 @@ var (
 		{"c", "copy worktree path"},
 		{"P", "pause/resume slots"},
 		{"D", "show dependencies"},
+		{"G", "rebuild dep graph"},
 		{"l", "view log"},
 		{"e", "expand tasks"},
 	}

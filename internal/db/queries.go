@@ -773,6 +773,12 @@ func (s *Store) RunningAutopilotTasks(projectID int64) ([]AutopilotTask, error) 
 	return tasks, nil
 }
 
+// DeleteAutopilotTask removes a single autopilot task by ID.
+func (s *Store) DeleteAutopilotTask(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM autopilot_tasks WHERE id = ?`, id)
+	return err
+}
+
 // ClearAutopilotTasks removes all autopilot tasks for a project.
 func (s *Store) ClearAutopilotTasks(projectID int64) error {
 	_, err := s.db.Exec(`DELETE FROM autopilot_tasks WHERE project_id = ?`, projectID)

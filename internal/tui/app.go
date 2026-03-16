@@ -114,6 +114,12 @@ type autopilotEventMsg autopilot.Event
 // clearAutopilotStatusMsg clears a temporary autopilot status message.
 type clearAutopilotStatusMsg struct{}
 
+// rebuildDepsResultMsg is sent when a dep graph rebuild completes.
+type rebuildDepsResultMsg struct {
+	result autopilot.RebuildResult
+	err    error
+}
+
 // autopilotTickMsg triggers periodic refresh of task list and slot status.
 type autopilotTickMsg time.Time
 
@@ -212,6 +218,11 @@ type Model struct {
 	autopilotCursor        int                // index into autopilotTasks
 	autopilotSelectedIssue int                // issue number for pinning cursor across refreshes
 	autopilotPaused        bool               // tracks pause state for display
+	autopilotDepGuidance   string             // user guidance for dep graph analysis
+
+	// Rebuild deps mode.
+	rebuildDepsInput  textarea.Model
+	rebuildDepsStatus string
 
 	// Auto-pause on idle.
 	lastUserInput time.Time
@@ -270,6 +281,12 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	oi.SetHeight(3)
 	oi.SetWidth(80)
 
+	rdi := textarea.New()
+	rdi.Placeholder = "e.g., '106 is not a real dep for 88' or 'skip 162, it is not ready'... Leave empty to analyze with no guidance."
+	rdi.CharLimit = 500
+	rdi.SetHeight(3)
+	rdi.SetWidth(80)
+
 	aVP := viewport.New()
 	aVP.KeyMap = safeViewportKeyMap()
 	aVP.SoftWrap = true
@@ -286,21 +303,22 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	apVP.FillHeight = true
 
 	m := Model{
-		project:         project,
-		store:           store,
-		poller:          p,
-		events:          make([]poller.Event, 0, 64),
-		mode:            "normal",
-		activeTab:       tabOperations,
-		broadcastInput:  bi,
-		userMsgInput:    ta,
-		onboardInput:    oi,
-		spinner:         sp,
-		polling:         true, // initial status check starts immediately
-		analysisVP:      aVP,
-		eventLogVP:      eVP,
-		autopilotTaskVP: apVP,
-		lastUserInput:   time.Now(),
+		project:          project,
+		store:            store,
+		poller:           p,
+		events:           make([]poller.Event, 0, 64),
+		mode:             "normal",
+		activeTab:        tabOperations,
+		broadcastInput:   bi,
+		userMsgInput:     ta,
+		onboardInput:     oi,
+		rebuildDepsInput: rdi,
+		spinner:          sp,
+		polling:          true, // initial status check starts immediately
+		analysisVP:       aVP,
+		eventLogVP:       eVP,
+		autopilotTaskVP:  apVP,
+		lastUserInput:    time.Now(),
 	}
 	m.applyTextareaTheme()
 	return m
@@ -317,6 +335,7 @@ func (m *Model) applyTextareaTheme() {
 	m.broadcastInput.SetStyles(s)
 	m.userMsgInput.SetStyles(s)
 	m.onboardInput.SetStyles(s)
+	m.rebuildDepsInput.SetStyles(s)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -372,6 +391,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateUserMsg(msg)
 		case "onboard":
 			return m.updateOnboard(msg)
+		case "rebuild-deps":
+			return m.updateRebuildDeps(msg)
+		case "dep-guidance":
+			return m.updateDepGuidance(msg)
 		case "track", "untrack":
 			return m.updateTrack(msg)
 		case "filter":
@@ -473,6 +496,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
+	case rebuildDepsResultMsg:
+		if msg.err != nil {
+			m.rebuildDepsStatus = fmt.Sprintf("Error: %v", msg.err)
+		} else {
+			var parts []string
+			if msg.result.Unblocked > 0 {
+				parts = append(parts, fmt.Sprintf("%d unblocked", msg.result.Unblocked))
+			}
+			if msg.result.Skipped > 0 {
+				parts = append(parts, fmt.Sprintf("%d skipped", msg.result.Skipped))
+			}
+			if len(parts) == 0 {
+				m.rebuildDepsStatus = "Dep graph rebuilt — no changes"
+			} else {
+				m.rebuildDepsStatus = fmt.Sprintf("Dep graph rebuilt — %s", strings.Join(parts, ", "))
+			}
+		}
+		m.rebuildAutopilotTaskContent()
+		// Update confirm screen counts if still on confirm.
+		if m.autopilotMode == "confirm" && m.autopilotSupervisor != nil {
+			allTasks, err := m.store.GetAutopilotTasks(m.project.ID)
+			if err == nil {
+				active := 0
+				for _, t := range allTasks {
+					if t.Status != "skipped" {
+						active++
+					}
+				}
+				m.autopilotTotal = active
+			}
+			unblockedTasks, err := m.store.QueuedUnblockedTasks(m.project.ID)
+			if err == nil {
+				m.autopilotUnblocked = len(unblockedTasks)
+			}
+		}
+		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return clearRebuildDepsStatusMsg{}
+		})
+
+	case clearRebuildDepsStatusMsg:
+		m.rebuildDepsStatus = ""
+		m.mode = "normal"
+		m.resizeViewports()
+		return m, nil
+
 	case bulkTrackResultMsg:
 		m.refreshTrackedItems()
 		if msg.added > 0 && m.autopilotSupervisor != nil {
@@ -560,6 +628,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autopilotUnblocked = msg.unblocked
 		m.autopilotMode = "confirm"
 		m.autopilotStatus = ""
+		m.rebuildAutopilotTaskContent() // populate task list for dep graph display
 		if m.activeTab != tabAutopilot {
 			m.autopilotHasNew = true
 		}
@@ -747,6 +816,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 type clearBroadcastStatusMsg struct{}
 type clearOnboardStatusMsg struct{}
+type clearRebuildDepsStatusMsg struct{}
 type clearFilterStatusMsg struct{}
 type clearSettingsStatusMsg struct{}
 
@@ -781,6 +851,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.autopilotSupervisor = nil
 			m.autopilotStatus = ""
 			return m, nil
+		case "G":
+			m.mode = "dep-guidance"
+			m.rebuildDepsStatus = ""
+			m.rebuildDepsInput.Reset()
+			if m.width > 4 {
+				m.rebuildDepsInput.SetWidth(m.width - 4)
+			}
+			m.resizeViewports()
+			return m, m.rebuildDepsInput.Focus()
 		}
 	}
 	if m.autopilotMode == "confirm" && m.activeTab == tabAutopilot {
@@ -1157,14 +1236,39 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		deps := m.taskBlockedContext(*task)
-		if deps == "" {
+		blocks := m.taskBlocksContext(*task)
+		if deps == "" && blocks == "" {
 			m.autopilotStatus = fmt.Sprintf("#%d has no dependencies", task.IssueNumber)
 		} else {
-			m.autopilotStatus = fmt.Sprintf("#%d deps: %s", task.IssueNumber, deps)
+			var parts []string
+			if deps != "" {
+				parts = append(parts, deps)
+			}
+			if blocks != "" {
+				parts = append(parts, blocks)
+			}
+			m.autopilotStatus = fmt.Sprintf("#%d: %s", task.IssueNumber, strings.Join(parts, " | "))
 		}
 		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 			return clearAutopilotStatusMsg{}
 		})
+
+	case "G":
+		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed" && m.autopilotMode != "confirm") {
+			return m, nil
+		}
+		if m.autopilotSupervisor == nil {
+			return m, nil
+		}
+		m.mode = "rebuild-deps"
+		m.rebuildDepsStatus = ""
+		m.rebuildDepsInput.Reset()
+		if m.width > 4 {
+			m.rebuildDepsInput.SetWidth(m.width - 4)
+		}
+		m.resizeViewports()
+		cmd := m.rebuildDepsInput.Focus()
+		return m, cmd
 	}
 	return m, nil
 }
@@ -1277,6 +1381,56 @@ func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.onboardInput, cmd = m.onboardInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateDepGuidance(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = "normal"
+		m.rebuildDepsInput.Blur()
+		m.resizeViewports()
+		return m, nil
+	case "ctrl+d":
+		m.autopilotDepGuidance = m.rebuildDepsInput.Value()
+		m.mode = "normal"
+		m.rebuildDepsInput.Blur()
+		m.resizeViewports()
+		if strings.TrimSpace(m.autopilotDepGuidance) != "" {
+			m.autopilotStatus = "Guidance saved — will apply during analysis"
+		} else {
+			m.autopilotStatus = ""
+			m.autopilotDepGuidance = ""
+		}
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.rebuildDepsInput, cmd = m.rebuildDepsInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updateRebuildDeps(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = "normal"
+		m.rebuildDepsStatus = ""
+		m.rebuildDepsInput.Blur()
+		m.resizeViewports()
+		return m, nil
+	case "ctrl+d":
+		guidance := m.rebuildDepsInput.Value()
+		m.rebuildDepsStatus = "Rebuilding dependency graph..."
+		m.rebuildDepsInput.Blur()
+		sup := m.autopilotSupervisor
+		return m, func() tea.Msg {
+			result, err := sup.RebuildDependencies(context.Background(), guidance)
+			return rebuildDepsResultMsg{result: result, err: err}
+		}
+	}
+
+	var cmd tea.Cmd
+	m.rebuildDepsInput, cmd = m.rebuildDepsInput.Update(msg)
 	return m, cmd
 }
 
@@ -1718,9 +1872,10 @@ func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
 
 	m.autopilotStatus = "Analyzing tracked items..."
 	m.polling = true
+	guidance := m.autopilotDepGuidance
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-		total, unblocked, err := sup.Prepare(context.Background())
+		total, unblocked, err := sup.Prepare(context.Background(), guidance)
 		return autopilotPrepareResultMsg{total: total, unblocked: unblocked, err: err}
 	})
 }
