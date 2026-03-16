@@ -170,8 +170,11 @@ func TestClassifyError_ContextDeadlineExceeded(t *testing.T) {
 
 func TestClassifyError_ContextCanceled(t *testing.T) {
 	kind, _ := classifyError(context.Canceled)
-	if kind != ErrorKindTimeout {
-		t.Errorf("kind = %v, want %v", kind, ErrorKindTimeout)
+	if kind != ErrorKindCanceled {
+		t.Errorf("kind = %v, want %v", kind, ErrorKindCanceled)
+	}
+	if isRetryable(kind) {
+		t.Error("canceled should NOT be retryable")
 	}
 }
 
@@ -234,6 +237,7 @@ func TestErrorKindString(t *testing.T) {
 		{ErrorKindTimeout, "timeout"},
 		{ErrorKindServer, "server"},
 		{ErrorKindBadRequest, "bad_request"},
+		{ErrorKindCanceled, "canceled"},
 		{ErrorKindUnknown, "unknown"},
 	}
 	for _, tt := range tests {
@@ -484,34 +488,37 @@ func TestRetry_BackoffDelaysRecorded(t *testing.T) {
 	if len(delays) != 2 {
 		t.Fatalf("len(delays) = %d, want 2", len(delays))
 	}
-	// First delay: baseDelay * 2^0 = 1s
-	if delays[0] != 1*time.Second {
-		t.Errorf("delays[0] = %v, want 1s", delays[0])
+	// First delay: baseDelay * 2^0 * [0.5, 1.0) = [500ms, 1s)
+	if delays[0] < 500*time.Millisecond || delays[0] > 1*time.Second {
+		t.Errorf("delays[0] = %v, want [500ms, 1s]", delays[0])
 	}
-	// Second delay: baseDelay * 2^1 = 2s
-	if delays[1] != 2*time.Second {
-		t.Errorf("delays[1] = %v, want 2s", delays[1])
+	// Second delay: baseDelay * 2^1 * [0.5, 1.0) = [1s, 2s)
+	if delays[1] < 1*time.Second || delays[1] > 2*time.Second {
+		t.Errorf("delays[1] = %v, want [1s, 2s]", delays[1])
 	}
 }
 
 func TestBackoffDelay(t *testing.T) {
 	tests := []struct {
 		attempt int
-		want    time.Duration
+		minMs   int64 // baseDelay * 2^attempt * 0.5
+		maxMs   int64 // baseDelay * 2^attempt * 1.0 (or maxDelay)
 	}{
-		{0, 1 * time.Second},  // baseDelay * 2^0 = 1s
-		{1, 2 * time.Second},  // baseDelay * 2^1 = 2s
-		{2, 4 * time.Second},  // baseDelay * 2^2 = 4s
-		{3, 8 * time.Second},  // baseDelay * 2^3 = 8s
-		{4, 16 * time.Second}, // baseDelay * 2^4 = 16s
-		{5, 30 * time.Second}, // capped at maxDelay
-		{10, 30 * time.Second},
+		{0, 500, 1000},     // 1s * [0.5, 1.0)
+		{1, 1000, 2000},    // 2s * [0.5, 1.0)
+		{2, 2000, 4000},    // 4s * [0.5, 1.0)
+		{3, 4000, 8000},    // 8s * [0.5, 1.0)
+		{4, 8000, 16000},   // 16s * [0.5, 1.0)
+		{5, 15000, 30000},  // capped at maxDelay
+		{10, 15000, 30000}, // capped at maxDelay
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("attempt_%d", tt.attempt), func(t *testing.T) {
 			got := backoffDelay(tt.attempt)
-			if got != tt.want {
-				t.Errorf("backoffDelay(%d) = %v, want %v", tt.attempt, got, tt.want)
+			gotMs := got.Milliseconds()
+			if gotMs < tt.minMs || gotMs > tt.maxMs {
+				t.Errorf("backoffDelay(%d) = %v (%dms), want [%dms, %dms]",
+					tt.attempt, got, gotMs, tt.minMs, tt.maxMs)
 			}
 		})
 	}

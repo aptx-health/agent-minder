@@ -25,6 +25,8 @@ const (
 	ErrorKindServer
 	// ErrorKindBadRequest indicates a 400-level client error (not rate limit or auth).
 	ErrorKindBadRequest
+	// ErrorKindCanceled indicates the caller intentionally canceled the operation.
+	ErrorKindCanceled
 )
 
 // String returns a human-readable label for the error kind.
@@ -40,6 +42,8 @@ func (k ErrorKind) String() string {
 		return "server"
 	case ErrorKindBadRequest:
 		return "bad_request"
+	case ErrorKindCanceled:
+		return "canceled"
 	default:
 		return "unknown"
 	}
@@ -51,8 +55,13 @@ func classifyError(err error) (kind ErrorKind, statusCode int) {
 		return ErrorKindUnknown, 0
 	}
 
-	// Check for context errors first (deadline exceeded, canceled).
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	// Check for context cancellation first — caller intentionally stopped.
+	if errors.Is(err, context.Canceled) {
+		return ErrorKindCanceled, 0
+	}
+
+	// Deadline exceeded is a timeout — potentially retryable.
+	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrorKindTimeout, 0
 	}
 

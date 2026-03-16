@@ -3,7 +3,9 @@ package llm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
+	"math/rand/v2"
 	"time"
 )
 
@@ -16,22 +18,26 @@ const (
 )
 
 // retryProvider wraps a Provider with automatic retry logic for transient errors.
-// Non-retryable errors (auth, bad request) fail immediately.
+// Non-retryable errors (auth, bad request, canceled) fail immediately.
 type retryProvider struct {
 	inner Provider
 	// waitFunc waits for the given duration, respecting context cancellation.
 	// Returns ctx.Err() if the context is cancelled during the wait.
 	// Defaults to waitWithContext; tests can override for instant execution.
 	waitFunc func(ctx context.Context, d time.Duration) error
+	// logger for retry attempts. Nil disables logging.
+	logger *slog.Logger
 }
 
 // NewRetryProvider wraps any Provider with retry middleware. Transient errors
-// (rate limits, server errors, timeouts) are retried with exponential backoff.
-// Non-retryable errors (auth, malformed request) fail immediately.
-func NewRetryProvider(p Provider) Provider {
+// (rate limits, server errors, timeouts) are retried with exponential backoff
+// and jitter. Non-retryable errors (auth, malformed request, canceled) fail
+// immediately.
+func NewRetryProvider(p Provider, logger *slog.Logger) Provider {
 	return &retryProvider{
 		inner:    p,
 		waitFunc: waitWithContext,
+		logger:   logger,
 	}
 }
 
@@ -77,7 +83,7 @@ func (r *retryProvider) Complete(ctx context.Context, req *Request) (*Response, 
 
 		delay := backoffDelay(attempt)
 
-		debugLogRetry(r.inner.Name(), attempt+1, maxRetries, kind, statusCode, delay)
+		r.logRetry(attempt+1, maxRetries, kind, statusCode, delay)
 
 		if err := r.waitFunc(ctx, delay); err != nil {
 			return nil, fmt.Errorf("llm retry aborted: %w", err)
@@ -100,19 +106,33 @@ func waitWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// backoffDelay computes exponential backoff: baseDelay * 2^attempt, capped at maxDelay.
+// backoffDelay computes exponential backoff with jitter:
+// baseDelay * 2^attempt * (0.5 + rand(0, 0.5)), capped at maxDelay.
+// The jitter prevents thundering herd when multiple agents retry simultaneously.
 func backoffDelay(attempt int) time.Duration {
-	delay := time.Duration(float64(baseDelay) * math.Pow(2, float64(attempt)))
+	base := float64(baseDelay) * math.Pow(2, float64(attempt))
+	// Add jitter: multiply by random factor in [0.5, 1.0)
+	jittered := base * (0.5 + rand.Float64()*0.5)
+	delay := time.Duration(jittered)
 	if delay > maxDelay {
 		delay = maxDelay
 	}
 	return delay
 }
 
-// debugLogRetry logs retry attempts. This is a no-op placeholder that can be
-// wired into the structured debug logger if MINDER_DEBUG is set.
-func debugLogRetry(provider string, attempt, maxAttempts int, kind ErrorKind, statusCode int, delay time.Duration) {
-	// Intentionally a no-op for now. The poller package owns the debug logger,
-	// and adding a dependency here would create a circular import. This can be
-	// wired via a callback or slog.Logger injection later.
+// logRetry logs a retry attempt via the structured logger.
+func (r *retryProvider) logRetry(attempt, maxAttempts int, kind ErrorKind, statusCode int, delay time.Duration) {
+	if r.logger == nil {
+		return
+	}
+	r.logger.Info("llm retry",
+		"stage", "retry",
+		"step", "backoff",
+		"provider", r.inner.Name(),
+		"attempt", attempt,
+		"max_attempts", maxAttempts,
+		"error_kind", kind.String(),
+		"status_code", statusCode,
+		"delay", delay.String(),
+	)
 }
