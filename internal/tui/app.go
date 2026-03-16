@@ -218,6 +218,7 @@ type Model struct {
 	autopilotCursor        int                // index into autopilotTasks
 	autopilotSelectedIssue int                // issue number for pinning cursor across refreshes
 	autopilotPaused        bool               // tracks pause state for display
+	autopilotDepGuidance   string             // user guidance for dep graph analysis
 
 	// Rebuild deps mode.
 	rebuildDepsInput  textarea.Model
@@ -281,7 +282,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 	oi.SetWidth(80)
 
 	rdi := textarea.New()
-	rdi.Placeholder = "Optional: guide the rebuild (e.g., '106 is not a real dep for 88')... Leave empty to re-analyze with current state."
+	rdi.Placeholder = "e.g., '106 is not a real dep for 88' or 'skip 162, it is not ready'... Leave empty to analyze with no guidance."
 	rdi.CharLimit = 500
 	rdi.SetHeight(3)
 	rdi.SetWidth(80)
@@ -392,6 +393,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateOnboard(msg)
 		case "rebuild-deps":
 			return m.updateRebuildDeps(msg)
+		case "dep-guidance":
+			return m.updateDepGuidance(msg)
 		case "track", "untrack":
 			return m.updateTrack(msg)
 		case "filter":
@@ -842,6 +845,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.autopilotSupervisor = nil
 			m.autopilotStatus = ""
 			return m, nil
+		case "G":
+			m.mode = "dep-guidance"
+			m.rebuildDepsStatus = ""
+			m.rebuildDepsInput.Reset()
+			if m.width > 4 {
+				m.rebuildDepsInput.SetWidth(m.width - 4)
+			}
+			m.resizeViewports()
+			return m, m.rebuildDepsInput.Focus()
 		}
 	}
 	if m.autopilotMode == "confirm" && m.activeTab == tabAutopilot {
@@ -1366,6 +1378,32 @@ func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateDepGuidance(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = "normal"
+		m.rebuildDepsInput.Blur()
+		m.resizeViewports()
+		return m, nil
+	case "ctrl+d":
+		m.autopilotDepGuidance = m.rebuildDepsInput.Value()
+		m.mode = "normal"
+		m.rebuildDepsInput.Blur()
+		m.resizeViewports()
+		if strings.TrimSpace(m.autopilotDepGuidance) != "" {
+			m.autopilotStatus = "Guidance saved — will apply during analysis"
+		} else {
+			m.autopilotStatus = ""
+			m.autopilotDepGuidance = ""
+		}
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.rebuildDepsInput, cmd = m.rebuildDepsInput.Update(msg)
+	return m, cmd
+}
+
 func (m Model) updateRebuildDeps(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -1828,9 +1866,10 @@ func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
 
 	m.autopilotStatus = "Analyzing tracked items..."
 	m.polling = true
+	guidance := m.autopilotDepGuidance
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-		total, unblocked, err := sup.Prepare(context.Background())
+		total, unblocked, err := sup.Prepare(context.Background(), guidance)
 		return autopilotPrepareResultMsg{total: total, unblocked: unblocked, err: err}
 	})
 }

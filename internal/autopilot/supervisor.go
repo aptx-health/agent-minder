@@ -205,7 +205,8 @@ func (s *Supervisor) IsPaused() bool {
 
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
 // Always starts fresh — clears previous tasks, cleans up orphaned worktrees.
-func (s *Supervisor) Prepare(ctx context.Context) (total, unblocked int, err error) {
+// Optional guidance is passed to the LLM during dependency analysis.
+func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total, unblocked int, err error) {
 	// Validate configured base branch exists in at least one enrolled repo.
 	if s.project.AutopilotBaseBranch != "" {
 		repos, err := s.store.GetRepos(s.project.ID)
@@ -240,7 +241,7 @@ func (s *Supervisor) Prepare(ctx context.Context) (total, unblocked int, err err
 	}
 
 	// Build dependency graph.
-	if err := s.buildDependencyGraph(ctx, tasks); err != nil {
+	if err := s.buildDependencyGraph(ctx, tasks, guidance); err != nil {
 		s.emitEvent("error", fmt.Sprintf("Dependency graph failed: %v — falling back to sequential order", err), nil)
 		s.setSequentialDeps(tasks)
 	}
@@ -557,7 +558,7 @@ func hasLabel(labels []string, target string) bool {
 	return false
 }
 
-func (s *Supervisor) buildDependencyGraph(ctx context.Context, tasks []*db.AutopilotTask) error {
+func (s *Supervisor) buildDependencyGraph(ctx context.Context, tasks []*db.AutopilotTask, guidance string) error {
 	if len(tasks) <= 1 {
 		return nil // No dependencies possible with 0-1 tasks.
 	}
@@ -597,19 +598,25 @@ func (s *Supervisor) buildDependencyGraph(ctx context.Context, tasks []*db.Autop
 		issueList.WriteString(contextList.String())
 	}
 
+	var guidanceSection string
+	if strings.TrimSpace(guidance) != "" {
+		guidanceSection = fmt.Sprintf("\nUser guidance on dependencies:\n  %q\n\nConsider this feedback when analyzing. If the user asks to skip or exclude an issue, set its value to the string \"skip\".\n", guidance)
+	}
+
 	prompt := fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
 A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
 
 Dependencies can include issues from BOTH sections — an agent task can depend on a non-agent issue if that issue's work must be done first.
 
-%s
-
+%s%s
 Respond with ONLY a JSON object. Keys are issue numbers (only for issues being worked on by agents), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
 
-IMPORTANT: Use integer values in the arrays, not strings.
-Example: {"42": [], "38": [42], "15": [42, 38]}
+If the user asks to skip or exclude an issue, set its value to the string "skip" instead of an array.
 
-Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`, issueList.String())
+IMPORTANT: Use integer values in dependency arrays, not strings.
+Example: {"42": [], "38": [42], "15": "skip"}
+
+Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`, issueList.String(), guidanceSection)
 
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
@@ -662,6 +669,14 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 		key := strconv.Itoa(t.IssueNumber)
 		rawDeps, ok := rawGraph[key]
 		if !ok {
+			continue
+		}
+
+		// Check for "skip" directive.
+		var skipStr string
+		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
+			_ = s.store.DeleteAutopilotTask(t.ID)
+			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
 			continue
 		}
 

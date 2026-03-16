@@ -227,8 +227,12 @@ func (m Model) renderAutopilotTab() string {
 		b.WriteString("\n")
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Budget/agent:   $%.2f", m.project.AutopilotMaxBudgetUSD)))
 		b.WriteString("\n\n")
-		b.WriteString(mutedStyle().Render("  Press s to change settings before proceeding."))
+		b.WriteString(mutedStyle().Render("  Press s to change settings, G to add instructions for the dependency analyzer."))
 		b.WriteString("\n")
+		if m.autopilotDepGuidance != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  Guidance: %q", m.autopilotDepGuidance)))
+			b.WriteString("\n")
+		}
 		return b.String()
 	}
 
@@ -1373,6 +1377,14 @@ func (m Model) renderBottomBar() string {
 		if m.onboardStatus == "" {
 			b.WriteString(helpStyle().Render("ctrl+d: generate & publish \u2022 esc: cancel (leave empty for generic onboarding)"))
 		}
+		b.WriteString("\n")
+	case "dep-guidance":
+		b.WriteString(headerStyle().Render("  Dependency analyzer guidance:"))
+		b.WriteString("\n")
+		b.WriteString("  ")
+		b.WriteString(m.rebuildDepsInput.View())
+		b.WriteString("\n")
+		b.WriteString(helpStyle().Render("ctrl+d: save guidance \u2022 esc: cancel"))
 		b.WriteString("\n")
 	case "rebuild-deps":
 		if m.rebuildDepsStatus != "" && m.rebuildDepsStatus != "Rebuilding dependency graph..." {
