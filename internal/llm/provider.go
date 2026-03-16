@@ -45,14 +45,22 @@ func NewProvider(name string, opts ...Option) (Provider, error) {
 		opt(cfg)
 	}
 
+	var p Provider
+	var err error
+
 	switch name {
 	case "anthropic":
-		return newAnthropicProvider(cfg)
+		p, err = newAnthropicProvider(cfg)
 	case "openai":
-		return newOpenAIProvider(cfg)
+		p, err = newOpenAIProvider(cfg)
 	default:
 		return nil, fmt.Errorf("unknown provider: %q", name)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	return NewRetryProvider(p), nil
 }
 
 // Option configures a provider.
