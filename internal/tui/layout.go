@@ -692,8 +692,61 @@ func (m Model) renderDepGraph() string {
 		taskMap[t.IssueNumber] = &tasks[len(tasks)-1]
 	}
 
+	// Helper to render a status icon for a task.
+	statusIconFor := func(status string) string {
+		switch status {
+		case "done":
+			return "\u2713" // ✓
+		case "bailed", "stopped":
+			return "\u2717" // ✗
+		case "running":
+			return "\u25cf" // ●
+		case "blocked":
+			return "\u25cc" // ◌
+		case "review":
+			return "\u25ce" // ◎
+		case "skipped":
+			return "\u2298" // ⊘
+		default:
+			return "\u25cb" // ○
+		}
+	}
+
+	// Helper to render a styled line by status.
+	renderStyledLine := func(b *strings.Builder, line, status string) {
+		switch status {
+		case "done", "running":
+			b.WriteString(statusRunningStyle().Render(line))
+		case "bailed", "stopped", "skipped":
+			b.WriteString(errorStyle().Render(line))
+		default:
+			b.WriteString(mutedStyle().Render(line))
+		}
+		b.WriteString("\n")
+	}
+
+	var b strings.Builder
+
+	// No dependencies: show flat task list so users can still validate what will run.
 	if !hasDeps {
-		return ""
+		b.WriteString(headerStyle().Render("Tasks"))
+		b.WriteString("  ")
+		b.WriteString(mutedStyle().Render("(no dependencies)"))
+		b.WriteString("\n")
+		for _, t := range tasks {
+			icon := statusIconFor(t.status)
+			title := t.title
+			if len(title) > 50 {
+				title = title[:47] + "..."
+			}
+			suffix := ""
+			if t.status == "skipped" {
+				suffix = " [SKIPPED]"
+			}
+			line := fmt.Sprintf("  %s #%d  %s%s", icon, t.issueNumber, title, suffix)
+			renderStyledLine(&b, line, t.status)
+		}
+		return b.String()
 	}
 
 	// Build children map (parent → children that depend on it).
@@ -714,7 +767,6 @@ func (m Model) renderDepGraph() string {
 		}
 	}
 
-	var b strings.Builder
 	b.WriteString(headerStyle().Render("Dependencies"))
 	b.WriteString("\n")
 
@@ -732,24 +784,12 @@ func (m Model) renderDepGraph() string {
 			connector = "\u2514\u2500 " // └─
 		}
 
-		statusIcon := "\u25cb" // ○
 		td := taskMap[issue]
+		status := ""
 		if td != nil {
-			switch td.status {
-			case "done":
-				statusIcon = "\u2713" // ✓
-			case "bailed", "stopped":
-				statusIcon = "\u2717" // ✗
-			case "running":
-				statusIcon = "\u25cf" // ●
-			case "blocked":
-				statusIcon = "\u25cc" // ◌
-			case "review":
-				statusIcon = "\u25ce" // ◎
-			case "skipped":
-				statusIcon = "\u2298" // ⊘
-			}
+			status = td.status
 		}
+		icon := statusIconFor(status)
 
 		title := ""
 		if td != nil {
@@ -764,22 +804,8 @@ func (m Model) renderDepGraph() string {
 		if td != nil && td.status == "skipped" {
 			suffix = " [SKIPPED]"
 		}
-		line := fmt.Sprintf("  %s%s%s #%d  %s%s", prefix, connector, statusIcon, issue, title, suffix)
-		if td != nil {
-			switch td.status {
-			case "done":
-				b.WriteString(statusRunningStyle().Render(line))
-			case "bailed", "stopped", "skipped":
-				b.WriteString(errorStyle().Render(line))
-			case "running":
-				b.WriteString(statusRunningStyle().Render(line))
-			default:
-				b.WriteString(mutedStyle().Render(line))
-			}
-		} else {
-			b.WriteString(mutedStyle().Render(line))
-		}
-		b.WriteString("\n")
+		line := fmt.Sprintf("  %s%s%s #%d  %s%s", prefix, connector, icon, issue, title, suffix)
+		renderStyledLine(&b, line, status)
 
 		childPrefix := prefix
 		if isLast {
@@ -1248,6 +1274,13 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 			detailLines := 8
 			fixed += 1 // blank line before detail
 			fixed += detailLines
+
+			// Dep graph section: header + one line per task + blank line before.
+			if len(m.autopilotTasks) > 0 {
+				fixed += 1 // blank line before dep graph
+				fixed += 1 // "Dependencies" / "Tasks" header
+				fixed += len(m.autopilotTasks)
+			}
 
 			remaining := m.height - fixed
 			if remaining < 5 {

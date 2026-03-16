@@ -298,10 +298,13 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 	if newHash != item.ContentHash || item.ContentHash == "" {
 		// Run Haiku summarizer.
 		prompt := buildItemSweepPrompt(item, content, relatedCommits)
-		debugLog("llm call", "stage", "sweep", "step", "input", "component", "sweep_haiku", "model", haikuModel, "item", item.DisplayRef(), "system_prompt", itemSweepSystemPrompt(), "user_prompt", prompt)
+		sys := itemSweepSystemPrompt()
+		debugLog("llm call", "stage", "sweep", "step", "input", "component", "sweep_haiku", "model", haikuModel, "item", item.DisplayRef(),
+			"system_prompt", sys, "user_prompt", prompt,
+			"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
 		resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
 			Model:     haikuModel,
-			System:    itemSweepSystemPrompt(),
+			System:    sys,
 			Messages:  []llm.Message{{Role: "user", Content: prompt}},
 			MaxTokens: 256,
 		})
@@ -311,7 +314,7 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 			p.emit("error", fmt.Sprintf("haiku sweep for %s: %v", item.DisplayRef(), err), nil)
 			item.ContentHash = newHash
 		} else {
-			debugLog("llm response", "stage", "sweep", "step", "output", "component", "sweep_haiku", "item", item.DisplayRef(), "response", resp.Content)
+			debugLog("llm response", "stage", "sweep", "step", "output", "component", "sweep_haiku", "item", item.DisplayRef(), "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
 			result.HaikuRan = true
 			parsed := parseItemSweep(resp.Content)
 			if parsed != nil {
