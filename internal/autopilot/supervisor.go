@@ -62,15 +62,16 @@ type Supervisor struct {
 	repo     string
 	ghToken  string
 
-	mu        sync.Mutex
-	slots     []*slotState // len == maxAgents; nil = idle
-	active    bool
-	paused    bool // when true, fillSlots returns early
-	events    chan Event
-	parentCtx context.Context // parent context for the session (used by slot goroutines for fillSlots)
-	cancel    context.CancelFunc
-	done      chan struct{}
-	discovery chan struct{} // signal to trigger immediate discovery
+	mu         sync.Mutex
+	slots      []*slotState // len == maxAgents; nil = idle
+	active     bool
+	paused     bool // when true, fillSlots returns early
+	preparedAt time.Time
+	events     chan Event
+	parentCtx  context.Context // parent context for the session (used by slot goroutines for fillSlots)
+	cancel     context.CancelFunc
+	done       chan struct{}
+	discovery  chan struct{} // signal to trigger immediate discovery
 }
 
 // New creates a new Supervisor.
@@ -379,6 +380,10 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total, unblo
 		return activeTasks, 0, fmt.Errorf("count unblocked: %w", err)
 	}
 
+	s.mu.Lock()
+	s.preparedAt = time.Now()
+	s.mu.Unlock()
+
 	return activeTasks, len(unblockedTasks), nil
 }
 
@@ -593,6 +598,68 @@ func (s *Supervisor) StatusBlock() string {
 		}
 	}
 	fmt.Fprintf(&b, "\nTask summary: %d queued, %d running, %d in review, %d done, %d bailed, %d stopped\n", queued, running, review, done, bailed, stopped)
+
+	return b.String()
+}
+
+// DepGraph returns a compact dependency graph for injection into the tier 2 analyzer prompt.
+// Format: adjacency list with statuses and a generation timestamp.
+func (s *Supervisor) DepGraph() string {
+	s.mu.Lock()
+	preparedAt := s.preparedAt
+	active := s.active
+	s.mu.Unlock()
+
+	if !active || preparedAt.IsZero() {
+		return ""
+	}
+
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil || len(tasks) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## Autopilot Dependency Graph\n")
+	fmt.Fprintf(&b, "Generated: %s ago\n", time.Since(preparedAt).Round(time.Second))
+
+	// Summary counts.
+	var queued, running, review, done, bailed int
+	for _, t := range tasks {
+		switch t.Status {
+		case "queued":
+			queued++
+		case "running":
+			running++
+		case "review":
+			review++
+		case "done":
+			done++
+		case "bailed":
+			bailed++
+		}
+	}
+	fmt.Fprintf(&b, "Tasks: %d queued, %d running, %d review, %d done, %d bailed\n", queued, running, review, done, bailed)
+
+	// Compact adjacency list: #N (status) → [deps]
+	for _, t := range tasks {
+		if t.Status == "done" || t.Status == "skipped" {
+			continue
+		}
+		var deps []int
+		if t.Dependencies != "" && t.Dependencies != "[]" {
+			_ = json.Unmarshal([]byte(t.Dependencies), &deps)
+		}
+		if len(deps) > 0 {
+			depStrs := make([]string, len(deps))
+			for i, d := range deps {
+				depStrs[i] = fmt.Sprintf("#%d", d)
+			}
+			fmt.Fprintf(&b, "- #%d (%s) → waits on %s\n", t.IssueNumber, t.Status, strings.Join(depStrs, ", "))
+		} else {
+			fmt.Fprintf(&b, "- #%d (%s)\n", t.IssueNumber, t.Status)
+		}
+	}
 
 	return b.String()
 }

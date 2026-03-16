@@ -689,7 +689,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.poller.SetStatusInterval(m.origPollInterval)
 				m.origPollInterval = 0
 			}
-			m.poller.SetAutopilotStatusFunc(nil)
+			m.poller.SetAutopilotDepGraphFunc(nil)
 			m.autopilotSupervisor = nil
 		}
 		m.resizeViewports()
@@ -1933,8 +1933,8 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 
 	m.autopilotMode = "running"
 
-	// Wire autopilot status into poller.
-	m.poller.SetAutopilotStatusFunc(sup.StatusBlock)
+	// Wire autopilot dependency graph into poller for tier 2 analyzer context.
+	m.poller.SetAutopilotDepGraphFunc(sup.DepGraph)
 
 	// Halve status check frequency during autopilot for faster review gate checks.
 	m.origPollInterval = m.project.StatusInterval()
