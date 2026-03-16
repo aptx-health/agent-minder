@@ -47,6 +47,9 @@ func (p *openaiProvider) Complete(ctx context.Context, req *Request) (*Response,
 	if req.MaxTokens > 0 {
 		params.MaxTokens = openai.Int(int64(req.MaxTokens))
 	}
+	if req.Temperature > 0 {
+		params.Temperature = openai.Float(req.Temperature)
+	}
 
 	result, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
