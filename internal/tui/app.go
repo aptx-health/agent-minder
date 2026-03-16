@@ -120,6 +120,12 @@ type rebuildDepsResultMsg struct {
 	err    error
 }
 
+// reviewSessionResultMsg is sent when a review session launch completes.
+type reviewSessionResultMsg struct {
+	result *autopilot.ReviewSessionResult
+	err    error
+}
+
 // autopilotTickMsg triggers periodic refresh of task list and slot status.
 type autopilotTickMsg time.Time
 
@@ -204,14 +210,15 @@ type Model struct {
 	pollConfirm bool
 
 	// Autopilot.
-	autopilotSupervisor    *autopilot.Supervisor
-	autopilotMode          string // "", "scan-confirm", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "completed"
-	autopilotStatus        string
-	autopilotTotal         int
-	autopilotUnblocked     int
-	origPollInterval       time.Duration // saved to restore after autopilot stops
-	autopilotTasksExpanded bool          // 'e' toggles 5-line minimum vs expanded task list
-	autopilotTaskVP        viewport.Model
+	autopilotSupervisor       *autopilot.Supervisor
+	autopilotMode             string // "", "scan-confirm", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "review-confirm", "completed"
+	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
+	autopilotStatus           string
+	autopilotTotal            int
+	autopilotUnblocked        int
+	origPollInterval          time.Duration // saved to restore after autopilot stops
+	autopilotTasksExpanded    bool          // 'e' toggles 5-line minimum vs expanded task list
+	autopilotTaskVP           viewport.Model
 
 	// Autopilot task list cursor and navigation.
 	autopilotTasks         []db.AutopilotTask // sorted task list for navigation
@@ -541,6 +548,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
+	case reviewSessionResultMsg:
+		if msg.err != nil {
+			m.autopilotStatus = fmt.Sprintf("Review session failed: %v", msg.err)
+		} else if msg.result.SessionID != "" {
+			m.autopilotStatus = fmt.Sprintf(
+				"Review ready for #%d — run: cd %s && claude --resume %s",
+				msg.result.IssueNumber, msg.result.WorktreePath, msg.result.SessionID,
+			)
+		} else {
+			m.autopilotStatus = fmt.Sprintf(
+				"Worktree restored for #%d — run: cd %s && claude",
+				msg.result.IssueNumber, msg.result.WorktreePath,
+			)
+		}
+		return m, tea.Tick(20*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
+
 	case bulkTrackResultMsg:
 		m.refreshTrackedItems()
 		if msg.added > 0 && m.autopilotSupervisor != nil {
@@ -804,7 +829,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickEvery()
 
 	case autopilotTickMsg:
-		if m.autopilotMode == "running" || m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" {
+		if m.autopilotMode == "running" || m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" || m.autopilotMode == "review-confirm" {
 			m.rebuildAutopilotTaskContent()
 			return m, autopilotTick()
 		}
@@ -900,6 +925,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.autopilotMode == "review-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "y", "enter":
+			return m.launchReviewSession()
+		case "n", "esc":
+			m.autopilotMode = m.autopilotModeBeforeReview
+			return m, nil
+		}
+	}
 
 	switch msg.String() {
 	case "1":
@@ -943,11 +977,18 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "r":
-		// On tab 3 during autopilot, 'r' restarts the selected task.
-		if m.activeTab == tabAutopilot && m.autopilotMode == "running" {
+		// On tab 3 during autopilot, 'r' is task-contextual:
+		//   - bailed/stopped → restart
+		//   - review → launch review session
+		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
 			task := m.selectedAutopilotTask()
 			if task != nil && (task.Status == "bailed" || task.Status == "stopped") {
 				m.autopilotMode = "restart-confirm"
+				return m, nil
+			}
+			if task != nil && task.Status == "review" {
+				m.autopilotModeBeforeReview = m.autopilotMode
+				m.autopilotMode = "review-confirm"
 				return m, nil
 			}
 			return m, nil
@@ -2009,6 +2050,31 @@ func (m Model) confirmRestartTask() (tea.Model, tea.Cmd) {
 			Type:    "started",
 			Summary: fmt.Sprintf("Restarted #%d — re-queued", issueNum),
 		})
+	}
+}
+
+// launchReviewSession restores the worktree and launches a pre-warmed Claude session for review.
+func (m Model) launchReviewSession() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil || task.Status != "review" {
+		m.autopilotMode = m.autopilotModeBeforeReview
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = m.autopilotModeBeforeReview
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+	m.autopilotMode = m.autopilotModeBeforeReview
+	m.autopilotStatus = fmt.Sprintf("Launching review session for #%d...", issueNum)
+
+	return m, func() tea.Msg {
+		result, err := sup.ReviewSession(context.Background(), taskID)
+		return reviewSessionResultMsg{result: result, err: err}
 	}
 }
 

@@ -127,6 +127,123 @@ func (s *Supervisor) StopAgent(slotIdx int) {
 	}
 }
 
+// ReviewSessionResult holds the outcome of launching a review session.
+type ReviewSessionResult struct {
+	WorktreePath string
+	SessionID    string
+	PRNumber     int
+	IssueNumber  int
+}
+
+// ReviewSession restores a worktree for a review task and launches a Claude session
+// pre-loaded with PR context. Returns the session ID so the user can resume it.
+func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSessionResult, error) {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %d not found", taskID)
+	}
+	if task.Status != "review" {
+		return nil, fmt.Errorf("task #%d has status %q — only review tasks can start a review session", task.IssueNumber, task.Status)
+	}
+	if task.PRNumber <= 0 {
+		return nil, fmt.Errorf("task #%d has no associated PR", task.IssueNumber)
+	}
+
+	// Restore worktree if it doesn't exist.
+	if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+		// Fetch to ensure branch is up-to-date.
+		_ = gitpkg.Fetch(s.repoDir)
+
+		if err := gitpkg.WorktreeAddExisting(s.repoDir, task.WorktreePath, task.Branch); err != nil {
+			return nil, fmt.Errorf("restore worktree: %w", err)
+		}
+	}
+
+	// Build a review prompt.
+	prompt := fmt.Sprintf(
+		"You are starting a review session for PR #%d (issue #%d) in %s/%s.\n\n"+
+			"1. Run `gh pr view %d -R %s/%s` to fetch the PR details\n"+
+			"2. Run `gh pr diff %d -R %s/%s` to see the changes\n"+
+			"3. Summarize what the PR does and note any concerns\n"+
+			"4. Then tell the user you're ready for their review instructions\n\n"+
+			"Worktree: %s\nBranch: %s",
+		task.PRNumber, task.IssueNumber, s.owner, s.repo,
+		task.PRNumber, s.owner, s.repo,
+		task.PRNumber, s.owner, s.repo,
+		task.WorktreePath, task.Branch,
+	)
+
+	// Launch claude -p with stream-json so we can capture the session ID.
+	args := []string{
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--max-turns", "3",
+		prompt,
+	}
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = task.WorktreePath
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude: %w", err)
+	}
+
+	// Parse stream-json output for session_id from the init event.
+	var sessionID string
+	scanner := json.NewDecoder(stdout)
+	for scanner.More() {
+		var raw json.RawMessage
+		if err := scanner.Decode(&raw); err != nil {
+			break
+		}
+		var initEvt struct {
+			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal(raw, &initEvt) == nil && initEvt.Type == "system" && initEvt.Subtype == "init" && initEvt.SessionID != "" {
+			sessionID = initEvt.SessionID
+		}
+	}
+
+	// Wait for the process to finish.
+	_ = cmd.Wait()
+
+	if sessionID == "" {
+		// Session still usable — user can just cd into the worktree and run claude.
+		return &ReviewSessionResult{
+			WorktreePath: task.WorktreePath,
+			PRNumber:     task.PRNumber,
+			IssueNumber:  task.IssueNumber,
+		}, nil
+	}
+
+	return &ReviewSessionResult{
+		WorktreePath: task.WorktreePath,
+		SessionID:    sessionID,
+		PRNumber:     task.PRNumber,
+		IssueNumber:  task.IssueNumber,
+	}, nil
+}
+
 // RestartTask cleans up a bailed or stopped task and re-queues it.
 func (s *Supervisor) RestartTask(ctx context.Context, taskID int64) error {
 	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
