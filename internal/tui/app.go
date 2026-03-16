@@ -518,7 +518,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.autopilotMode == "confirm" && m.autopilotSupervisor != nil {
 			allTasks, err := m.store.GetAutopilotTasks(m.project.ID)
 			if err == nil {
-				m.autopilotTotal = len(allTasks)
+				active := 0
+				for _, t := range allTasks {
+					if t.Status != "skipped" {
+						active++
+					}
+				}
+				m.autopilotTotal = active
 			}
 			unblockedTasks, err := m.store.QueuedUnblockedTasks(m.project.ID)
 			if err == nil {

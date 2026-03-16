@@ -246,12 +246,24 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total, unblo
 		s.setSequentialDeps(tasks)
 	}
 
-	unblockedTasks, err := s.store.QueuedUnblockedTasks(s.project.ID)
+	// Refresh tasks to get accurate counts (some may have been skipped).
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
-		return len(tasks), 0, fmt.Errorf("count unblocked: %w", err)
+		return 0, 0, fmt.Errorf("refresh tasks: %w", err)
+	}
+	activeTasks := 0
+	for _, t := range allTasks {
+		if t.Status != "skipped" {
+			activeTasks++
+		}
 	}
 
-	return len(tasks), len(unblockedTasks), nil
+	unblockedTasks, err := s.store.QueuedUnblockedTasks(s.project.ID)
+	if err != nil {
+		return activeTasks, 0, fmt.Errorf("count unblocked: %w", err)
+	}
+
+	return activeTasks, len(unblockedTasks), nil
 }
 
 // cleanOrphanedWorktrees removes worktrees left behind by interrupted agents.
@@ -672,10 +684,10 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 			continue
 		}
 
-		// Check for "skip" directive.
+		// Check for "skip" directive — mark as skipped so discoverNewTasks won't re-add.
 		var skipStr string
 		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
-			_ = s.store.DeleteAutopilotTask(t.ID)
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
 			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
 			continue
 		}
@@ -1163,12 +1175,13 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 		return RebuildResult{}, fmt.Errorf("get tasks: %w", err)
 	}
 
-	// Partition tasks: rebuildable (queued + blocked) vs context-only (running, done, bailed, stopped, review).
+	// Partition tasks: rebuildable (queued + blocked + skipped) vs context-only (running, done, bailed, stopped, review).
+	// Skipped tasks are included so the user can un-skip them via guidance.
 	var rebuildable []*db.AutopilotTask
 	var contextTasks []*db.AutopilotTask
 	for i := range allTasks {
 		switch allTasks[i].Status {
-		case "queued", "blocked":
+		case "queued", "blocked", "skipped":
 			rebuildable = append(rebuildable, &allTasks[i])
 		default:
 			contextTasks = append(contextTasks, &allTasks[i])
@@ -1314,15 +1327,18 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 		key := strconv.Itoa(t.IssueNumber)
 		rawDeps, ok := rawGraph[key]
 		if !ok {
-			// LLM didn't mention this task — clear its deps.
+			// LLM didn't mention this task — clear its deps and un-skip if needed.
 			_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
+			if t.Status == "skipped" {
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+			}
 			continue
 		}
 
-		// Check for "skip" directive — user asked to exclude this task.
+		// Check for "skip" directive — mark as skipped so discoverNewTasks won't re-add.
 		var skipStr string
 		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
-			_ = s.store.DeleteAutopilotTask(t.ID)
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
 			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
 			skipped++
 			continue
@@ -1347,6 +1363,11 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 			depsJSON = []byte("[]")
 		}
 		_ = s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON))
+
+		// Un-skip: if task was skipped but LLM now gave it deps, restore to queued.
+		if t.Status == "skipped" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+		}
 	}
 
 	// Re-evaluate blocked status: check all queued/blocked tasks for unblocked deps.

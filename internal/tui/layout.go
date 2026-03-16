@@ -752,6 +752,8 @@ func (m Model) renderDepGraph() string {
 				statusIcon = "\u25cc" // ◌
 			case "review":
 				statusIcon = "\u25ce" // ◎
+			case "skipped":
+				statusIcon = "\u2298" // ⊘
 			}
 		}
 
