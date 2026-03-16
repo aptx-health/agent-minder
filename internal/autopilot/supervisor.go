@@ -981,9 +981,20 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	stoppedByUser := s.slots[slotIdx] != nil && s.slots[slotIdx].stoppedByUser
 	s.mu.Unlock()
 
+	// Capture metrics from slot state before it gets cleared by the defer.
+	s.mu.Lock()
+	var durationSec int
+	var costUSD float64
+	if s.slots[slotIdx] != nil {
+		durationSec = int(time.Since(s.slots[slotIdx].startedAt).Seconds())
+		costUSD = s.slots[slotIdx].liveStatus.CostUSD
+	}
+	s.mu.Unlock()
+
 	if stoppedByUser {
 		// User-initiated stop: set stopped status, preserve worktree for investigation.
 		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "stopped")
+		s.recordMetrics(task, durationSec, costUSD, "stopped")
 		s.emitEvent("stopped", fmt.Sprintf("Agent stopped by user on #%d", task.IssueNumber), task)
 		return
 	}
@@ -991,6 +1002,7 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	// Inspect outcome.
 	status := s.inspectOutcome(ctx, task, exitCode)
 	_ = s.store.UpdateAutopilotTaskStatus(task.ID, status)
+	s.recordMetrics(task, durationSec, costUSD, status)
 
 	if status == "review" {
 		// Swap in-progress → needs-review label on the issue.
@@ -1057,6 +1069,21 @@ func (s *Supervisor) cleanup(task *db.AutopilotTask, deleteBranch bool) {
 	// Delete branch only if bailed (keep if PR opened).
 	if deleteBranch {
 		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
+	}
+}
+
+// recordMetrics persists per-task metrics after an agent finishes.
+func (s *Supervisor) recordMetrics(task *db.AutopilotTask, durationSec int, costUSD float64, outcome string) {
+	m := &db.AutopilotMetric{
+		TaskID:      task.ID,
+		ProjectID:   task.ProjectID,
+		DurationSec: durationSec,
+		TokensUsed:  0, // not available from stream-json; reserved for future use
+		CostUSD:     costUSD,
+		Outcome:     outcome,
+	}
+	if err := s.store.RecordAutopilotMetric(m); err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to record metrics for #%d: %v", task.IssueNumber, err), task)
 	}
 }
 

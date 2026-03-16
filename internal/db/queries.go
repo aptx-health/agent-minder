@@ -841,6 +841,36 @@ func parseDependencies(deps string) []int {
 	return result
 }
 
+// --- Autopilot Metrics ---
+
+// RecordAutopilotMetric inserts a metrics record for a completed autopilot task.
+func (s *Store) RecordAutopilotMetric(m *AutopilotMetric) error {
+	result, err := s.db.NamedExec(`
+		INSERT INTO autopilot_metrics (task_id, project_id, duration_sec, tokens_used, cost_usd, outcome)
+		VALUES (:task_id, :project_id, :duration_sec, :tokens_used, :cost_usd, :outcome)
+	`, m)
+	if err != nil {
+		return fmt.Errorf("insert autopilot metric: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("last insert id: %w", err)
+	}
+	m.ID = id
+	return nil
+}
+
+// GetAutopilotMetrics returns all metrics for a project, ordered by most recent first.
+func (s *Store) GetAutopilotMetrics(projectID int64) ([]AutopilotMetric, error) {
+	var metrics []AutopilotMetric
+	if err := s.db.Select(&metrics, `
+		SELECT * FROM autopilot_metrics WHERE project_id = ? ORDER BY created_at DESC
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("get autopilot metrics: %w", err)
+	}
+	return metrics, nil
+}
+
 // LastPoll returns the most recent poll for a project, or nil if none.
 func (s *Store) LastPoll(projectID int64) (*Poll, error) {
 	polls, err := s.RecentPolls(projectID, 1)

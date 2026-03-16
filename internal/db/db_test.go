@@ -1689,3 +1689,137 @@ func TestParseDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestAutopilotMetrics(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{
+		Name:               "metrics-test",
+		GoalType:           "feature",
+		GoalDescription:    "test",
+		RefreshIntervalSec: 300,
+		MessageTTLSec:      172800,
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create a task to attach metrics to.
+	task := &AutopilotTask{
+		ProjectID:    p.ID,
+		IssueNumber:  99,
+		IssueTitle:   "Test task",
+		IssueBody:    "Body",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	// Record a metric.
+	m := &AutopilotMetric{
+		TaskID:      task.ID,
+		ProjectID:   p.ID,
+		DurationSec: 120,
+		TokensUsed:  0,
+		CostUSD:     1.50,
+		Outcome:     "review",
+	}
+	if err := store.RecordAutopilotMetric(m); err != nil {
+		t.Fatalf("RecordAutopilotMetric: %v", err)
+	}
+	if m.ID == 0 {
+		t.Fatal("expected non-zero metric ID")
+	}
+
+	// Record another metric for a second task.
+	task2 := &AutopilotTask{
+		ProjectID:    p.ID,
+		IssueNumber:  100,
+		IssueTitle:   "Test task 2",
+		IssueBody:    "Body 2",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task2); err != nil {
+		t.Fatalf("CreateAutopilotTask 2: %v", err)
+	}
+	m2 := &AutopilotMetric{
+		TaskID:      task2.ID,
+		ProjectID:   p.ID,
+		DurationSec: 60,
+		TokensUsed:  0,
+		CostUSD:     0.75,
+		Outcome:     "bailed",
+	}
+	if err := store.RecordAutopilotMetric(m2); err != nil {
+		t.Fatalf("RecordAutopilotMetric 2: %v", err)
+	}
+
+	// GetAutopilotMetrics should return both.
+	metrics, err := store.GetAutopilotMetrics(p.ID)
+	if err != nil {
+		t.Fatalf("GetAutopilotMetrics: %v", err)
+	}
+	if len(metrics) != 2 {
+		t.Fatalf("got %d metrics, want 2", len(metrics))
+	}
+
+	// Build a lookup by task ID for order-independent verification.
+	byTask := make(map[int64]AutopilotMetric, len(metrics))
+	for _, met := range metrics {
+		byTask[met.TaskID] = met
+	}
+
+	// Verify metric for task 1.
+	got1 := byTask[task.ID]
+	if got1.DurationSec != 120 {
+		t.Errorf("task1 DurationSec = %d, want 120", got1.DurationSec)
+	}
+	if got1.CostUSD != 1.50 {
+		t.Errorf("task1 CostUSD = %f, want 1.50", got1.CostUSD)
+	}
+	if got1.Outcome != "review" {
+		t.Errorf("task1 Outcome = %q, want review", got1.Outcome)
+	}
+
+	// Verify metric for task 2.
+	got2 := byTask[task2.ID]
+	if got2.DurationSec != 60 {
+		t.Errorf("task2 DurationSec = %d, want 60", got2.DurationSec)
+	}
+	if got2.CostUSD != 0.75 {
+		t.Errorf("task2 CostUSD = %f, want 0.75", got2.CostUSD)
+	}
+	if got2.Outcome != "bailed" {
+		t.Errorf("task2 Outcome = %q, want bailed", got2.Outcome)
+	}
+
+	// Metrics for a different project should be empty.
+	p2 := &Project{
+		Name:               "metrics-test-2",
+		GoalType:           "feature",
+		GoalDescription:    "other",
+		RefreshIntervalSec: 300,
+		MessageTTLSec:      172800,
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	if err := store.CreateProject(p2); err != nil {
+		t.Fatalf("CreateProject p2: %v", err)
+	}
+	other, err := store.GetAutopilotMetrics(p2.ID)
+	if err != nil {
+		t.Fatalf("GetAutopilotMetrics other: %v", err)
+	}
+	if len(other) != 0 {
+		t.Errorf("got %d metrics for other project, want 0", len(other))
+	}
+}
