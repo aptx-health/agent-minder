@@ -94,6 +94,8 @@ func (s *Store) UpdateProject(p *Project) error {
 			llm_model = :llm_model,
 			llm_summarizer_model = :llm_summarizer_model,
 			llm_analyzer_model = :llm_analyzer_model,
+			llm_summarizer_provider = :llm_summarizer_provider,
+			llm_analyzer_provider = :llm_analyzer_provider,
 			status_interval_sec = :status_interval_sec,
 			analysis_interval_sec = :analysis_interval_sec,
 			idle_pause_sec = :idle_pause_sec,

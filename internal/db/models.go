@@ -20,6 +20,8 @@ type Project struct {
 	LLMModel              string  `db:"llm_model"`
 	LLMSummarizerModel    string  `db:"llm_summarizer_model"`
 	LLMAnalyzerModel      string  `db:"llm_analyzer_model"`
+	LLMSummarizerProvider string  `db:"llm_summarizer_provider"`
+	LLMAnalyzerProvider   string  `db:"llm_analyzer_provider"`
 	StatusIntervalSec     int     `db:"status_interval_sec"`
 	AnalysisIntervalSec   int     `db:"analysis_interval_sec"`
 	IdlePauseSec          int     `db:"idle_pause_sec"`

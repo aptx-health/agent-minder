@@ -1895,7 +1895,7 @@ func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 
 	// All prerequisites met — ask for confirmation before expensive LLM scan.
 	sup := autopilot.New(
-		m.store, m.project, m.poller.Provider(),
+		m.store, m.project, m.poller.AnalyzerProvider(),
 		repos[0].Path,
 		ghRepos[0].Owner, ghRepos[0].Repo,
 		ghToken,

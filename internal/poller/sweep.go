@@ -302,7 +302,7 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 		debugLog("llm call", "stage", "sweep", "step", "input", "component", "sweep_haiku", "model", haikuModel, "item", item.DisplayRef(),
 			"system_prompt", sys, "user_prompt", prompt,
 			"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
-		resp, err := p.provider.Complete(ctx, &llm.Request{
+		resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
 			Model:     haikuModel,
 			System:    sys,
 			Messages:  []llm.Message{{Role: "user", Content: prompt}},

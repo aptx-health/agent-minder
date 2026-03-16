@@ -136,11 +136,12 @@ func (r *PollResult) LLMResponse() string {
 
 // Poller runs the monitoring loop with separate status and analysis tickers.
 type Poller struct {
-	store     *db.Store
-	project   *db.Project
-	provider  llm.Provider
-	publisher *msgbus.Publisher
-	events    chan Event
+	store              *db.Store
+	project            *db.Project
+	summarizerProvider llm.Provider // tier 1: summarization (Haiku-class)
+	analyzerProvider   llm.Provider // tier 2: analysis (Sonnet-class)
+	publisher          *msgbus.Publisher
+	events             chan Event
 
 	mu                    sync.Mutex
 	paused                bool
@@ -152,11 +153,15 @@ type Poller struct {
 }
 
 // New creates a new Poller. Publisher may be nil if bus publishing is not available.
-func New(store *db.Store, project *db.Project, provider llm.Provider, publisher *msgbus.Publisher) *Poller {
+// summarizerProvider is used for tier 1 (summarization) calls; analyzerProvider is
+// used for tier 2 (analysis), broadcast, and onboard calls. They may be the same
+// instance when both tiers use the same underlying LLM provider.
+func New(store *db.Store, project *db.Project, summarizerProvider, analyzerProvider llm.Provider, publisher *msgbus.Publisher) *Poller {
 	return &Poller{
 		store:                 store,
 		project:               project,
-		provider:              provider,
+		summarizerProvider:    summarizerProvider,
+		analyzerProvider:      analyzerProvider,
 		publisher:             publisher,
 		events:                make(chan Event, 64),
 		statusIntervalChanged: make(chan time.Duration, 1),
@@ -174,8 +179,10 @@ func (p *Poller) Project() *db.Project {
 }
 
 // Provider returns the poller's LLM provider.
-func (p *Poller) Provider() llm.Provider {
-	return p.provider
+// AnalyzerProvider returns the tier 2 (analyzer) provider.
+// Used by autopilot, which only makes analyzer-class LLM calls.
+func (p *Poller) AnalyzerProvider() llm.Provider {
+	return p.analyzerProvider
 }
 
 // SetAutopilotStatusFunc sets a callback that returns autopilot status text
@@ -315,7 +322,7 @@ Keep messages actionable and concise. Use the project's coordination topic.`
 	debugLog("llm call", "stage", "broadcast", "step", "input", "component", "analyzer", "model", model,
 		"system_prompt", system, "user_prompt", prompt,
 		"est_system_tokens", estimateTokens(system), "est_user_tokens", estimateTokens(prompt))
-	resp, err := p.provider.Complete(ctx, &llm.Request{
+	resp, err := p.analyzerProvider.Complete(ctx, &llm.Request{
 		Model:     model,
 		System:    system,
 		Messages:  []llm.Message{{Role: "user", Content: prompt}},
@@ -442,7 +449,7 @@ Respond with ONLY a JSON object:
 	debugLog("llm call", "stage", "onboard", "step", "input", "component", "analyzer", "model", model,
 		"system_prompt", system, "user_prompt", prompt,
 		"est_system_tokens", estimateTokens(system), "est_user_tokens", estimateTokens(prompt))
-	resp, err := p.provider.Complete(ctx, &llm.Request{
+	resp, err := p.analyzerProvider.Complete(ctx, &llm.Request{
 		Model:     model,
 		System:    system,
 		Messages:  []llm.Message{{Role: "user", Content: prompt}},
@@ -844,7 +851,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			debugLog("llm call", "stage", "tier1", "step", "input", "component", "git_summarizer", "model", tier1Model,
 				"system_prompt", sys, "user_prompt", prompt,
 				"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
-			resp, err := p.provider.Complete(ctx, &llm.Request{
+			resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
 				System:    sys,
 				Messages:  []llm.Message{{Role: "user", Content: prompt}},
@@ -870,7 +877,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 			debugLog("llm call", "stage", "tier1", "step", "input", "component", "bus_summarizer", "model", tier1Model,
 				"system_prompt", sys, "user_prompt", prompt,
 				"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
-			resp, err := p.provider.Complete(ctx, &llm.Request{
+			resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
 				Model:     tier1Model,
 				System:    sys,
 				Messages:  []llm.Message{{Role: "user", Content: prompt}},
@@ -930,7 +937,7 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		"system_prompt", tier2System, "user_prompt", tier2Prompt,
 		"est_system_tokens", estimateTokens(tier2System), "est_user_tokens", estimateTokens(tier2Prompt))
 
-	tier2Resp, err := p.provider.Complete(ctx, &llm.Request{
+	tier2Resp, err := p.analyzerProvider.Complete(ctx, &llm.Request{
 		Model:     tier2Model,
 		System:    tier2System,
 		Messages:  []llm.Message{{Role: "user", Content: tier2Prompt}},
