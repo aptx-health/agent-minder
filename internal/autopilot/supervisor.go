@@ -19,6 +19,14 @@ import (
 	"github.com/dustinlange/agent-minder/internal/llm"
 )
 
+// DepOption represents one ranked dependency graph option produced by the LLM.
+type DepOption struct {
+	Name      string                     // e.g., "Conservative — minimal deps"
+	Rationale string                     // why this ordering makes sense
+	Graph     map[string]json.RawMessage // issue# → deps array or "skip"
+	Unblocked int                        // pre-computed count of unblocked tasks
+}
+
 // Event is emitted by the supervisor for the TUI to consume.
 type Event struct {
 	Time    time.Time
@@ -98,19 +106,19 @@ func (s *Supervisor) Events() <-chan Event {
 	return s.events
 }
 
+// IsActive returns true if the supervisor has been launched and is running.
+func (s *Supervisor) IsActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active
+}
+
 // TriggerDiscovery signals the supervisor to check for new tracked items immediately.
 func (s *Supervisor) TriggerDiscovery() {
 	select {
 	case s.discovery <- struct{}{}:
 	default: // already pending
 	}
-}
-
-// IsActive returns whether the supervisor is currently running.
-func (s *Supervisor) IsActive() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.active
 }
 
 // StopAgent cancels a single agent slot, leaving other agents running.
@@ -322,12 +330,12 @@ func (s *Supervisor) IsPaused() bool {
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
 // Always starts fresh — clears previous tasks, cleans up orphaned worktrees.
 // Optional guidance is passed to the LLM during dependency analysis.
-func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total, unblocked int, err error) {
+func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, options []DepOption, err error) {
 	// Validate configured base branch exists in at least one enrolled repo.
 	if s.project.AutopilotBaseBranch != "" {
 		repos, err := s.store.GetRepos(s.project.ID)
 		if err != nil {
-			return 0, 0, fmt.Errorf("get enrolled repos: %w", err)
+			return 0, nil, fmt.Errorf("get enrolled repos: %w", err)
 		}
 		found := false
 		for _, r := range repos {
@@ -337,49 +345,137 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total, unblo
 			}
 		}
 		if !found {
-			return 0, 0, fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
+			return 0, nil, fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
 		}
 	}
 
 	// Clean up any leftovers from a previous run.
 	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
-		return 0, 0, fmt.Errorf("clear autopilot tasks: %w", err)
+		return 0, nil, fmt.Errorf("clear autopilot tasks: %w", err)
 	}
 	s.cleanOrphanedWorktrees()
 
 	// Convert tracked items to autopilot tasks.
 	tasks, err := s.convertTrackedItems(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("convert tracked items: %w", err)
+		return 0, nil, fmt.Errorf("convert tracked items: %w", err)
 	}
 	if len(tasks) == 0 {
-		return 0, 0, nil
+		return 0, nil, nil
 	}
 
-	// Build dependency graph.
-	if err := s.buildDependencyGraph(ctx, tasks, guidance); err != nil {
-		s.emitEvent("error", fmt.Sprintf("Dependency graph failed: %v — falling back to sequential order", err), nil)
-		s.setSequentialDeps(tasks)
-	}
-
-	// Refresh tasks to get accurate counts (some may have been skipped).
-	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	// Build dependency graph options.
+	options, err = s.buildDepOptions(ctx, tasks, guidance)
 	if err != nil {
-		return 0, 0, fmt.Errorf("refresh tasks: %w", err)
+		s.emitEvent("error", fmt.Sprintf("Dependency graph failed: %v — falling back to sequential order", err), nil)
+		// Build a single sequential fallback option.
+		graph := make(map[string]json.RawMessage, len(tasks))
+		for i, t := range tasks {
+			key := strconv.Itoa(t.IssueNumber)
+			if i == 0 {
+				graph[key] = json.RawMessage("[]")
+			} else {
+				deps, _ := json.Marshal([]int{tasks[i-1].IssueNumber})
+				graph[key] = json.RawMessage(deps)
+			}
+		}
+		options = []DepOption{{
+			Name:      "Sequential (fallback)",
+			Rationale: "LLM analysis failed; tasks will run one at a time in order.",
+			Graph:     graph,
+			Unblocked: 1,
+		}}
 	}
-	activeTasks := 0
-	for _, t := range allTasks {
-		if t.Status != "skipped" {
-			activeTasks++
+
+	return len(tasks), options, nil
+}
+
+// ApplyDepOption applies the selected dependency option to the DB tasks.
+// Call this after the user picks an option from the dep-select screen.
+func (s *Supervisor) ApplyDepOption(ctx context.Context, opt DepOption) error {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	for _, t := range tasks {
+		key := strconv.Itoa(t.IssueNumber)
+		rawDeps, ok := opt.Graph[key]
+		if !ok {
+			continue
+		}
+
+		// Check for "skip" directive.
+		var skipStr string
+		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
+			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), &t)
+			continue
+		}
+
+		// Parse deps array.
+		var deps []int
+		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			var strDeps []string
+			if err2 := json.Unmarshal(rawDeps, &strDeps); err2 != nil {
+				continue
+			}
+			for _, sd := range strDeps {
+				if n, err3 := strconv.Atoi(sd); err3 == nil {
+					deps = append(deps, n)
+				}
+			}
+		}
+
+		if len(deps) > 0 {
+			depsJSON, _ := json.Marshal(deps)
+			if err := s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON)); err != nil {
+				return fmt.Errorf("update deps for #%d: %w", t.IssueNumber, err)
+			}
+			// Block tasks that have unsatisfied deps.
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "blocked")
 		}
 	}
 
-	unblockedTasks, err := s.store.QueuedUnblockedTasks(s.project.ID)
+	// Re-evaluate: unblock tasks whose deps are all satisfied.
+	freshTasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
-		return activeTasks, 0, fmt.Errorf("count unblocked: %w", err)
+		return fmt.Errorf("refresh tasks: %w", err)
+	}
+	statusMap := make(map[int]string, len(freshTasks))
+	for _, t := range freshTasks {
+		statusMap[t.IssueNumber] = t.Status
+	}
+	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
+	trackedState := make(map[int]string, len(trackedItems))
+	for _, item := range trackedItems {
+		trackedState[item.Number] = item.State
+	}
+	for _, t := range freshTasks {
+		if t.Status != "blocked" {
+			continue
+		}
+		deps := parseDeps(t.Dependencies)
+		allSatisfied := true
+		for _, dep := range deps {
+			if taskStatus, ok := statusMap[dep]; ok {
+				if taskStatus != "done" {
+					allSatisfied = false
+					break
+				}
+			} else if state, ok := trackedState[dep]; ok {
+				if state == "open" {
+					allSatisfied = false
+					break
+				}
+			}
+		}
+		if allSatisfied {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+		}
 	}
 
-	return activeTasks, len(unblockedTasks), nil
+	return nil
 }
 
 // cleanOrphanedWorktrees removes worktrees left behind by interrupted agents.
@@ -675,9 +771,17 @@ func hasLabel(labels []string, target string) bool {
 	return false
 }
 
-func (s *Supervisor) buildDependencyGraph(ctx context.Context, tasks []*db.AutopilotTask, guidance string) error {
+func (s *Supervisor) buildDepOptions(ctx context.Context, tasks []*db.AutopilotTask, guidance string) ([]DepOption, error) {
 	if len(tasks) <= 1 {
-		return nil // No dependencies possible with 0-1 tasks.
+		// Single task: return one option with no deps.
+		graph := make(map[string]json.RawMessage, 1)
+		graph[strconv.Itoa(tasks[0].IssueNumber)] = json.RawMessage("[]")
+		return []DepOption{{
+			Name:      "No dependencies",
+			Rationale: "Only one task — no dependencies possible.",
+			Graph:     graph,
+			Unblocked: 1,
+		}}, nil
 	}
 
 	// Build task issue numbers set for quick lookup.
@@ -726,18 +830,29 @@ A dependency means issue B cannot start until issue A is completed (e.g., B buil
 Dependencies can include issues from BOTH sections — an agent task can depend on a non-agent issue if that issue's work must be done first.
 
 %s%s
-Respond with ONLY a JSON object. Keys are issue numbers (only for issues being worked on by agents), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+Respond with ONLY a JSON array of exactly 3 dependency graph options, ranked from most likely correct to least likely. Each option has a "name", "rationale", and "graph" field.
+
+The "graph" is an object where keys are issue numbers (only for issues being worked on by agents), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
 
 If the user asks to skip or exclude an issue, set its value to the string "skip" instead of an array.
 
 IMPORTANT: Use integer values in dependency arrays, not strings.
-Example: {"42": [], "38": [42], "15": "skip"}
 
-Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`, issueList.String(), guidanceSection)
+The 3 options should represent meaningfully different dependency strategies:
+- Option 1: Your best analysis of actual dependencies
+- Option 2: An alternative interpretation (e.g., more conservative or more parallel)
+- Option 3: A different trade-off (e.g., maximum parallelism or stricter ordering)
+
+Example response:
+[
+  {"name": "Conservative — minimal deps", "rationale": "Only blocks issues that truly depend on schema changes.", "graph": {"42": [], "38": [42], "15": []}},
+  {"name": "Moderate — logical grouping", "rationale": "Groups related features; UI issues wait on API changes.", "graph": {"42": [], "38": [42], "15": [42]}},
+  {"name": "Maximum parallelism", "rationale": "All issues can start independently.", "graph": {"42": [], "38": [], "15": []}}
+]`, issueList.String(), guidanceSection)
 
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
-	var rawGraph map[string]json.RawMessage
+	var options []DepOption
 	var content string
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -745,11 +860,11 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 			Model:       s.project.LLMAnalyzerModel,
 			System:      "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
 			Messages:    messages,
-			MaxTokens:   512,
+			MaxTokens:   1536,
 			Temperature: 0,
 		})
 		if err != nil {
-			return fmt.Errorf("LLM call: %w", err)
+			return nil, fmt.Errorf("LLM call: %w", err)
 		}
 
 		content = strings.TrimSpace(resp.Content)
@@ -760,77 +875,81 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 				content = strings.Join(lines[1:len(lines)-1], "\n")
 			}
 		}
-		// Extract JSON object — trim any leading/trailing non-JSON text.
-		if start := strings.Index(content, "{"); start >= 0 {
-			if end := strings.LastIndex(content, "}"); end > start {
+		// Extract JSON array — trim any leading/trailing non-JSON text.
+		if start := strings.Index(content, "["); start >= 0 {
+			if end := strings.LastIndex(content, "]"); end > start {
 				content = content[start : end+1]
 			}
 		}
 
-		if err := json.Unmarshal([]byte(content), &rawGraph); err != nil {
+		var rawOptions []struct {
+			Name      string                     `json:"name"`
+			Rationale string                     `json:"rationale"`
+			Graph     map[string]json.RawMessage `json:"graph"`
+		}
+
+		if err := json.Unmarshal([]byte(content), &rawOptions); err != nil {
 			if attempt == 0 {
-				// Retry with error feedback.
 				messages = append(messages,
 					llm.Message{Role: "assistant", Content: resp.Content},
-					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON: %v\n\nPlease respond with ONLY the JSON object, no text before or after.", err)},
+					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON array: %v\n\nPlease respond with ONLY the JSON array of 3 options, no text before or after.", err)},
 				)
 				continue
 			}
-			return fmt.Errorf("parse dep graph: %w", err)
+			return nil, fmt.Errorf("parse dep options: %w", err)
+		}
+
+		for _, ro := range rawOptions {
+			opt := DepOption{
+				Name:      ro.Name,
+				Rationale: ro.Rationale,
+				Graph:     ro.Graph,
+				Unblocked: countUnblocked(ro.Graph, tasks),
+			}
+			options = append(options, opt)
 		}
 		break
 	}
 
-	// Update each task's dependencies.
+	if len(options) == 0 {
+		return nil, fmt.Errorf("LLM returned no options")
+	}
+
+	return options, nil
+}
+
+// countUnblocked counts how many tasks have no unsatisfied dependencies in a graph.
+func countUnblocked(graph map[string]json.RawMessage, tasks []*db.AutopilotTask) int {
+	count := 0
 	for _, t := range tasks {
 		key := strconv.Itoa(t.IssueNumber)
-		rawDeps, ok := rawGraph[key]
+		rawDeps, ok := graph[key]
 		if !ok {
+			count++ // not in graph = no deps
 			continue
 		}
-
-		// Check for "skip" directive — mark as skipped so discoverNewTasks won't re-add.
+		// Check for "skip".
 		var skipStr string
 		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
-			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
-			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
-			continue
+			continue // skipped tasks don't count as unblocked
 		}
-
-		// Try []int first, then []string, then []any.
 		var deps []int
 		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			// Try string array.
 			var strDeps []string
-			if err2 := json.Unmarshal(rawDeps, &strDeps); err2 != nil {
-				continue
-			}
-			for _, sd := range strDeps {
-				if n, err3 := strconv.Atoi(sd); err3 == nil {
-					deps = append(deps, n)
+			if json.Unmarshal(rawDeps, &strDeps) == nil {
+				for _, sd := range strDeps {
+					if n, err2 := strconv.Atoi(sd); err2 == nil {
+						deps = append(deps, n)
+					}
 				}
 			}
 		}
-
-		if len(deps) > 0 {
-			depsJSON, _ := json.Marshal(deps)
-			if err := s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON)); err != nil {
-				return fmt.Errorf("update deps for #%d: %w", t.IssueNumber, err)
-			}
+		if len(deps) == 0 {
+			count++
 		}
 	}
-
-	return nil
-}
-
-// setSequentialDeps creates a simple chain: each task depends on the previous one (by issue number).
-// This is the safe fallback when the LLM dep graph fails — tasks run one at a time in order.
-func (s *Supervisor) setSequentialDeps(tasks []*db.AutopilotTask) {
-	// Tasks are already sorted by issue number from the DB query.
-	for i := 1; i < len(tasks); i++ {
-		deps := []int{tasks[i-1].IssueNumber}
-		depsJSON, _ := json.Marshal(deps)
-		_ = s.store.UpdateAutopilotTaskDeps(tasks[i].ID, string(depsJSON))
-	}
+	return count
 }
 
 func (s *Supervisor) fillSlots(ctx context.Context) {
@@ -1274,10 +1393,10 @@ type RebuildResult struct {
 
 // RebuildDependencies re-analyzes the dependency graph for queued and blocked tasks,
 // incorporating user guidance. Running/done/review tasks are untouched.
-func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string) (RebuildResult, error) {
+func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string) ([]DepOption, error) {
 	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
-		return RebuildResult{}, fmt.Errorf("get tasks: %w", err)
+		return nil, fmt.Errorf("get tasks: %w", err)
 	}
 
 	// Partition tasks: rebuildable (queued + blocked + skipped) vs context-only (running, done, bailed, stopped, review).
@@ -1294,13 +1413,7 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 	}
 
 	if len(rebuildable) == 0 {
-		return RebuildResult{}, nil
-	}
-
-	// Build issue numbers set for rebuildable tasks.
-	rebuildIssues := make(map[int]bool, len(rebuildable))
-	for _, t := range rebuildable {
-		rebuildIssues[t.IssueNumber] = true
+		return nil, nil
 	}
 
 	// Build issue list for the LLM.
@@ -1371,19 +1484,30 @@ Dependencies can include issues from ALL sections — a queued task can depend o
 		promptParts = append(promptParts, fmt.Sprintf("User feedback on dependencies:\n  %q\n\nRe-analyze and update the dependency graph considering this feedback.", userComment))
 	}
 
-	promptParts = append(promptParts, `Respond with ONLY a JSON object. Keys are issue numbers (only for issues being re-analyzed), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
+	promptParts = append(promptParts, `Respond with ONLY a JSON array of exactly 3 dependency graph options, ranked from most likely correct to least likely. Each option has a "name", "rationale", and "graph" field.
+
+The "graph" is an object where keys are issue numbers (only for issues being re-analyzed), values are arrays of integer issue numbers that must complete first. Issues with no dependencies get an empty array.
 
 If the user asks to skip or exclude an issue from autopilot, set its value to the string "skip" instead of an array.
 
 IMPORTANT: Use integer values in dependency arrays, not strings.
-Example: {"42": [], "38": [42], "15": "skip"}
 
-Be conservative — only add a dependency if the work truly cannot proceed without the other issue being done first.`)
+The 3 options should represent meaningfully different dependency strategies:
+- Option 1: Your best analysis of actual dependencies
+- Option 2: An alternative interpretation (e.g., more conservative or more parallel)
+- Option 3: A different trade-off (e.g., maximum parallelism or stricter ordering)
+
+Example response:
+[
+  {"name": "Conservative — minimal deps", "rationale": "Only blocks issues that truly depend on schema changes.", "graph": {"42": [], "38": [42], "15": []}},
+  {"name": "Moderate — logical grouping", "rationale": "Groups related features; UI issues wait on API changes.", "graph": {"42": [], "38": [42], "15": [42]}},
+  {"name": "Maximum parallelism", "rationale": "All issues can start independently.", "graph": {"42": [], "38": [], "15": []}}
+]`)
 
 	prompt := strings.Join(promptParts, "\n\n")
 	messages := []llm.Message{{Role: "user", Content: prompt}}
 
-	var rawGraph map[string]json.RawMessage
+	var options []DepOption
 	var content string
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -1391,11 +1515,11 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 			Model:       s.project.LLMAnalyzerModel,
 			System:      "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
 			Messages:    messages,
-			MaxTokens:   512,
+			MaxTokens:   1536,
 			Temperature: 0,
 		})
 		if err != nil {
-			return RebuildResult{}, fmt.Errorf("LLM call: %w", err)
+			return nil, fmt.Errorf("LLM call: %w", err)
 		}
 
 		content = strings.TrimSpace(resp.Content)
@@ -1406,33 +1530,72 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 				content = strings.Join(lines[1:len(lines)-1], "\n")
 			}
 		}
-		// Extract JSON object.
-		if start := strings.Index(content, "{"); start >= 0 {
-			if end := strings.LastIndex(content, "}"); end > start {
+		// Extract JSON array.
+		if start := strings.Index(content, "["); start >= 0 {
+			if end := strings.LastIndex(content, "]"); end > start {
 				content = content[start : end+1]
 			}
 		}
 
-		if err := json.Unmarshal([]byte(content), &rawGraph); err != nil {
+		var rawOptions []struct {
+			Name      string                     `json:"name"`
+			Rationale string                     `json:"rationale"`
+			Graph     map[string]json.RawMessage `json:"graph"`
+		}
+
+		if err := json.Unmarshal([]byte(content), &rawOptions); err != nil {
 			if attempt == 0 {
 				messages = append(messages,
 					llm.Message{Role: "assistant", Content: resp.Content},
-					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON: %v\n\nPlease respond with ONLY the JSON object, no text before or after.", err)},
+					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON array: %v\n\nPlease respond with ONLY the JSON array of 3 options, no text before or after.", err)},
 				)
 				continue
 			}
-			return RebuildResult{}, fmt.Errorf("parse dep graph: %w", err)
+			return nil, fmt.Errorf("parse dep options: %w", err)
+		}
+
+		for _, ro := range rawOptions {
+			opt := DepOption{
+				Name:      ro.Name,
+				Rationale: ro.Rationale,
+				Graph:     ro.Graph,
+				Unblocked: countUnblocked(ro.Graph, rebuildable),
+			}
+			options = append(options, opt)
 		}
 		break
 	}
 
-	// Update deps for rebuildable tasks.
+	if len(options) == 0 {
+		return nil, fmt.Errorf("LLM returned no options")
+	}
+
+	return options, nil
+}
+
+// ApplyRebuildDepOption applies a dep option during a running autopilot session,
+// handling the additional concerns of un-skipping, re-evaluating blocked status,
+// and filling slots with newly unblocked tasks.
+func (s *Supervisor) ApplyRebuildDepOption(ctx context.Context, opt DepOption) (RebuildResult, error) {
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return RebuildResult{}, fmt.Errorf("get tasks: %w", err)
+	}
+
+	// Only update rebuildable tasks (queued, blocked, skipped).
 	var skipped int
-	for _, t := range rebuildable {
+	for _, t := range allTasks {
+		switch t.Status {
+		case "queued", "blocked", "skipped":
+			// proceed
+		default:
+			continue
+		}
+
 		key := strconv.Itoa(t.IssueNumber)
-		rawDeps, ok := rawGraph[key]
+		rawDeps, ok := opt.Graph[key]
 		if !ok {
-			// LLM didn't mention this task — clear its deps and un-skip if needed.
+			// LLM didn't mention this task — clear deps, un-skip if needed.
 			_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
 			if t.Status == "skipped" {
 				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
@@ -1440,11 +1603,11 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 			continue
 		}
 
-		// Check for "skip" directive — mark as skipped so discoverNewTasks won't re-add.
+		// Check for "skip" directive.
 		var skipStr string
 		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
 			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
-			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), t)
+			s.emitEvent("warning", fmt.Sprintf("Task #%d excluded from autopilot", t.IssueNumber), &t)
 			skipped++
 			continue
 		}
@@ -1469,14 +1632,13 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 		}
 		_ = s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON))
 
-		// Un-skip: if task was skipped but LLM now gave it deps, restore to queued.
+		// Un-skip if needed.
 		if t.Status == "skipped" {
 			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
 		}
 	}
 
-	// Re-evaluate blocked status: check all queued/blocked tasks for unblocked deps.
-	// Rebuild status map from fresh DB state.
+	// Re-evaluate blocked status.
 	freshTasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
 		return RebuildResult{}, fmt.Errorf("refresh tasks: %w", err)
@@ -1485,6 +1647,7 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 	for _, t := range freshTasks {
 		statusMap[t.IssueNumber] = t.Status
 	}
+	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
 	trackedState := make(map[int]string, len(trackedItems))
 	for _, item := range trackedItems {
 		trackedState[item.Number] = item.State
@@ -1495,7 +1658,6 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 		if t.Status != "queued" && t.Status != "blocked" {
 			continue
 		}
-
 		deps := parseDeps(t.Dependencies)
 		allSatisfied := true
 		anyDep := false
@@ -1513,7 +1675,6 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 				}
 			}
 		}
-
 		if allSatisfied && t.Status == "blocked" {
 			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
 			unblocked++
@@ -1528,7 +1689,6 @@ Be conservative — only add a dependency if the work truly cannot proceed witho
 	}
 
 	s.emitEvent("completed", fmt.Sprintf("Dep graph rebuilt — %d unblocked, %d skipped", unblocked, skipped), nil)
-
 	return RebuildResult{Unblocked: unblocked, Skipped: skipped}, nil
 }
 

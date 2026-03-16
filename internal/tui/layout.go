@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/dustinlange/agent-minder/internal/autopilot"
 	"github.com/dustinlange/agent-minder/internal/db"
 )
 
@@ -233,6 +235,49 @@ func (m Model) renderAutopilotTab() string {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  Guidance: %q", m.autopilotDepGuidance)))
 			b.WriteString("\n")
 		}
+		return b.String()
+	}
+
+	// Dep-select state: carousel through dependency graph options.
+	if m.autopilotMode == "dep-select" && len(m.autopilotDepOptions) > 0 {
+		idx := m.autopilotDepSelection
+		opt := m.autopilotDepOptions[idx]
+		n := len(m.autopilotDepOptions)
+
+		// Page indicator: ● ○ ○
+		var dots strings.Builder
+		for i := 0; i < n; i++ {
+			if i == idx {
+				dots.WriteString("\u25cf") // ●
+			} else {
+				dots.WriteString("\u25cb") // ○
+			}
+			if i < n-1 {
+				dots.WriteString(" ")
+			}
+		}
+
+		b.WriteString("\n")
+		b.WriteString(headerStyle().Render(fmt.Sprintf("  Autopilot — %s", opt.Name)))
+		b.WriteString("  ")
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("(%d/%d  %s)", idx+1, n, dots.String())))
+		b.WriteString("\n\n")
+		// Wrap rationale to terminal width minus indent.
+		rationaleWidth := m.width - 4
+		if rationaleWidth < 40 {
+			rationaleWidth = 40
+		}
+		b.WriteString(mutedStyle().Width(rationaleWidth).Render(fmt.Sprintf("  %s", opt.Rationale)))
+		b.WriteString("\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  %d unblocked of %d issues", opt.Unblocked, m.autopilotTotal)))
+		b.WriteString("\n")
+
+		depTree := m.renderDepGraphFromOption(opt)
+		if depTree != "" {
+			b.WriteString("\n")
+			b.WriteString(depTree)
+		}
+		b.WriteString("\n")
 		return b.String()
 	}
 
@@ -827,6 +872,189 @@ func (m Model) renderDepGraph() string {
 	return b.String()
 }
 
+// renderDepGraphFromOption renders a dependency tree preview from a DepOption's graph data.
+func (m Model) renderDepGraphFromOption(opt autopilot.DepOption) string {
+	if len(opt.Graph) == 0 {
+		return ""
+	}
+
+	type taskDep struct {
+		issueNumber int
+		title       string
+		status      string
+		deps        []int
+	}
+
+	// Build task data from autopilotTasks (for titles) + option graph (for deps).
+	taskTitles := make(map[int]string)
+	for _, t := range m.autopilotTasks {
+		taskTitles[t.IssueNumber] = t.IssueTitle
+	}
+
+	tasks := make([]taskDep, 0, len(opt.Graph))
+	hasDeps := false
+	taskMap := make(map[int]*taskDep)
+
+	for key, rawDeps := range opt.Graph {
+		var issueNum int
+		if _, err := fmt.Sscanf(key, "%d", &issueNum); err != nil {
+			continue
+		}
+
+		// Check for skip.
+		var skipStr string
+		if json.Unmarshal(rawDeps, &skipStr) == nil && skipStr == "skip" {
+			td := taskDep{issueNumber: issueNum, title: taskTitles[issueNum], status: "skipped"}
+			tasks = append(tasks, td)
+			taskMap[issueNum] = &tasks[len(tasks)-1]
+			continue
+		}
+
+		var deps []int
+		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			var strDeps []string
+			if json.Unmarshal(rawDeps, &strDeps) == nil {
+				for _, sd := range strDeps {
+					var n int
+					if _, err2 := fmt.Sscanf(sd, "%d", &n); err2 == nil {
+						deps = append(deps, n)
+					}
+				}
+			}
+		}
+		if len(deps) > 0 {
+			hasDeps = true
+		}
+
+		td := taskDep{issueNumber: issueNum, title: taskTitles[issueNum], status: "queued", deps: deps}
+		tasks = append(tasks, td)
+		taskMap[issueNum] = &tasks[len(tasks)-1]
+	}
+
+	// Sort tasks by issue number for stable rendering.
+	for i := 0; i < len(tasks); i++ {
+		for j := i + 1; j < len(tasks); j++ {
+			if tasks[i].issueNumber > tasks[j].issueNumber {
+				tasks[i], tasks[j] = tasks[j], tasks[i]
+			}
+		}
+	}
+	// Rebuild taskMap pointers after sort.
+	for i := range tasks {
+		taskMap[tasks[i].issueNumber] = &tasks[i]
+	}
+
+	statusIconFor := func(status string) string {
+		switch status {
+		case "skipped":
+			return "\u2298" // ⊘
+		case "blocked":
+			return "\u25cc" // ◌
+		default:
+			return "\u25cb" // ○
+		}
+	}
+
+	var b strings.Builder
+
+	if !hasDeps {
+		b.WriteString(headerStyle().Render("  Tasks"))
+		b.WriteString("  ")
+		b.WriteString(mutedStyle().Render("(no dependencies)"))
+		b.WriteString("\n")
+		for _, t := range tasks {
+			icon := statusIconFor(t.status)
+			title := t.title
+			if len(title) > 50 {
+				title = title[:47] + "..."
+			}
+			suffix := ""
+			if t.status == "skipped" {
+				suffix = " [SKIPPED]"
+			}
+			line := fmt.Sprintf("    %s #%d  %s%s", icon, t.issueNumber, title, suffix)
+			b.WriteString(mutedStyle().Render(line))
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
+	// Build children map.
+	children := make(map[int][]int)
+	hasParent := make(map[int]bool)
+	for _, t := range tasks {
+		for _, dep := range t.deps {
+			children[dep] = append(children[dep], t.issueNumber)
+			hasParent[t.issueNumber] = true
+		}
+	}
+
+	var roots []int
+	for _, t := range tasks {
+		if !hasParent[t.issueNumber] {
+			roots = append(roots, t.issueNumber)
+		}
+	}
+
+	b.WriteString(headerStyle().Render("  Dependencies"))
+	b.WriteString("\n")
+
+	visited := make(map[int]bool)
+	var renderNode func(issue int, prefix string, isLast bool)
+	renderNode = func(issue int, prefix string, isLast bool) {
+		if visited[issue] {
+			return
+		}
+		visited[issue] = true
+
+		connector := "\u251c\u2500 " // ├─
+		if isLast {
+			connector = "\u2514\u2500 " // └─
+		}
+
+		td := taskMap[issue]
+		status := "queued"
+		if td != nil {
+			status = td.status
+		}
+		icon := statusIconFor(status)
+
+		title := ""
+		if td != nil {
+			title = td.title
+			if len(title) > 50 {
+				title = title[:47] + "..."
+			}
+		}
+
+		suffix := ""
+		if td != nil && td.status == "skipped" {
+			suffix = " [SKIPPED]"
+		}
+		line := fmt.Sprintf("    %s%s%s #%d  %s%s", prefix, connector, icon, issue, title, suffix)
+		b.WriteString(mutedStyle().Render(line))
+		b.WriteString("\n")
+
+		childPrefix := prefix
+		if isLast {
+			childPrefix += "   "
+		} else {
+			childPrefix += "\u2502  " // │
+		}
+
+		kids := children[issue]
+		for i, kid := range kids {
+			renderNode(kid, childPrefix, i == len(kids)-1)
+		}
+	}
+
+	for i, root := range roots {
+		renderNode(root, "", i == len(roots)-1)
+	}
+
+	return b.String()
+}
+
 // renderHeader returns the compact 2-line header with inline repo/topic counts.
 func (m Model) renderHeader() string {
 	var b strings.Builder
@@ -1348,6 +1576,16 @@ func (m Model) bottomBarHeight() int {
 		if m.showHelp {
 			return 2 + helpOverlayHeight() + 2 // blank + header + body + close hint + blank
 		}
+		// Autopilot action modes have an extra padding line above the controls.
+		if m.activeTab == tabAutopilot {
+			switch m.autopilotMode {
+			case "scan-confirm", "dep-select", "confirm":
+				if (m.autopilotMode == "scan-confirm" || m.autopilotMode == "dep-select") && m.polling {
+					return 2 // blank + spinner row
+				}
+				return 3 // blank + padding + help row
+			}
+		}
 		return 2 // blank + 1 help row
 	}
 }
@@ -1529,10 +1767,45 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "scan-confirm" {
-			b.WriteString(helpStyle().Render("enter: analyze • esc: cancel"))
-			b.WriteString("\n")
+			if m.polling {
+				b.WriteString("  ")
+				b.WriteString(m.spinner.View())
+				b.WriteString(" ")
+				b.WriteString(mutedStyle().Render("Analyzing tracked items..."))
+				b.WriteString("\n")
+			} else {
+				b.WriteString("\n")
+				b.WriteString(helpKeyStyle().Render("enter"))
+				b.WriteString(helpStyle().Render(": analyze • "))
+				b.WriteString(helpKeyStyle().Render("esc"))
+				b.WriteString(helpStyle().Render(": cancel"))
+				b.WriteString("\n")
+			}
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "dep-select" {
+			if m.polling {
+				b.WriteString("  ")
+				b.WriteString(m.spinner.View())
+				b.WriteString(" ")
+				b.WriteString(mutedStyle().Render("Analyzing tracked items..."))
+				b.WriteString("\n")
+			} else {
+				b.WriteString("\n")
+				b.WriteString(helpKeyStyle().Render("\u2190/\u2192"))
+				b.WriteString(helpStyle().Render(": flip • "))
+				b.WriteString(helpKeyStyle().Render("enter"))
+				b.WriteString(helpStyle().Render(": select • "))
+				b.WriteString(helpKeyStyle().Render("G"))
+				b.WriteString(helpStyle().Render(": regenerate with comments • "))
+				b.WriteString(helpKeyStyle().Render("esc"))
+				b.WriteString(helpStyle().Render(": cancel"))
+				b.WriteString("\n")
+			}
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "confirm" {
-			b.WriteString(helpStyle().Render("enter: launch • esc: cancel"))
+			b.WriteString("\n")
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": launch • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "stop-confirm" {
 			b.WriteString(warningStyle().Render("  ⚠ Stop all running agents? "))
