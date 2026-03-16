@@ -4,6 +4,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // Message represents a chat message.
@@ -45,14 +46,22 @@ func NewProvider(name string, opts ...Option) (Provider, error) {
 		opt(cfg)
 	}
 
+	var p Provider
+	var err error
+
 	switch name {
 	case "anthropic":
-		return newAnthropicProvider(cfg)
+		p, err = newAnthropicProvider(cfg)
 	case "openai":
-		return newOpenAIProvider(cfg)
+		p, err = newOpenAIProvider(cfg)
 	default:
 		return nil, fmt.Errorf("unknown provider: %q", name)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	return NewRetryProvider(p, cfg.Logger), nil
 }
 
 // Option configures a provider.
@@ -61,6 +70,7 @@ type Option func(*providerConfig)
 type providerConfig struct {
 	APIKey  string
 	BaseURL string
+	Logger  *slog.Logger
 }
 
 // WithAPIKey sets the API key (overrides env var).
@@ -71,4 +81,9 @@ func WithAPIKey(key string) Option {
 // WithBaseURL sets a custom base URL (for OpenAI-compatible providers).
 func WithBaseURL(url string) Option {
 	return func(c *providerConfig) { c.BaseURL = url }
+}
+
+// WithLogger sets a structured logger for retry debug logging.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *providerConfig) { c.Logger = l }
 }
