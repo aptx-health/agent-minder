@@ -1753,17 +1753,9 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 	if maxAgents < 1 {
 		maxAgents = 3
 	}
-	maxTurns := m.project.AutopilotMaxTurns
-	if maxTurns < 1 {
-		maxTurns = 50
-	}
-	maxBudget := m.project.AutopilotMaxBudgetUSD
-	if maxBudget <= 0 {
-		maxBudget = 3.00
-	}
 	m.autopilotStatus = fmt.Sprintf(
-		"Autopilot running in background — %d agents, %d turns, $%.2f/agent max — press A to stop",
-		maxAgents, maxTurns, maxBudget,
+		"Autopilot running in background — %d agents max — press A to stop",
+		maxAgents,
 	)
 
 	return m, tea.Batch(
