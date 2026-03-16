@@ -12,6 +12,11 @@ type LiveStatus struct {
 	CurrentTool string // e.g. "Bash", "Read", "Edit"
 	ToolInput   string // truncated summary of tool input
 	StepCount   int    // incremented on each assistant message
+
+	// Populated from the "result" event when the agent finishes.
+	TotalCostUSD float64 // total cost reported by Claude CLI
+	DurationMs   int     // duration reported by Claude CLI
+	NumTurns     int     // number of turns reported by Claude CLI
 }
 
 // Stream-json event types (unexported, used only by scanner).
@@ -92,6 +97,9 @@ func scanStream(r io.Reader, logFile *os.File, slotIdx int, s *Supervisor) {
 			case "result":
 				slot.liveStatus.CurrentTool = ""
 				slot.liveStatus.ToolInput = ""
+				slot.liveStatus.TotalCostUSD = evt.TotalCost
+				slot.liveStatus.DurationMs = evt.Duration
+				slot.liveStatus.NumTurns = evt.NumTurns
 			}
 		}
 		s.mu.Unlock()

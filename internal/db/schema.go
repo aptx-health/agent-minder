@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 12
+const currentVersion = 13
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -143,6 +143,18 @@ CREATE TABLE IF NOT EXISTS completed_items (
 	summary      TEXT NOT NULL DEFAULT '',
 	completed_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS autopilot_metrics (
+	id           INTEGER PRIMARY KEY,
+	task_id      INTEGER NOT NULL REFERENCES autopilot_tasks(id) ON DELETE CASCADE,
+	project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	issue_number INTEGER NOT NULL DEFAULT 0,
+	duration_sec REAL NOT NULL DEFAULT 0,
+	tokens_used  INTEGER NOT NULL DEFAULT 0,
+	cost_usd     REAL NOT NULL DEFAULT 0,
+	outcome      TEXT NOT NULL DEFAULT '',
+	recorded_at  TEXT DEFAULT (datetime('now'))
+);
 `
 
 // Open opens (or creates) the agent-minder SQLite database and runs migrations,
@@ -243,6 +255,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 12 {
 		if err := migrateV12(db); err != nil {
 			return fmt.Errorf("apply migration v12: %w", err)
+		}
+	}
+
+	if version < 13 {
+		if err := migrateV13(db); err != nil {
+			return fmt.Errorf("apply migration v13: %w", err)
 		}
 	}
 
@@ -470,6 +488,26 @@ func migrateV12(db *sqlx.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("%s: %w", stmt, err)
 		}
+	}
+	return nil
+}
+
+func migrateV13(db *sqlx.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS autopilot_metrics (
+			id           INTEGER PRIMARY KEY,
+			task_id      INTEGER NOT NULL REFERENCES autopilot_tasks(id) ON DELETE CASCADE,
+			project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			issue_number INTEGER NOT NULL DEFAULT 0,
+			duration_sec REAL NOT NULL DEFAULT 0,
+			tokens_used  INTEGER NOT NULL DEFAULT 0,
+			cost_usd     REAL NOT NULL DEFAULT 0,
+			outcome      TEXT NOT NULL DEFAULT '',
+			recorded_at  TEXT DEFAULT (datetime('now'))
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create autopilot_metrics table: %w", err)
 	}
 	return nil
 }

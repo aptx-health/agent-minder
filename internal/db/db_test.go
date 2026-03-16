@@ -1689,3 +1689,115 @@ func TestParseDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestAutopilotMetricsCRUD(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{
+		Name:               "metrics-test",
+		GoalType:           "feature",
+		GoalDescription:    "test metrics",
+		RefreshIntervalSec: 300,
+		MessageTTLSec:      172800,
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create a task (metrics reference it).
+	task := &AutopilotTask{
+		ProjectID:    p.ID,
+		IssueNumber:  99,
+		IssueTitle:   "Test issue",
+		IssueBody:    "Body",
+		Dependencies: "[]",
+		Status:       "done",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	// Record a metric.
+	m := &AutopilotMetric{
+		TaskID:      task.ID,
+		ProjectID:   p.ID,
+		IssueNumber: 99,
+		DurationSec: 123.45,
+		TokensUsed:  5000,
+		CostUSD:     0.42,
+		Outcome:     "review",
+	}
+	if err := store.RecordAutopilotMetric(m); err != nil {
+		t.Fatalf("RecordAutopilotMetric: %v", err)
+	}
+	if m.ID == 0 {
+		t.Fatal("expected non-zero metric ID")
+	}
+
+	// Record a second metric for a different task.
+	task2 := &AutopilotTask{
+		ProjectID:    p.ID,
+		IssueNumber:  100,
+		IssueTitle:   "Second issue",
+		IssueBody:    "Body2",
+		Dependencies: "[]",
+		Status:       "bailed",
+	}
+	if err := store.CreateAutopilotTask(task2); err != nil {
+		t.Fatalf("CreateAutopilotTask 2: %v", err)
+	}
+	m2 := &AutopilotMetric{
+		TaskID:      task2.ID,
+		ProjectID:   p.ID,
+		IssueNumber: 100,
+		DurationSec: 60.0,
+		TokensUsed:  1200,
+		CostUSD:     0.10,
+		Outcome:     "bailed",
+	}
+	if err := store.RecordAutopilotMetric(m2); err != nil {
+		t.Fatalf("RecordAutopilotMetric 2: %v", err)
+	}
+
+	// Query metrics.
+	metrics, err := store.GetAutopilotMetrics(p.ID)
+	if err != nil {
+		t.Fatalf("GetAutopilotMetrics: %v", err)
+	}
+	if len(metrics) != 2 {
+		t.Fatalf("got %d metrics, want 2", len(metrics))
+	}
+
+	// Most recent first.
+	if metrics[0].IssueNumber != 100 {
+		t.Errorf("metrics[0].IssueNumber = %d, want 100", metrics[0].IssueNumber)
+	}
+	if metrics[0].Outcome != "bailed" {
+		t.Errorf("metrics[0].Outcome = %q, want %q", metrics[0].Outcome, "bailed")
+	}
+	if metrics[1].IssueNumber != 99 {
+		t.Errorf("metrics[1].IssueNumber = %d, want 99", metrics[1].IssueNumber)
+	}
+	if metrics[1].DurationSec != 123.45 {
+		t.Errorf("metrics[1].DurationSec = %f, want 123.45", metrics[1].DurationSec)
+	}
+	if metrics[1].TokensUsed != 5000 {
+		t.Errorf("metrics[1].TokensUsed = %d, want 5000", metrics[1].TokensUsed)
+	}
+	if metrics[1].CostUSD != 0.42 {
+		t.Errorf("metrics[1].CostUSD = %f, want 0.42", metrics[1].CostUSD)
+	}
+
+	// Metrics for a different project should be empty.
+	otherMetrics, err := store.GetAutopilotMetrics(999)
+	if err != nil {
+		t.Fatalf("GetAutopilotMetrics for other: %v", err)
+	}
+	if len(otherMetrics) != 0 {
+		t.Errorf("got %d metrics for other project, want 0", len(otherMetrics))
+	}
+}

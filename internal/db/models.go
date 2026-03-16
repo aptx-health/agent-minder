@@ -191,6 +191,19 @@ type AutopilotTask struct {
 	CompletedAt  string `db:"completed_at"`
 }
 
+// AutopilotMetric records performance data for a completed autopilot agent run.
+type AutopilotMetric struct {
+	ID          int64   `db:"id"`
+	TaskID      int64   `db:"task_id"`
+	ProjectID   int64   `db:"project_id"`
+	IssueNumber int     `db:"issue_number"`
+	DurationSec float64 `db:"duration_sec"`
+	TokensUsed  int     `db:"tokens_used"`
+	CostUSD     float64 `db:"cost_usd"`
+	Outcome     string  `db:"outcome"` // "review", "bailed", "stopped"
+	RecordedAt  string  `db:"recorded_at"`
+}
+
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.
 func (p *Poll) LLMResponse() string {
 	if p.Tier2Response != "" {

@@ -848,6 +848,8 @@ func (s *Supervisor) launchAgent(ctx context.Context, slotIdx int, task *db.Auto
 }
 
 func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.AutopilotTask) {
+	taskStartedAt := time.Now()
+
 	defer func() {
 		s.mu.Lock()
 		s.slots[slotIdx] = nil
@@ -962,14 +964,25 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		}
 	}
 
-	// Check if this agent was stopped by the user.
+	// Capture live status metrics before slot is cleared.
 	s.mu.Lock()
 	stoppedByUser := s.slots[slotIdx] != nil && s.slots[slotIdx].stoppedByUser
+	var liveStatus LiveStatus
+	if s.slots[slotIdx] != nil {
+		liveStatus = s.slots[slotIdx].liveStatus
+	}
 	s.mu.Unlock()
+
+	// Compute duration from wall clock (fallback if stream didn't report it).
+	durationSec := time.Since(taskStartedAt).Seconds()
+	if liveStatus.DurationMs > 0 {
+		durationSec = float64(liveStatus.DurationMs) / 1000.0
+	}
 
 	if stoppedByUser {
 		// User-initiated stop: set stopped status, preserve worktree for investigation.
 		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "stopped")
+		s.recordMetrics(task, durationSec, liveStatus.NumTurns, liveStatus.TotalCostUSD, "stopped")
 		s.emitEvent("stopped", fmt.Sprintf("Agent stopped by user on #%d", task.IssueNumber), task)
 		return
 	}
@@ -977,6 +990,7 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	// Inspect outcome.
 	status := s.inspectOutcome(ctx, task, exitCode)
 	_ = s.store.UpdateAutopilotTaskStatus(task.ID, status)
+	s.recordMetrics(task, durationSec, liveStatus.NumTurns, liveStatus.TotalCostUSD, status)
 
 	if status == "review" {
 		// Swap in-progress → needs-review label on the issue.
@@ -1043,6 +1057,22 @@ func (s *Supervisor) cleanup(task *db.AutopilotTask, deleteBranch bool) {
 	// Delete branch only if bailed (keep if PR opened).
 	if deleteBranch {
 		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
+	}
+}
+
+// recordMetrics writes an autopilot_metrics row for a completed agent run.
+func (s *Supervisor) recordMetrics(task *db.AutopilotTask, durationSec float64, tokensUsed int, costUSD float64, outcome string) {
+	m := &db.AutopilotMetric{
+		TaskID:      task.ID,
+		ProjectID:   task.ProjectID,
+		IssueNumber: task.IssueNumber,
+		DurationSec: durationSec,
+		TokensUsed:  tokensUsed,
+		CostUSD:     costUSD,
+		Outcome:     outcome,
+	}
+	if err := s.store.RecordAutopilotMetric(m); err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to record metrics for #%d: %v", task.IssueNumber, err), task)
 	}
 }
 
