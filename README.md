@@ -176,6 +176,15 @@ Press `a` to launch autopilot — minder converts tracked GitHub issues into a t
 
 **Minder is a work dispatcher, not a quality gate.** It generates the dependency graph and assigns work — the target repo's own tooling (pre-commit hooks, linters, test suites, CI/CD) is responsible for enforcing code quality. Repos should have a `CLAUDE.md` with project conventions and build/test commands so agents can work effectively.
 
+#### Skipping issues with GitHub labels
+
+Issues can be excluded from autopilot by adding skip labels in GitHub. By default, issues labeled `no-agent` are skipped. You can configure one or more skip labels (comma-separated) via:
+
+- **Init wizard**: prompted during `agent-minder init`
+- **TUI settings**: press `s` → edit "Autopilot skip label(s)"
+
+For example, setting skip labels to `no-agent, manual, human-only` will exclude any tracked issue that carries any of those labels. The dependency graph also marks skipped issues so downstream tasks aren't blocked waiting on work that won't be automated.
+
 #### Agent definition (optional)
 
 Autopilot supports an optional [Claude Code agent definition](https://docs.anthropic.com/en/docs/claude-code/sub-agents) that gives agents consistent behavioral guidance. **The agent definition is additive, never required** — it's a thin layer to make agent behaviors more predictable and customizable. Without it, autopilot works exactly as before using its built-in prompt.
