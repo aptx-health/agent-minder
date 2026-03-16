@@ -551,20 +551,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reviewSessionResultMsg:
 		if msg.err != nil {
 			m.autopilotStatus = fmt.Sprintf("Review session failed: %v", msg.err)
+			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
 		} else if msg.result.SessionID != "" {
-			m.autopilotStatus = fmt.Sprintf(
-				"Review ready for #%d\n  cd %s\n  claude --resume %s",
+			m.warningBanner = fmt.Sprintf(
+				"Review ready for #%d — cd %s && claude --resume %s",
 				msg.result.IssueNumber, msg.result.WorktreePath, msg.result.SessionID,
 			)
 		} else {
-			m.autopilotStatus = fmt.Sprintf(
-				"Worktree restored for #%d\n  cd %s\n  claude",
+			m.warningBanner = fmt.Sprintf(
+				"Worktree restored for #%d — cd %s && claude",
 				msg.result.IssueNumber, msg.result.WorktreePath,
 			)
 		}
-		return m, tea.Tick(20*time.Second, func(t time.Time) tea.Msg {
-			return clearAutopilotStatusMsg{}
-		})
+		m.autopilotStatus = ""
+		return m, nil
 
 	case bulkTrackResultMsg:
 		m.refreshTrackedItems()
