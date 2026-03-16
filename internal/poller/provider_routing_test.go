@@ -22,8 +22,6 @@ func (p *trackingProvider) Complete(_ context.Context, _ *llm.Request) (*llm.Res
 	return &llm.Response{Content: `{"analysis":"ok","concerns":[]}`}, nil
 }
 
-func (p *trackingProvider) callCount() int { return int(p.calls.Load()) }
-
 func TestNewPollerSeparateProviders(t *testing.T) {
 	summ := &trackingProvider{name: "summarizer"}
 	anlz := &trackingProvider{name: "analyzer"}
