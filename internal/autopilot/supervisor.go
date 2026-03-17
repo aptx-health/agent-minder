@@ -30,7 +30,7 @@ type DepOption struct {
 // Event is emitted by the supervisor for the TUI to consume.
 type Event struct {
 	Time    time.Time
-	Type    string // "started", "completed", "bailed", "stopped", "finished", "error", "warning", "discovered"
+	Type    string // "info", "started", "completed", "bailed", "stopped", "finished", "error", "warning", "discovered"
 	Summary string
 	Task    *db.AutopilotTask
 }
@@ -349,6 +349,10 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, o
 			return 0, nil, fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
 		}
 	}
+
+	// Detect which agent definition tier will be used and notify the user.
+	agentDefSource := detectAgentDef(s.repoDir)
+	s.emitEvent("info", fmt.Sprintf("Agent definition: %s", agentDefSource.Description()), nil)
 
 	// Clean up any leftovers from a previous run.
 	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
@@ -1395,7 +1399,7 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.cleanup(task, true)
 		return
 	}
-	s.emitEvent("started", fmt.Sprintf("Agent def: %s", agentDefSource), task)
+	s.emitEvent("started", fmt.Sprintf("Agent def: %s", agentDefSource.Description()), task)
 
 	// Build claude command.
 	maxTurns := s.project.AutopilotMaxTurns

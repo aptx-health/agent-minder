@@ -353,6 +353,89 @@ func TestDefaultAgentDefContent(t *testing.T) {
 	}
 }
 
+func TestDefaultAgentDefMatchesRepoFile(t *testing.T) {
+	// Ensure the embedded defaultAgentDef constant stays in sync with agents/autopilot.md.
+	// The repo file is at <project-root>/agents/autopilot.md; from this test package
+	// that's ../../agents/autopilot.md.
+	repoFile := filepath.Join("..", "..", "agents", "autopilot.md")
+	data, err := os.ReadFile(repoFile)
+	if err != nil {
+		t.Fatalf("cannot read repo agent def file %s: %v (run tests from project root)", repoFile, err)
+	}
+	if string(data) != defaultAgentDef {
+		t.Error("defaultAgentDef constant has drifted from agents/autopilot.md — update one to match the other")
+	}
+}
+
+func TestDetectAgentDef(t *testing.T) {
+	fakeHome := t.TempDir()
+	origHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return fakeHome, nil }
+	t.Cleanup(func() { userHomeDir = origHomeDir })
+
+	t.Run("detects repo-level", func(t *testing.T) {
+		dir := t.TempDir()
+		agentDir := filepath.Join(dir, ".claude", "agents")
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "autopilot.md"), []byte("repo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if source := detectAgentDef(dir); source != AgentDefRepo {
+			t.Errorf("expected %q, got %q", AgentDefRepo, source)
+		}
+	})
+
+	t.Run("detects user-level", func(t *testing.T) {
+		dir := t.TempDir()
+		userAgentDir := filepath.Join(fakeHome, ".claude", "agents")
+		if err := os.MkdirAll(userAgentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userAgentDir, "autopilot.md"), []byte("user"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(fakeHome, ".claude")) })
+
+		if source := detectAgentDef(dir); source != AgentDefUser {
+			t.Errorf("expected %q, got %q", AgentDefUser, source)
+		}
+	})
+
+	t.Run("detects built-in without writing", func(t *testing.T) {
+		dir := t.TempDir()
+
+		if source := detectAgentDef(dir); source != AgentDefBuiltIn {
+			t.Errorf("expected %q, got %q", AgentDefBuiltIn, source)
+		}
+
+		// Verify nothing was written.
+		path := filepath.Join(dir, ".claude", "agents", "autopilot.md")
+		if _, err := os.Stat(path); err == nil {
+			t.Error("detectAgentDef should not write files, but autopilot.md was created")
+		}
+	})
+}
+
+func TestAgentDefSourceDescription(t *testing.T) {
+	tests := []struct {
+		source AgentDefSource
+		want   string
+	}{
+		{AgentDefRepo, "repo-level (.claude/agents/autopilot.md)"},
+		{AgentDefUser, "user-level (~/.claude/agents/autopilot.md)"},
+		{AgentDefBuiltIn, "built-in default (will be installed to worktrees)"},
+		{AgentDefSource("unknown"), "unknown"},
+	}
+	for _, tt := range tests {
+		if got := tt.source.Description(); got != tt.want {
+			t.Errorf("AgentDefSource(%q).Description() = %q, want %q", tt.source, got, tt.want)
+		}
+	}
+}
+
 func TestPrintPrompts(t *testing.T) {
 	if os.Getenv("PRINT_PROMPTS") == "" {
 		t.Skip("set PRINT_PROMPTS=1 to print rendered prompts")

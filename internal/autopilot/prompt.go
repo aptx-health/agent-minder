@@ -21,6 +21,21 @@ const (
 	AgentDefBuiltIn AgentDefSource = "built-in"
 )
 
+// Description returns a human-readable description of the agent definition source,
+// suitable for display in the TUI event log.
+func (s AgentDefSource) Description() string {
+	switch s {
+	case AgentDefRepo:
+		return "repo-level (.claude/agents/autopilot.md)"
+	case AgentDefUser:
+		return "user-level (~/.claude/agents/autopilot.md)"
+	case AgentDefBuiltIn:
+		return "built-in default (will be installed to worktrees)"
+	default:
+		return string(s)
+	}
+}
+
 // defaultAgentDef is the built-in agent definition embedded in the binary.
 // It serves as the last-resort fallback when neither repo-level nor user-level
 // agent definitions exist. This content is identical to agents/autopilot.md in the repo.
@@ -89,6 +104,30 @@ After exploring, decide:
 - Quality gates: this repo may have pre-commit hooks, linters, or test suites. Respect them.
 `
 
+// detectAgentDef probes the three-tier failover chain without writing anything.
+// Use this for read-only detection (e.g., at Prepare time to notify the user).
+// The dirPath should be either a repo dir or worktree path — both are checked
+// the same way for a .claude/agents/autopilot.md file.
+func detectAgentDef(dirPath string) AgentDefSource {
+	// Tier 1: Check repo/worktree-level.
+	repoPath := filepath.Join(dirPath, ".claude", "agents", "autopilot.md")
+	if _, err := os.Stat(repoPath); err == nil {
+		return AgentDefRepo
+	}
+
+	// Tier 2: Check user-level (~/.claude/agents/).
+	home, err := userHomeDir()
+	if err == nil {
+		userPath := filepath.Join(home, ".claude", "agents", "autopilot.md")
+		if _, err := os.Stat(userPath); err == nil {
+			return AgentDefUser
+		}
+	}
+
+	// Tier 3: Built-in default would be used.
+	return AgentDefBuiltIn
+}
+
 // ensureAgentDef resolves the agent definition using a three-tier failover chain
 // and ensures the file exists on disk so that `--agent autopilot` can find it:
 //
@@ -100,22 +139,13 @@ After exploring, decide:
 // the worktree's .claude/agents/autopilot.md so Claude Code can read it from disk.
 // This is safe because worktrees are ephemeral and cleaned up after the agent exits.
 func ensureAgentDef(worktreePath string) (AgentDefSource, error) {
-	// Tier 1: Check repo-level (in the worktree / target repo).
-	repoPath := filepath.Join(worktreePath, ".claude", "agents", "autopilot.md")
-	if _, err := os.Stat(repoPath); err == nil {
-		return AgentDefRepo, nil
-	}
-
-	// Tier 2: Check user-level (~/.claude/agents/).
-	home, err := userHomeDir()
-	if err == nil {
-		userPath := filepath.Join(home, ".claude", "agents", "autopilot.md")
-		if _, err := os.Stat(userPath); err == nil {
-			return AgentDefUser, nil
-		}
+	source := detectAgentDef(worktreePath)
+	if source != AgentDefBuiltIn {
+		return source, nil
 	}
 
 	// Tier 3: Install built-in default to the worktree.
+	repoPath := filepath.Join(worktreePath, ".claude", "agents", "autopilot.md")
 	agentDir := filepath.Join(worktreePath, ".claude", "agents")
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		return "", fmt.Errorf("create agent dir %s: %w", agentDir, err)
