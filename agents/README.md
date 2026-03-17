@@ -6,8 +6,8 @@ This directory contains Claude Code [agent definitions](https://docs.anthropic.c
 
 | File | Purpose | Scope |
 |------|---------|-------|
-| `autopilot.md` | Implements GitHub issues in isolated worktrees | Per-issue, runs many times |
-| `enrollment.md` | Interactive repo enrollment — gathers context and generates config | Per-repo, runs once |
+| [`autopilot.md`](autopilot.md) | Implements GitHub issues in isolated worktrees | Per-issue, runs many times |
+| [`enrollment.md`](enrollment.md) | Interactive repo enrollment — gathers context and generates config | Per-repo, runs once |
 
 ---
 
