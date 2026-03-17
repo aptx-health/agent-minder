@@ -144,81 +144,86 @@ func detectCI(dir string) []string {
 	return ci
 }
 
+// toolIndicator pairs a tool name with the files that indicate its presence.
+// Order matters — first match wins for single-value fields (secrets, process, containers).
+type toolIndicator struct {
+	name  string
+	files []string
+}
+
 // detectTooling identifies development tooling.
 func detectTooling(dir string) enrollment.Tooling {
 	t := enrollment.Tooling{}
 
-	// Secrets management.
-	secretsIndicators := map[string][]string{
-		"doppler":   {"doppler.yaml"},
-		"vault":     {".vault-token"},
-		"sops":      {".sops.yaml"},
-		"1password": {".1password"},
+	// Secrets management (first match wins).
+	secretsIndicators := []toolIndicator{
+		{"doppler", []string{"doppler.yaml"}},
+		{"vault", []string{".vault-token"}},
+		{"sops", []string{".sops.yaml"}},
+		{"1password", []string{".1password"}},
 	}
-	for name, files := range secretsIndicators {
-		for _, f := range files {
-			if fileExists(filepath.Join(dir, f)) {
-				t.Secrets = name
-				break
-			}
-		}
-		if t.Secrets != "" {
+	for _, ind := range secretsIndicators {
+		if matchesAny(dir, ind.files) {
+			t.Secrets = ind.name
 			break
 		}
 	}
 
-	// Process managers.
-	processIndicators := map[string][]string{
-		"overmind": {"Procfile.dev", "Procfile"},
-		"foreman":  {"Procfile"},
+	// Process managers (first match wins; overmind checked first via Procfile.dev).
+	processIndicators := []toolIndicator{
+		{"overmind", []string{"Procfile.dev"}},
+		{"foreman", []string{"Procfile"}},
 	}
-	for name, files := range processIndicators {
-		for _, f := range files {
-			if fileExists(filepath.Join(dir, f)) {
-				t.Process = name
-				break
-			}
-		}
-		if t.Process != "" {
+	for _, ind := range processIndicators {
+		if matchesAny(dir, ind.files) {
+			t.Process = ind.name
 			break
 		}
 	}
 
-	// Container tooling.
-	containerIndicators := map[string][]string{
-		"docker-compose": {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"},
-		"docker":         {"Dockerfile"},
+	// Container tooling (first match wins; compose before plain docker).
+	containerIndicators := []toolIndicator{
+		{"docker-compose", []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}},
+		{"docker", []string{"Dockerfile"}},
 	}
-	for name, files := range containerIndicators {
-		for _, f := range files {
-			if fileExists(filepath.Join(dir, f)) {
-				t.Containers = name
-				break
-			}
-		}
-		if t.Containers != "" {
+	for _, ind := range containerIndicators {
+		if matchesAny(dir, ind.files) {
+			t.Containers = ind.name
 			break
 		}
 	}
 
-	// Environment management.
-	envIndicators := map[string]string{
-		".envrc":          "direnv",
-		".tool-versions":  ".tool-versions",
-		".mise.toml":      "mise",
-		".rtx.toml":       "rtx",
-		".node-version":   ".node-version",
-		".ruby-version":   ".ruby-version",
-		".python-version": ".python-version",
+	// Environment management (all matches collected).
+	envIndicators := []struct {
+		file string
+		name string
+	}{
+		{".envrc", "direnv"},
+		{".mise.toml", "mise"},
+		{".rtx.toml", "rtx"},
+		{".tool-versions", ".tool-versions"},
+		{".node-version", ".node-version"},
+		{".ruby-version", ".ruby-version"},
+		{".python-version", ".python-version"},
 	}
-	for file, name := range envIndicators {
-		if fileExists(filepath.Join(dir, file)) {
-			t.Env = append(t.Env, name)
+	for _, ind := range envIndicators {
+		if fileExists(filepath.Join(dir, ind.file)) {
+			t.Env = append(t.Env, ind.name)
 		}
 	}
 	sort.Strings(t.Env)
 
 	return t
+}
+
+// matchesAny returns true if any of the given files exist in dir.
+func matchesAny(dir string, files []string) bool {
+	for _, f := range files {
+		if fileExists(filepath.Join(dir, f)) {
+			return true
+		}
+	}
+	return false
 }
 
 // detectClaudeConfig checks for existing Claude Code configuration.

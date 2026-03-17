@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -873,10 +875,13 @@ func (s *Store) UpsertRepoEnrollment(e *RepoEnrollment) error {
 	return nil
 }
 
-// GetRepoEnrollment returns the enrollment record for a repo, or nil if none.
+// GetRepoEnrollment returns the enrollment record for a repo, or (nil, nil) if none exists.
 func (s *Store) GetRepoEnrollment(repoID int64) (*RepoEnrollment, error) {
 	var e RepoEnrollment
 	if err := s.db.Get(&e, "SELECT * FROM repo_enrollments WHERE repo_id = ?", repoID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get repo enrollment: %w", err)
 	}
 	return &e, nil
