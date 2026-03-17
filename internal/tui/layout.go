@@ -1860,7 +1860,12 @@ func (m Model) renderBottomBar() string {
 				b.WriteString(mutedStyle().Render("Analyzing tracked items..."))
 				b.WriteString("\n")
 			} else {
-				b.WriteString("\n")
+				if m.autopilotStatus != "" {
+					b.WriteString(mutedStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
+					b.WriteString("\n")
+				} else {
+					b.WriteString("\n")
+				}
 				b.WriteString(helpKeyStyle().Render("\u2190/\u2192"))
 				b.WriteString(helpStyle().Render(": flip • "))
 				b.WriteString(helpKeyStyle().Render("enter"))
