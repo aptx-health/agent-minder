@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 13
+const currentVersion = 14
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -145,6 +145,16 @@ CREATE TABLE IF NOT EXISTS completed_items (
 	summary      TEXT NOT NULL DEFAULT '',
 	completed_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS repo_enrollments (
+	id                INTEGER PRIMARY KEY,
+	repo_id           INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+	enrollment_yaml   TEXT NOT NULL DEFAULT '',
+	enrolled_at       TEXT DEFAULT (datetime('now')),
+	validated_at      TEXT DEFAULT '',
+	validation_status TEXT NOT NULL DEFAULT 'untested',
+	UNIQUE(repo_id)
+);
 `
 
 // Open opens (or creates) the agent-minder SQLite database and runs migrations,
@@ -251,6 +261,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 13 {
 		if err := migrateV13(db); err != nil {
 			return fmt.Errorf("apply migration v13: %w", err)
+		}
+	}
+
+	if version < 14 {
+		if err := migrateV14(db); err != nil {
+			return fmt.Errorf("apply migration v14: %w", err)
 		}
 	}
 
@@ -491,6 +507,24 @@ func migrateV13(db *sqlx.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("%s: %w", stmt, err)
 		}
+	}
+	return nil
+}
+
+func migrateV14(db *sqlx.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS repo_enrollments (
+			id                INTEGER PRIMARY KEY,
+			repo_id           INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+			enrollment_yaml   TEXT NOT NULL DEFAULT '',
+			enrolled_at       TEXT DEFAULT (datetime('now')),
+			validated_at      TEXT DEFAULT '',
+			validation_status TEXT NOT NULL DEFAULT 'untested',
+			UNIQUE(repo_id)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create repo_enrollments table: %w", err)
 	}
 	return nil
 }
