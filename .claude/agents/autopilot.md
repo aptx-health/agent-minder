@@ -75,3 +75,4 @@ After exploring, decide:
 - Do not keep retrying if you are stuck — bail early with good context
 - Do not over-engineer. Implement exactly what the issue asks for.
 - Quality gates: this repo has pre-commit hooks (gofmt, go build, golangci-lint) via lefthook. Respect them.
+- **Permission failures**: If a tool call is denied, you may try 2-3 alternative approaches. If those are also denied, bail immediately — do not keep trying workarounds. Post a comment explaining which tools/permissions are needed.
