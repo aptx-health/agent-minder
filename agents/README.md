@@ -1,6 +1,17 @@
-# Autopilot Agent Definition
+# Agent Definitions
 
-This directory contains a Claude Code [agent definition](https://docs.anthropic.com/en/docs/claude-code/sub-agents) for the autopilot system.
+This directory contains Claude Code [agent definitions](https://docs.anthropic.com/en/docs/claude-code/sub-agents) for agent-minder.
+
+## Agents
+
+| File | Purpose | Scope |
+|------|---------|-------|
+| `autopilot.md` | Implements GitHub issues in isolated worktrees | Per-issue, runs many times |
+| `enrollment.md` | Interactive repo enrollment — gathers context and generates config | Per-repo, runs once |
+
+---
+
+## Autopilot (`autopilot.md`)
 
 ## What it does
 
@@ -50,3 +61,36 @@ claude --agent autopilot -p --max-turns 50 --max-budget-usd 3.00 --dangerously-s
 ```
 
 The agent definition becomes the system prompt; the task context becomes the user prompt.
+
+---
+
+## Enrollment (`enrollment.md`)
+
+The enrollment agent performs the interactive portion of `agent-minder repo enroll`. After the CLI runs a mechanical inventory scan, it launches this agent to:
+
+1. Ask the user targeted questions about things that can't be mechanically detected (secrets management, test commands, special tooling)
+2. Generate three artifacts:
+   - `.agent-minder/enrollment.yaml` — structured enrollment file with user-provided context
+   - `.claude/settings.json` — Claude Code permissions derived from detected tooling
+   - `.claude/agents/autopilot.md` — project-specific autopilot agent definition (if none exists)
+3. Review artifacts with the user before writing to disk
+
+### Installing
+
+Install globally (recommended — enrollment is repo-independent):
+
+```bash
+mkdir -p ~/.claude/agents
+cp agents/enrollment.md ~/.claude/agents/enrollment.md
+```
+
+### How it works
+
+The CLI (`agent-minder repo enroll`) orchestrates the process:
+
+1. CLI scans the repo mechanically → writes initial `.agent-minder/enrollment.yaml` with inventory
+2. CLI launches: `claude --agent enrollment -p "<repo path + inventory summary>"`
+3. Enrollment agent asks user ≤5 targeted questions
+4. Agent generates and writes configuration files after user approval
+
+Unlike autopilot, enrollment runs once per repo and doesn't need the repo→user→built-in failover chain. It lives at `~/.claude/agents/enrollment.md` only.
