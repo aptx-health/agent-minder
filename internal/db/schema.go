@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 14
+const currentVersion = 15
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -129,6 +129,8 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
 	agent_log      TEXT DEFAULT '',
 	started_at     TEXT DEFAULT '',
 	completed_at   TEXT DEFAULT '',
+	failure_reason TEXT DEFAULT '',
+	failure_detail TEXT DEFAULT '',
 	UNIQUE(project_id, issue_number)
 );
 
@@ -267,6 +269,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 14 {
 		if err := migrateV14(db); err != nil {
 			return fmt.Errorf("apply migration v14: %w", err)
+		}
+	}
+
+	if version < 15 {
+		if err := migrateV15(db); err != nil {
+			return fmt.Errorf("apply migration v15: %w", err)
 		}
 	}
 
@@ -525,6 +533,25 @@ func migrateV14(db *sqlx.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create repo_enrollments table: %w", err)
+	}
+	return nil
+}
+
+func migrateV15(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE autopilot_tasks ADD COLUMN failure_reason TEXT DEFAULT ''`,
+		`ALTER TABLE autopilot_tasks ADD COLUMN failure_detail TEXT DEFAULT ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	// Null-fill new columns.
+	for _, col := range []string{"failure_reason", "failure_detail"} {
+		if _, err := db.Exec(fmt.Sprintf(`UPDATE autopilot_tasks SET %s = '' WHERE %s IS NULL`, col, col)); err != nil {
+			return fmt.Errorf("null-fill %s: %w", col, err)
+		}
 	}
 	return nil
 }

@@ -443,7 +443,7 @@ func (m *Model) rebuildAutopilotTaskContent() {
 		return
 	}
 
-	// Sort tasks by status priority: running → queued → blocked → manual → review → done → bailed → skipped.
+	// Sort tasks by status priority: running → queued → blocked → manual → review → done → failed → bailed → skipped.
 	statusOrder := map[string]int{
 		"running": 0,
 		"queued":  1,
@@ -451,9 +451,10 @@ func (m *Model) rebuildAutopilotTaskContent() {
 		"manual":  3,
 		"review":  4,
 		"done":    5,
-		"bailed":  6,
-		"stopped": 7,
-		"skipped": 8,
+		"failed":  6,
+		"bailed":  7,
+		"stopped": 8,
+		"skipped": 9,
 	}
 	sortedTasks := make([]db.AutopilotTask, len(tasks))
 	copy(sortedTasks, tasks)
@@ -547,7 +548,7 @@ func (m *Model) rebuildAutopilotTaskContent() {
 			styledTitle = title
 		}
 
-		line := fmt.Sprintf("%s%s %s  %s", cursor, issueRef, statusStr, styledTitle)
+		line := fmt.Sprintf("%s%s %s%s  %s", cursor, issueRef, statusStr, taskFailureReasonSuffix(t), styledTitle)
 		if extra != "" {
 			line += "  " + mutedStyle().Render(extra)
 		}
@@ -588,8 +589,33 @@ func (m Model) renderTaskDetail() string {
 	b.WriteString("\n")
 
 	// Status.
-	fmt.Fprintf(&b, "  Status: %s", m.taskStatusDisplay(task.Status))
+	fmt.Fprintf(&b, "  Status: %s%s", m.taskStatusDisplay(task.Status), taskFailureReasonSuffix(*task))
 	b.WriteString("\n")
+
+	// Failure detail.
+	if task.Status == "failed" && task.FailureDetail != "" {
+		if m.failureDetailExpanded {
+			// Full detail, word-wrapped to terminal width.
+			maxW := m.width - 4 // indent
+			if maxW < 20 {
+				maxW = 80
+			}
+			wrapped := wrapTextHard(task.FailureDetail, maxW)
+			for _, line := range wrapped {
+				b.WriteString(errorStyle().Render("  " + line))
+				b.WriteString("\n")
+			}
+			b.WriteString(mutedStyle().Render("  [i: collapse]"))
+			b.WriteString("\n")
+		} else {
+			// Compact: summarize into at most 2 lines.
+			summary := summarizeFailureDetail(task.FailureReason, task.FailureDetail, m.width-12)
+			b.WriteString(errorStyle().Render(fmt.Sprintf("  Detail: %s", summary)))
+			b.WriteString("\n")
+			b.WriteString(mutedStyle().Render("  [i: expand]"))
+			b.WriteString("\n")
+		}
+	}
 
 	// Dependencies.
 	deps := m.taskBlockedContext(*task)
@@ -652,6 +678,8 @@ func (m Model) taskStatusDisplay(status string) string {
 		return broadcastStyle().Render("\u25ce review ")
 	case "done":
 		return statusRunningStyle().Render("\u2713 done   ")
+	case "failed":
+		return errorStyle().Render("\u2717 failed ")
 	case "bailed":
 		return errorStyle().Render("\u2717 bailed ")
 	case "stopped":
@@ -663,6 +691,14 @@ func (m Model) taskStatusDisplay(status string) string {
 	default:
 		return mutedStyle().Render(fmt.Sprintf("  %-7s", status))
 	}
+}
+
+// taskFailureReasonSuffix returns a parenthesized failure reason for display, or empty string.
+func taskFailureReasonSuffix(task db.AutopilotTask) string {
+	if task.Status != "failed" || task.FailureReason == "" {
+		return ""
+	}
+	return fmt.Sprintf(" (%s)", task.FailureReason)
 }
 
 // taskBlockedContext returns a description of what blocks a task.
@@ -778,7 +814,7 @@ func (m Model) renderDepGraph() string {
 		switch status {
 		case "done":
 			return "\u2713" // ✓
-		case "bailed", "stopped":
+		case "failed", "bailed", "stopped":
 			return "\u2717" // ✗
 		case "running":
 			return "\u25cf" // ●
@@ -800,7 +836,7 @@ func (m Model) renderDepGraph() string {
 		switch status {
 		case "done", "running":
 			b.WriteString(statusRunningStyle().Render(line))
-		case "bailed", "stopped", "skipped":
+		case "failed", "bailed", "stopped", "skipped":
 			b.WriteString(errorStyle().Render(line))
 		case "manual":
 			b.WriteString(broadcastStyle().Render(line))
@@ -1994,6 +2030,13 @@ func (m Model) renderHelpBar() string {
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
+				case "failed":
+					condensed = append(condensed,
+						hint{"r", "restart"},
+						hint{"i", "detail"},
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
 				case "bailed", "stopped":
 					condensed = append(condensed,
 						hint{"r", "restart"},
@@ -2027,7 +2070,7 @@ func (m Model) renderHelpBar() string {
 			task := m.selectedAutopilotTask()
 			if task != nil {
 				switch task.Status {
-				case "bailed", "stopped", "done":
+				case "failed", "bailed", "stopped", "done":
 					condensed = append(condensed,
 						hint{"l", "log"},
 						hint{"c", "copy path"},
@@ -2243,4 +2286,60 @@ func truncateLine(s string, maxWidth int) string {
 		return string(runes[:maxWidth])
 	}
 	return string(runes[:maxWidth-3]) + "..."
+}
+
+// summarizeFailureDetail produces a compact 1-line summary of the failure detail.
+// For permission denials, extracts tool names. For other types, truncates the text.
+func summarizeFailureDetail(reason, detail string, maxWidth int) string {
+	if maxWidth < 10 {
+		maxWidth = 40
+	}
+
+	if reason == "permissions" {
+		// Parse the JSON array of denied tool objects and extract tool names.
+		var denials []json.RawMessage
+		if json.Unmarshal([]byte(detail), &denials) == nil && len(denials) > 0 {
+			var toolNames []string
+			seen := make(map[string]bool)
+			for _, d := range denials {
+				var obj map[string]any
+				if json.Unmarshal(d, &obj) == nil {
+					if name, ok := obj["tool_name"].(string); ok && !seen[name] {
+						toolNames = append(toolNames, name)
+						seen[name] = true
+					}
+				}
+			}
+			if len(toolNames) > 0 {
+				summary := fmt.Sprintf("denied tools: %s", strings.Join(toolNames, ", "))
+				if len(summary) > maxWidth {
+					summary = summary[:maxWidth-3] + "..."
+				}
+				return summary
+			}
+		}
+	}
+
+	// Generic: truncate to fit.
+	if len(detail) > maxWidth {
+		return detail[:maxWidth-3] + "..."
+	}
+	return detail
+}
+
+// wrapTextHard wraps a string into lines of at most maxWidth characters (hard break).
+func wrapTextHard(s string, maxWidth int) []string {
+	if maxWidth < 10 {
+		maxWidth = 80
+	}
+	var lines []string
+	for len(s) > 0 {
+		if len(s) <= maxWidth {
+			lines = append(lines, s)
+			break
+		}
+		lines = append(lines, s[:maxWidth])
+		s = s[maxWidth:]
+	}
+	return lines
 }

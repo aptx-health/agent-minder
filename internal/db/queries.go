@@ -681,7 +681,7 @@ func (s *Store) GetAutopilotTasks(projectID int64) ([]AutopilotTask, error) {
 
 // UpdateAutopilotTaskStatus updates only the status and completed_at of an autopilot task.
 func (s *Store) UpdateAutopilotTaskStatus(id int64, status string) error {
-	if status == "done" || status == "bailed" || status == "stopped" {
+	if status == "done" || status == "bailed" || status == "stopped" || status == "failed" {
 		_, err := s.db.Exec(`
 			UPDATE autopilot_tasks SET status = ?, completed_at = datetime('now') WHERE id = ?
 		`, status, id)
@@ -703,6 +703,15 @@ func (s *Store) UpdateAutopilotTaskRunning(id int64, worktreePath, branch, agent
 // UpdateAutopilotTaskPR sets the PR number for a completed task.
 func (s *Store) UpdateAutopilotTaskPR(id int64, prNumber int) error {
 	_, err := s.db.Exec(`UPDATE autopilot_tasks SET pr_number = ? WHERE id = ?`, prNumber, id)
+	return err
+}
+
+// UpdateAutopilotTaskFailure sets a task to failed with reason and detail.
+func (s *Store) UpdateAutopilotTaskFailure(id int64, reason, detail string) error {
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks SET status = 'failed', failure_reason = ?, failure_detail = ?, completed_at = datetime('now')
+		WHERE id = ?
+	`, reason, detail, id)
 	return err
 }
 
@@ -798,7 +807,7 @@ func (s *Store) ResetStaleAutopilotTasks(projectID int64) (int, error) {
 	result, err := s.db.Exec(`
 		UPDATE autopilot_tasks
 		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
-		    started_at = '', completed_at = ''
+		    started_at = '', completed_at = '', failure_reason = '', failure_detail = ''
 		WHERE project_id = ? AND (
 			status = 'running'
 			OR (status = 'bailed' AND completed_at IS NULL)
@@ -816,7 +825,8 @@ func (s *Store) ResetAutopilotTask(id int64) error {
 	_, err := s.db.Exec(`
 		UPDATE autopilot_tasks
 		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
-		    started_at = '', completed_at = '', pr_number = 0
+		    started_at = '', completed_at = '', pr_number = 0,
+		    failure_reason = '', failure_detail = ''
 		WHERE id = ?
 	`, id)
 	return err

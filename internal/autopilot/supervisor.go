@@ -1519,18 +1519,32 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	status := s.inspectOutcome(ctx, task, exitCode)
 	_ = s.store.UpdateAutopilotTaskStatus(task.ID, status)
 
-	if status == "review" {
+	switch status {
+	case "review":
 		// Swap in-progress → needs-review label on the issue.
 		ghClient := ghpkg.NewClient(s.ghToken)
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
 		_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
 		s.emitEvent("completed", fmt.Sprintf("Agent completed #%d — PR opened, awaiting review & merge", task.IssueNumber), task)
-	} else {
+	case "failed":
+		// Remove in-progress label since the agent is done.
+		ghClient := ghpkg.NewClient(s.ghToken)
+		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
+		// Reload task to get failure_reason populated by inspectOutcome.
+		if updated, err := s.store.GetAutopilotTasks(s.project.ID); err == nil {
+			for _, t := range updated {
+				if t.ID == task.ID {
+					s.emitEvent("failed", fmt.Sprintf("Agent failed on #%d (%s)", task.IssueNumber, t.FailureReason), task)
+					break
+				}
+			}
+		}
+	default:
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
 	}
 
-	// Cleanup: remove worktree, delete branch only if bailed.
-	s.cleanup(task, status == "bailed")
+	// Cleanup: remove worktree, delete branch if bailed or failed.
+	s.cleanup(task, status == "bailed" || status == "failed")
 }
 
 // checkReviewTasks checks if any tasks in "review" status have had their PRs merged.
@@ -1647,6 +1661,22 @@ func (s *Supervisor) checkManualTasks(ctx context.Context) int {
 }
 
 func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask, exitCode int) string {
+	// Parse agent log for result event to detect structured failures.
+	agentResult, err := parseAgentLog(task.AgentLog)
+	if err != nil {
+		debugLog("inspectOutcome: parse agent log failed",
+			"issue", task.IssueNumber, "error", err.Error())
+	}
+	if agentResult != nil {
+		status, reason, detail := classifyOutcome(agentResult, s.project.AutopilotMaxTurns, s.project.AutopilotMaxBudgetUSD)
+		if status == "failed" {
+			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
+			debugLog("inspectOutcome: classified as failed",
+				"issue", task.IssueNumber, "reason", reason)
+			return "failed"
+		}
+	}
+
 	// Check if a PR was opened for this branch.
 	ghClient := ghpkg.NewClient(s.ghToken)
 	pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
