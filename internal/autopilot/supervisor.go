@@ -1387,6 +1387,16 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	}
 	defer func() { _ = logFile.Close() }()
 
+	// Ensure an agent definition exists (repo → user → built-in fallback).
+	agentDefSource, err := ensureAgentDef(task.WorktreePath)
+	if err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to resolve agent definition for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		s.cleanup(task, true)
+		return
+	}
+	s.emitEvent("started", fmt.Sprintf("Agent def: %s", agentDefSource), task)
+
 	// Build claude command.
 	maxTurns := s.project.AutopilotMaxTurns
 	if maxTurns < 1 {
@@ -1627,61 +1637,22 @@ func (s *Supervisor) emitEvent(typ, summary string, task *db.AutopilotTask) {
 // Tests can override this to isolate from the real filesystem.
 var userHomeDir = os.UserHomeDir
 
-// hasAutopilotAgentDef checks whether an autopilot.md agent definition exists
-// in the worktree's .claude/agents/ directory or the user's ~/.claude/agents/.
-func hasAutopilotAgentDef(worktreePath string) bool {
-	// Check project-level first (in the worktree / target repo).
-	projectPath := filepath.Join(worktreePath, ".claude", "agents", "autopilot.md")
-	if _, err := os.Stat(projectPath); err == nil {
-		return true
-	}
-
-	// Check user-level (~/.claude/agents/).
-	home, err := userHomeDir()
-	if err != nil {
-		return false
-	}
-	userPath := filepath.Join(home, ".claude", "agents", "autopilot.md")
-	_, err = os.Stat(userPath)
-	return err == nil
-}
-
 // buildClaudeArgs constructs the argument list for the claude CLI invocation.
-// If an autopilot agent definition exists (project or user level), it uses --agent autopilot
-// with a minimal task-context prompt. Otherwise, it falls back to the full prompt.
+// It always uses --agent autopilot with a minimal task-context prompt. The agent
+// definition is resolved via a three-tier failover chain (repo → user → built-in)
+// by ensureAgentDef(), which must be called before this function.
 func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, maxTurns int, maxBudget float64) []string {
-	var prompt string
-	var args []string
-
-	if hasAutopilotAgentDef(task.WorktreePath) {
-		// Agent definition found — use it for behavioral instructions,
-		// pass only dynamic task context as the prompt.
-		prompt = renderTaskContext(task, baseBranch, owner, repo)
-		args = []string{
-			"--agent", "autopilot",
-			"-p",
-			"--output-format", "stream-json",
-			"--verbose",
-			"--max-turns", strconv.Itoa(maxTurns),
-			"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
-			"--dangerously-skip-permissions",
-			prompt,
-		}
-	} else {
-		// No agent definition — fall back to full prompt with all instructions.
-		prompt = renderPrompt(task, baseBranch, owner, repo)
-		args = []string{
-			"-p",
-			"--output-format", "stream-json",
-			"--verbose",
-			"--max-turns", strconv.Itoa(maxTurns),
-			"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
-			"--dangerously-skip-permissions",
-			prompt,
-		}
+	prompt := renderTaskContext(task, baseBranch, owner, repo)
+	return []string{
+		"--agent", "autopilot",
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--max-turns", strconv.Itoa(maxTurns),
+		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
+		"--dangerously-skip-permissions",
+		prompt,
 	}
-
-	return args
 }
 
 // RebuildResult holds the outcome of a dependency graph rebuild.

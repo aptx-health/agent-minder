@@ -2,10 +2,130 @@ package autopilot
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/dustinlange/agent-minder/internal/db"
 )
+
+// AgentDefSource identifies which tier of the failover chain provided the agent definition.
+type AgentDefSource string
+
+const (
+	// AgentDefRepo means the agent definition was found in the worktree's .claude/agents/autopilot.md.
+	AgentDefRepo AgentDefSource = "repo"
+	// AgentDefUser means the agent definition was found in ~/.claude/agents/autopilot.md.
+	AgentDefUser AgentDefSource = "user"
+	// AgentDefBuiltIn means the built-in default was installed to the worktree.
+	AgentDefBuiltIn AgentDefSource = "built-in"
+)
+
+// defaultAgentDef is the built-in agent definition embedded in the binary.
+// It serves as the last-resort fallback when neither repo-level nor user-level
+// agent definitions exist. This content is identical to agents/autopilot.md in the repo.
+const defaultAgentDef = `---
+name: autopilot
+description: >
+  Autonomous agent that implements GitHub issues in isolated git worktrees.
+  Used by agent-minder's autopilot supervisor to work on issues independently.
+  Install in a repo's .claude/agents/ directory to give autopilot agents
+  consistent behavioral guidance for that project.
+tools: Bash, Read, Edit, Write, Glob, Grep
+---
+
+You are an autonomous agent working on a GitHub issue in an isolated git worktree. Your task context — issue number, worktree path, branch, repository, and ready-to-run commands — is provided in the user prompt.
+
+## Your first steps
+
+1. Move the issue to "In Progress" using the ` + "`gh issue edit`" + ` command from your task context
+2. Post a starting comment using the ` + "`gh issue comment`" + ` command from your task context
+3. Read the full issue and any linked issues for context
+4. Explore the codebase to understand the relevant code
+
+## Pre-check: assess complexity before writing any code
+
+After exploring the codebase but BEFORE making any changes, assess this task:
+- How many files will need to change?
+- Does this require architectural decisions or design trade-offs?
+- Is this a cross-cutting refactor that touches many subsystems?
+
+If ANY of the following are true, do NOT proceed with implementation:
+- The change requires modifying more than 8 files
+- The task requires significant architectural decisions not specified in the issue
+- You are unsure how the pieces fit together after exploring the code
+
+Instead, bail immediately: skip to the "If you cannot proceed" section below.
+In your bail comment, include a detailed implementation plan with the specific files and changes needed, so a human (or a future agent session with more context) can pick it up.
+
+## Your decision
+
+After exploring, decide:
+
+### If you can confidently complete this work:
+- Implement the changes
+- Ensure all tests pass and pre-commit hooks are satisfied
+- If tests or hooks fail, you may retry up to 3 times
+- Commit with the issue fix reference from your task context in the commit message
+- Before pushing, rebase onto the latest base branch using the commands from your task context
+- If there are merge conflicts during rebase, attempt to resolve them
+- If you cannot resolve conflicts, abort the rebase (` + "`git rebase --abort`" + `), bail with a comment listing the conflicting files
+- Push the branch
+- Open a draft PR targeting the base branch specified in your task context
+
+### If you cannot proceed (too risky, blocked, unclear, or failing after retries):
+- Do NOT make code changes
+- Post a comment on the issue with:
+  - What you explored and learned about the codebase
+  - Your specific questions or what's blocking you
+  - A follow-up prompt that could be pasted into a future Claude Code session
+- Add the "blocked" label and remove the "in-progress" label using the commands from your task context
+
+## Important constraints
+
+- Only modify files within this worktree directory
+- Do not keep retrying if you are stuck — bail early with good context
+- Do not over-engineer. Implement exactly what the issue asks for.
+- Quality gates: this repo may have pre-commit hooks, linters, or test suites. Respect them.
+`
+
+// ensureAgentDef resolves the agent definition using a three-tier failover chain
+// and ensures the file exists on disk so that `--agent autopilot` can find it:
+//
+//  1. <worktree>/.claude/agents/autopilot.md  (repo-level, most specific)
+//  2. ~/.claude/agents/autopilot.md           (user-level, shared across repos)
+//  3. Built-in default                        (written to worktree, always available)
+//
+// When the built-in fallback is used, the default agent definition is written to
+// the worktree's .claude/agents/autopilot.md so Claude Code can read it from disk.
+// This is safe because worktrees are ephemeral and cleaned up after the agent exits.
+func ensureAgentDef(worktreePath string) (AgentDefSource, error) {
+	// Tier 1: Check repo-level (in the worktree / target repo).
+	repoPath := filepath.Join(worktreePath, ".claude", "agents", "autopilot.md")
+	if _, err := os.Stat(repoPath); err == nil {
+		return AgentDefRepo, nil
+	}
+
+	// Tier 2: Check user-level (~/.claude/agents/).
+	home, err := userHomeDir()
+	if err == nil {
+		userPath := filepath.Join(home, ".claude", "agents", "autopilot.md")
+		if _, err := os.Stat(userPath); err == nil {
+			return AgentDefUser, nil
+		}
+	}
+
+	// Tier 3: Install built-in default to the worktree.
+	agentDir := filepath.Join(worktreePath, ".claude", "agents")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		return "", fmt.Errorf("create agent dir %s: %w", agentDir, err)
+	}
+	if err := os.WriteFile(repoPath, []byte(defaultAgentDef), 0o644); err != nil {
+		return "", fmt.Errorf("write built-in agent def to %s: %w", repoPath, err)
+	}
+
+	return AgentDefBuiltIn, nil
+}
 
 // renderTaskContext builds a minimal prompt with only dynamic per-task context.
 // Used when a .claude/agents/autopilot.md agent definition provides the behavioral instructions.
@@ -40,6 +160,8 @@ func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) s
 }
 
 // renderPrompt builds the agent prompt from the design doc template.
+// This is the legacy full-prompt path, kept for backward compatibility but no longer
+// used by buildClaudeArgs (which always uses --agent autopilot + renderTaskContext).
 func renderPrompt(task *db.AutopilotTask, baseBranch, owner, repo string) string {
 	var b strings.Builder
 

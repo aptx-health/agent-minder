@@ -176,6 +176,108 @@ func TestRenderTaskContextNoBehavioralInstructions(t *testing.T) {
 	}
 }
 
+func TestEnsureAgentDef(t *testing.T) {
+	// Override userHomeDir so tests don't pick up the real ~/.claude/agents/.
+	fakeHome := t.TempDir()
+	origHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return fakeHome, nil }
+	t.Cleanup(func() { userHomeDir = origHomeDir })
+
+	t.Run("repo-level agent def", func(t *testing.T) {
+		worktree := t.TempDir()
+		agentDir := filepath.Join(worktree, ".claude", "agents")
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "autopilot.md"), []byte("repo custom"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		source, err := ensureAgentDef(worktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if source != AgentDefRepo {
+			t.Errorf("expected source %q, got %q", AgentDefRepo, source)
+		}
+	})
+
+	t.Run("user-level agent def", func(t *testing.T) {
+		worktree := t.TempDir()
+		userAgentDir := filepath.Join(fakeHome, ".claude", "agents")
+		if err := os.MkdirAll(userAgentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userAgentDir, "autopilot.md"), []byte("user custom"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(fakeHome, ".claude")) })
+
+		source, err := ensureAgentDef(worktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if source != AgentDefUser {
+			t.Errorf("expected source %q, got %q", AgentDefUser, source)
+		}
+	})
+
+	t.Run("built-in fallback", func(t *testing.T) {
+		worktree := t.TempDir()
+
+		source, err := ensureAgentDef(worktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if source != AgentDefBuiltIn {
+			t.Errorf("expected source %q, got %q", AgentDefBuiltIn, source)
+		}
+
+		// Verify the file was written to the worktree.
+		written := filepath.Join(worktree, ".claude", "agents", "autopilot.md")
+		data, err := os.ReadFile(written)
+		if err != nil {
+			t.Fatalf("built-in agent def not written: %v", err)
+		}
+		if !strings.Contains(string(data), "name: autopilot") {
+			t.Error("written file missing agent def frontmatter")
+		}
+		if !strings.Contains(string(data), "Pre-check") {
+			t.Error("written file missing behavioral instructions")
+		}
+	})
+
+	t.Run("repo-level takes precedence over user-level", func(t *testing.T) {
+		worktree := t.TempDir()
+
+		// Create both repo-level and user-level.
+		repoAgentDir := filepath.Join(worktree, ".claude", "agents")
+		if err := os.MkdirAll(repoAgentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repoAgentDir, "autopilot.md"), []byte("repo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		userAgentDir := filepath.Join(fakeHome, ".claude", "agents")
+		if err := os.MkdirAll(userAgentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userAgentDir, "autopilot.md"), []byte("user"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(fakeHome, ".claude")) })
+
+		source, err := ensureAgentDef(worktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if source != AgentDefRepo {
+			t.Errorf("repo-level should take precedence, got %q", source)
+		}
+	})
+}
+
 func TestBuildClaudeArgs(t *testing.T) {
 	// Override userHomeDir so tests don't pick up the real ~/.claude/agents/.
 	fakeHome := t.TempDir()
@@ -191,18 +293,15 @@ func TestBuildClaudeArgs(t *testing.T) {
 		Branch:       "agent/issue-42",
 	}
 
-	t.Run("without agent definition", func(t *testing.T) {
+	t.Run("always uses --agent autopilot", func(t *testing.T) {
 		args := buildClaudeArgs(task, "main", "org", "repo", 50, 3.00)
 
-		// Should use -p as first arg (no --agent flag).
-		if args[0] != "-p" {
-			t.Errorf("expected first arg '-p', got %q", args[0])
+		// Should always use --agent autopilot as first args.
+		if args[0] != "--agent" || args[1] != "autopilot" {
+			t.Errorf("expected '--agent autopilot', got %q %q", args[0], args[1])
 		}
 
 		joined := strings.Join(args, " ")
-		if strings.Contains(joined, "--agent") {
-			t.Error("should not have --agent flag without agent definition")
-		}
 
 		// Should include stream-json flags.
 		if !strings.Contains(joined, "--output-format stream-json") {
@@ -212,39 +311,46 @@ func TestBuildClaudeArgs(t *testing.T) {
 			t.Error("should include --verbose")
 		}
 
-		// Full prompt should contain behavioral instructions.
-		prompt := args[len(args)-1]
-		if !strings.Contains(prompt, "Pre-check") {
-			t.Error("fallback prompt should contain behavioral instructions")
-		}
-	})
-
-	t.Run("with agent definition", func(t *testing.T) {
-		// Create .claude/agents/autopilot.md in the worktree.
-		agentDir := filepath.Join(task.WorktreePath, ".claude", "agents")
-		if err := os.MkdirAll(agentDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(agentDir, "autopilot.md"), []byte("---\nname: autopilot\n---\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		args := buildClaudeArgs(task, "main", "org", "repo", 50, 3.00)
-
-		// Should use --agent autopilot.
-		if args[0] != "--agent" || args[1] != "autopilot" {
-			t.Errorf("expected '--agent autopilot', got %q %q", args[0], args[1])
-		}
-
 		// Prompt should be task context only (no behavioral instructions).
 		prompt := args[len(args)-1]
 		if strings.Contains(prompt, "Pre-check") {
-			t.Error("agent-def prompt should not contain behavioral instructions")
+			t.Error("prompt should not contain behavioral instructions (those are in agent def)")
 		}
 		if !strings.Contains(prompt, "#42") {
-			t.Error("agent-def prompt should contain issue number")
+			t.Error("prompt should contain issue number")
 		}
 	})
+
+	t.Run("includes max turns and budget", func(t *testing.T) {
+		args := buildClaudeArgs(task, "main", "org", "repo", 75, 5.50)
+		joined := strings.Join(args, " ")
+
+		if !strings.Contains(joined, "--max-turns 75") {
+			t.Error("should include --max-turns 75")
+		}
+		if !strings.Contains(joined, "--max-budget-usd 5.50") {
+			t.Error("should include --max-budget-usd 5.50")
+		}
+	})
+}
+
+func TestDefaultAgentDefContent(t *testing.T) {
+	// Verify the built-in default contains expected content.
+	checks := []string{
+		"name: autopilot",
+		"tools: Bash, Read, Edit, Write, Glob, Grep",
+		"Pre-check: assess complexity",
+		"more than 8 files",
+		"bail immediately",
+		"Quality gates",
+		"Your first steps",
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(defaultAgentDef, check) {
+			t.Errorf("defaultAgentDef missing expected content: %q", check)
+		}
+	}
 }
 
 func TestPrintPrompts(t *testing.T) {
@@ -262,9 +368,12 @@ func TestPrintPrompts(t *testing.T) {
 
 	sep := strings.Repeat("=", 80)
 
-	fmt.Printf("\n%s\n  FULL PROMPT (fallback — no agent definition)\n%s\n\n", sep, sep)
+	fmt.Printf("\n%s\n  FULL PROMPT (legacy — no agent definition)\n%s\n\n", sep, sep)
 	fmt.Println(renderPrompt(task, "main", "myorg", "myrepo"))
 
 	fmt.Printf("\n%s\n  TASK CONTEXT (used with --agent autopilot)\n%s\n\n", sep, sep)
 	fmt.Println(renderTaskContext(task, "main", "myorg", "myrepo"))
+
+	fmt.Printf("\n%s\n  BUILT-IN DEFAULT AGENT DEFINITION\n%s\n\n", sep, sep)
+	fmt.Print(defaultAgentDef)
 }
