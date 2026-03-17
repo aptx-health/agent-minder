@@ -331,12 +331,12 @@ func (s *Supervisor) IsPaused() bool {
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
 // Always starts fresh — clears previous tasks, cleans up orphaned worktrees.
 // Optional guidance is passed to the LLM during dependency analysis.
-func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, options []DepOption, err error) {
+func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, options []DepOption, agentDef AgentDefSource, err error) {
 	// Validate configured base branch exists in at least one enrolled repo.
 	if s.project.AutopilotBaseBranch != "" {
 		repos, err := s.store.GetRepos(s.project.ID)
 		if err != nil {
-			return 0, nil, fmt.Errorf("get enrolled repos: %w", err)
+			return 0, nil, "", fmt.Errorf("get enrolled repos: %w", err)
 		}
 		found := false
 		for _, r := range repos {
@@ -346,27 +346,26 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, o
 			}
 		}
 		if !found {
-			return 0, nil, fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
+			return 0, nil, "", fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
 		}
 	}
 
-	// Detect which agent definition tier will be used and notify the user.
-	agentDefSource := detectAgentDef(s.repoDir)
-	s.emitEvent("info", fmt.Sprintf("Agent definition: %s", agentDefSource.Description()), nil)
+	// Detect which agent definition tier will be used.
+	agentDef = detectAgentDef(s.repoDir)
 
 	// Clean up any leftovers from a previous run.
 	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
-		return 0, nil, fmt.Errorf("clear autopilot tasks: %w", err)
+		return 0, nil, "", fmt.Errorf("clear autopilot tasks: %w", err)
 	}
 	s.cleanOrphanedWorktrees()
 
 	// Convert tracked items to autopilot tasks.
 	tasks, err := s.convertTrackedItems(ctx)
 	if err != nil {
-		return 0, nil, fmt.Errorf("convert tracked items: %w", err)
+		return 0, nil, "", fmt.Errorf("convert tracked items: %w", err)
 	}
 	if len(tasks) == 0 {
-		return 0, nil, nil
+		return 0, nil, agentDef, nil
 	}
 
 	// Build dependency graph options.
@@ -400,7 +399,7 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, o
 		}}
 	}
 
-	return len(tasks), options, nil
+	return len(tasks), options, agentDef, nil
 }
 
 // ApplyDepOption applies the selected dependency option to the DB tasks.

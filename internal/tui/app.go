@@ -103,9 +103,10 @@ type clearTrackStatusMsg struct{}
 
 // autopilotPrepareResultMsg is sent when autopilot issue fetch completes.
 type autopilotPrepareResultMsg struct {
-	total   int
-	options []autopilot.DepOption
-	err     error
+	total    int
+	options  []autopilot.DepOption
+	agentDef autopilot.AgentDefSource
+	err      error
 }
 
 // autopilotEventMsg wraps an autopilot supervisor event.
@@ -691,12 +692,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autopilotUnblocked = msg.options[0].Unblocked
 		}
 		m.autopilotMode = "dep-select"
-		m.autopilotStatus = ""
+		m.autopilotStatus = fmt.Sprintf("Agent definition: %s", msg.agentDef.Description())
 		m.rebuildAutopilotTaskContent() // populate task list for dep graph display
 		if m.activeTab != tabAutopilot {
 			m.autopilotHasNew = true
 		}
-		return m, nil
+		// Add agent def source to event log so it's visible after status clears.
+		m.events = append(m.events, poller.Event{
+			Time:    time.Now(),
+			Type:    "autopilot",
+			Summary: fmt.Sprintf("[info] Agent definition: %s", msg.agentDef.Description()),
+		})
+		m.rebuildEventLogContent()
+		return m, tea.Tick(8*time.Second, func(t time.Time) tea.Msg {
+			return clearAutopilotStatusMsg{}
+		})
 
 	case autopilotEventMsg:
 		event := autopilot.Event(msg)
@@ -1992,8 +2002,8 @@ func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
 	guidance := m.autopilotDepGuidance
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-		total, options, err := sup.Prepare(context.Background(), guidance)
-		return autopilotPrepareResultMsg{total: total, options: options, err: err}
+		total, options, agentDef, err := sup.Prepare(context.Background(), guidance)
+		return autopilotPrepareResultMsg{total: total, options: options, agentDef: agentDef, err: err}
 	})
 }
 
