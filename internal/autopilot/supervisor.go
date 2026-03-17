@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,37 @@ import (
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/llm"
 )
+
+// debugLogger is a structured JSON logger for autopilot tracing.
+// Nil when MINDER_DEBUG is not set.
+var debugLogger *slog.Logger
+
+func init() {
+	if os.Getenv("MINDER_DEBUG") == "" {
+		return
+	}
+	logPath := os.Getenv("MINDER_LOG")
+	if logPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+		logPath = filepath.Join(home, ".agent-minder", "debug.log")
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	debugLogger = slog.New(slog.NewJSONHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// debugLog logs a structured message to the debug log file.
+func debugLog(msg string, attrs ...any) {
+	if debugLogger == nil {
+		return
+	}
+	debugLogger.Info(msg, attrs...)
+}
 
 // DepOption represents one ranked dependency graph option produced by the LLM.
 type DepOption struct {
@@ -1399,6 +1431,12 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		return
 	}
 	s.emitEvent("started", fmt.Sprintf("Agent def: %s", agentDefSource.Description()), task)
+	debugLog("agent def resolved",
+		"stage", "autopilot", "step", "agent-def",
+		"issue", task.IssueNumber,
+		"source", string(agentDefSource),
+		"worktree", task.WorktreePath,
+	)
 
 	// Build claude command.
 	maxTurns := s.project.AutopilotMaxTurns
@@ -1411,6 +1449,12 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	}
 
 	args := buildClaudeArgs(task, baseBranch, s.owner, s.repo, maxTurns, maxBudget)
+	debugLog("claude command",
+		"stage", "autopilot", "step", "launch",
+		"issue", task.IssueNumber,
+		"args", strings.Join(args[:len(args)-1], " "), // omit prompt (last arg) for brevity
+		"workdir", task.WorktreePath,
+	)
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = task.WorktreePath
 	cmd.Stderr = logFile
