@@ -1690,6 +1690,124 @@ func TestParseDependencies(t *testing.T) {
 	}
 }
 
+func TestRepoEnrollmentCRUD(t *testing.T) {
+	store := openTestDB(t)
+
+	// Create project and repo.
+	p := &Project{Name: "enroll-test", MinderIdentity: "enroll-test/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	r := &Repo{ProjectID: p.ID, Path: "/tmp/myrepo", ShortName: "myrepo"}
+	if err := store.AddRepo(r); err != nil {
+		t.Fatalf("AddRepo: %v", err)
+	}
+
+	// Upsert enrollment.
+	e := &RepoEnrollment{
+		RepoID:           r.ID,
+		EnrollmentYAML:   "version: 1\ninventory:\n  languages: [go]\n",
+		ValidationStatus: "untested",
+	}
+	if err := store.UpsertRepoEnrollment(e); err != nil {
+		t.Fatalf("UpsertRepoEnrollment: %v", err)
+	}
+	if e.ID == 0 {
+		t.Error("expected non-zero ID after upsert")
+	}
+
+	// Get by repo ID.
+	got, err := store.GetRepoEnrollment(r.ID)
+	if err != nil {
+		t.Fatalf("GetRepoEnrollment: %v", err)
+	}
+	if got.ValidationStatus != "untested" {
+		t.Errorf("ValidationStatus = %q, want %q", got.ValidationStatus, "untested")
+	}
+	if got.EnrollmentYAML == "" {
+		t.Error("EnrollmentYAML should not be empty")
+	}
+	if got.EnrolledAt == "" {
+		t.Error("EnrolledAt should be set")
+	}
+
+	// Update validation status.
+	if err := store.UpdateRepoEnrollmentValidation(r.ID, "pass"); err != nil {
+		t.Fatalf("UpdateRepoEnrollmentValidation: %v", err)
+	}
+	got, _ = store.GetRepoEnrollment(r.ID)
+	if got.ValidationStatus != "pass" {
+		t.Errorf("ValidationStatus = %q, want %q", got.ValidationStatus, "pass")
+	}
+	if got.ValidatedAt == "" {
+		t.Error("ValidatedAt should be set after validation update")
+	}
+
+	// Upsert again (should update, not duplicate).
+	e2 := &RepoEnrollment{
+		RepoID:           r.ID,
+		EnrollmentYAML:   "version: 1\ninventory:\n  languages: [go, python]\n",
+		ValidationStatus: "untested",
+	}
+	if err := store.UpsertRepoEnrollment(e2); err != nil {
+		t.Fatalf("UpsertRepoEnrollment second: %v", err)
+	}
+	got, _ = store.GetRepoEnrollment(r.ID)
+	if got.EnrollmentYAML != e2.EnrollmentYAML {
+		t.Errorf("EnrollmentYAML not updated after second upsert")
+	}
+
+	// Get by project.
+	enrollments, err := store.GetRepoEnrollments(p.ID)
+	if err != nil {
+		t.Fatalf("GetRepoEnrollments: %v", err)
+	}
+	if len(enrollments) != 1 {
+		t.Errorf("got %d enrollments, want 1", len(enrollments))
+	}
+
+	// Delete.
+	if err := store.DeleteRepoEnrollment(r.ID); err != nil {
+		t.Fatalf("DeleteRepoEnrollment: %v", err)
+	}
+	enrollments, _ = store.GetRepoEnrollments(p.ID)
+	if len(enrollments) != 0 {
+		t.Errorf("got %d enrollments after delete, want 0", len(enrollments))
+	}
+}
+
+func TestRepoEnrollmentCascadeDelete(t *testing.T) {
+	store := openTestDB(t)
+
+	p := &Project{Name: "enroll-cascade", MinderIdentity: "enroll-cascade/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	r := &Repo{ProjectID: p.ID, Path: "/tmp/cascade-repo", ShortName: "cascade"}
+	if err := store.AddRepo(r); err != nil {
+		t.Fatalf("AddRepo: %v", err)
+	}
+
+	e := &RepoEnrollment{
+		RepoID:           r.ID,
+		EnrollmentYAML:   "version: 1\n",
+		ValidationStatus: "untested",
+	}
+	if err := store.UpsertRepoEnrollment(e); err != nil {
+		t.Fatalf("UpsertRepoEnrollment: %v", err)
+	}
+
+	// Delete the repo — enrollment should cascade.
+	if err := store.DeleteRepo(r.ID); err != nil {
+		t.Fatalf("DeleteRepo: %v", err)
+	}
+
+	enrollments, _ := store.GetRepoEnrollments(p.ID)
+	if len(enrollments) != 0 {
+		t.Errorf("got %d enrollments after repo delete, want 0 (cascade)", len(enrollments))
+	}
+}
+
 func TestPerTierProviderColumns(t *testing.T) {
 	store := openTestDB(t)
 

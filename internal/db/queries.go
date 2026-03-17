@@ -849,6 +849,71 @@ func parseDependencies(deps string) []int {
 	return result
 }
 
+// --- Repo Enrollments ---
+
+// UpsertRepoEnrollment inserts or updates an enrollment record for a repo.
+func (s *Store) UpsertRepoEnrollment(e *RepoEnrollment) error {
+	result, err := s.db.Exec(`
+		INSERT INTO repo_enrollments (repo_id, enrollment_yaml, validated_at, validation_status)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(repo_id) DO UPDATE SET
+			enrollment_yaml = excluded.enrollment_yaml,
+			enrolled_at = datetime('now'),
+			validated_at = excluded.validated_at,
+			validation_status = excluded.validation_status
+	`, e.RepoID, e.EnrollmentYAML, e.ValidatedAt, e.ValidationStatus)
+	if err != nil {
+		return fmt.Errorf("upsert repo enrollment: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("last insert id: %w", err)
+	}
+	e.ID = id
+	return nil
+}
+
+// GetRepoEnrollment returns the enrollment record for a repo, or nil if none.
+func (s *Store) GetRepoEnrollment(repoID int64) (*RepoEnrollment, error) {
+	var e RepoEnrollment
+	if err := s.db.Get(&e, "SELECT * FROM repo_enrollments WHERE repo_id = ?", repoID); err != nil {
+		return nil, fmt.Errorf("get repo enrollment: %w", err)
+	}
+	return &e, nil
+}
+
+// GetRepoEnrollments returns all enrollments for repos in a project.
+func (s *Store) GetRepoEnrollments(projectID int64) ([]RepoEnrollment, error) {
+	var enrollments []RepoEnrollment
+	if err := s.db.Select(&enrollments, `
+		SELECT re.* FROM repo_enrollments re
+		JOIN repos r ON r.id = re.repo_id
+		WHERE r.project_id = ?
+		ORDER BY re.enrolled_at DESC
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("get repo enrollments: %w", err)
+	}
+	return enrollments, nil
+}
+
+// UpdateRepoEnrollmentValidation updates only the validation fields.
+func (s *Store) UpdateRepoEnrollmentValidation(repoID int64, status string) error {
+	_, err := s.db.Exec(`
+		UPDATE repo_enrollments SET validation_status = ?, validated_at = datetime('now')
+		WHERE repo_id = ?
+	`, status, repoID)
+	if err != nil {
+		return fmt.Errorf("update enrollment validation: %w", err)
+	}
+	return nil
+}
+
+// DeleteRepoEnrollment removes the enrollment record for a repo.
+func (s *Store) DeleteRepoEnrollment(repoID int64) error {
+	_, err := s.db.Exec("DELETE FROM repo_enrollments WHERE repo_id = ?", repoID)
+	return err
+}
+
 // LastPoll returns the most recent poll for a project, or nil if none.
 func (s *Store) LastPoll(projectID int64) (*Poll, error) {
 	polls, err := s.RecentPolls(projectID, 1)

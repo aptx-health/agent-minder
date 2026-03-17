@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dustinlange/agent-minder/internal/enrollment"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 )
 
@@ -16,9 +17,9 @@ type LegacyWorktree struct {
 
 // LegacyRepo is kept for backward compat with v1 callers.
 type LegacyRepo struct {
-	Path      string            `yaml:"path"`
-	ShortName string            `yaml:"short_name"`
-	Worktrees []LegacyWorktree  `yaml:"worktrees,omitempty"`
+	Path      string           `yaml:"path"`
+	ShortName string           `yaml:"short_name"`
+	Worktrees []LegacyWorktree `yaml:"worktrees,omitempty"`
 }
 
 // RepoInfo holds everything discovered about a single repo directory.
@@ -33,6 +34,7 @@ type RepoInfo struct {
 	Worktrees  []LegacyWorktree
 	RecentLogs []gitpkg.LogEntry
 	Branches   []gitpkg.BranchInfo
+	Inventory  enrollment.Inventory // Mechanical inventory of the repo
 }
 
 // ScanRepo gathers information about a single repository directory.
@@ -68,6 +70,8 @@ func ScanRepo(dir string) (*RepoInfo, error) {
 			})
 		}
 	}
+
+	info.Inventory = ScanInventory(absDir)
 
 	return info, nil
 }

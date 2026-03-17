@@ -193,6 +193,16 @@ type AutopilotTask struct {
 	CompletedAt  string `db:"completed_at"`
 }
 
+// RepoEnrollment represents a cached enrollment file for a repo.
+type RepoEnrollment struct {
+	ID               int64  `db:"id"`
+	RepoID           int64  `db:"repo_id"`
+	EnrollmentYAML   string `db:"enrollment_yaml"`
+	EnrolledAt       string `db:"enrolled_at"`
+	ValidatedAt      string `db:"validated_at"`
+	ValidationStatus string `db:"validation_status"` // "pass", "fail", "untested"
+}
+
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.
 func (p *Poll) LLMResponse() string {
 	if p.Tier2Response != "" {
