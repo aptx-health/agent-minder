@@ -26,8 +26,8 @@ Common workflows:
   # Launch the TUI monitoring dashboard
   agent-minder start my-project
 
-  # Check project status without launching the TUI
-  agent-minder status my-project
+  # Auto-configure a repo for optimal autopilot performance
+  agent-minder repo enroll ~/repos/my-app
 
   # Track GitHub issues or PRs
   agent-minder track my-project owner/repo#42
