@@ -195,12 +195,12 @@ type AutopilotTask struct {
 	FailureDetail string `db:"failure_detail"` // JSON or text with specifics
 }
 
-// RepoEnrollment represents a cached enrollment file for a repo.
-type RepoEnrollment struct {
+// RepoOnboarding represents a cached onboarding file for a repo.
+type RepoOnboarding struct {
 	ID               int64  `db:"id"`
 	RepoID           int64  `db:"repo_id"`
-	EnrollmentYAML   string `db:"enrollment_yaml"`
-	EnrolledAt       string `db:"enrolled_at"`
+	OnboardingYAML   string `db:"onboarding_yaml"`
+	OnboardedAt      string `db:"onboarded_at"`
 	ValidatedAt      string `db:"validated_at"`
 	ValidationStatus string `db:"validation_status"` // "pass", "fail", "untested"
 }
