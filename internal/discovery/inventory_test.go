@@ -170,6 +170,170 @@ func TestScanRepoIncludesInventory(t *testing.T) {
 	}
 }
 
+func TestScanAgentLogsEmpty(t *testing.T) {
+	// Non-existent directory returns nil.
+	result := ScanAgentLogs("/nonexistent/path", "")
+	if result != nil {
+		t.Errorf("ScanAgentLogs(nonexistent) = %v, want nil", result)
+	}
+
+	// Empty directory returns nil.
+	dir := t.TempDir()
+	result = ScanAgentLogs(dir, "")
+	if result != nil {
+		t.Errorf("ScanAgentLogs(empty) = %v, want nil", result)
+	}
+}
+
+func TestScanAgentLogsWithDenials(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a log file with a result event containing permission denials.
+	logContent := `{"type":"system","message":"starting"}
+{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.05,"result":"done","permission_denials":[{"tool_name":"Write"},{"tool_name":"Bash","command":"npm install"}],"session_id":"test-123"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "myproject-issue-1.log"), []byte(logContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := ScanAgentLogs(dir, "myproject")
+	if len(result) != 2 {
+		t.Fatalf("ScanAgentLogs len = %d, want 2; got %v", len(result), result)
+	}
+
+	// Results are sorted.
+	if !contains(result, "Write") {
+		t.Errorf("result = %v, should contain 'Write'", result)
+	}
+	if !contains(result, "Bash(npm *)") {
+		t.Errorf("result = %v, should contain 'Bash(npm *)'", result)
+	}
+}
+
+func TestScanAgentLogsNoDenials(t *testing.T) {
+	dir := t.TempDir()
+
+	// Log with no permission denials.
+	logContent := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"total_cost_usd":0.03,"result":"ok","permission_denials":[],"session_id":"test-456"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "myproject-issue-2.log"), []byte(logContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := ScanAgentLogs(dir, "myproject")
+	if len(result) != 0 {
+		t.Errorf("ScanAgentLogs = %v, want empty", result)
+	}
+}
+
+func TestScanAgentLogsDeduplicates(t *testing.T) {
+	dir := t.TempDir()
+
+	// Two log files with overlapping denials for the same project.
+	log1 := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"result":"fail","permission_denials":["Write"],"session_id":"s1"}
+`
+	log2 := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"result":"fail","permission_denials":["Write","Read"],"session_id":"s2"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "proj-issue-1.log"), []byte(log1), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "proj-issue-2.log"), []byte(log2), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := ScanAgentLogs(dir, "proj")
+	if len(result) != 2 {
+		t.Fatalf("ScanAgentLogs len = %d, want 2; got %v", len(result), result)
+	}
+	if !contains(result, "Read") {
+		t.Errorf("result = %v, should contain 'Read'", result)
+	}
+	if !contains(result, "Write") {
+		t.Errorf("result = %v, should contain 'Write'", result)
+	}
+}
+
+func TestScanAgentLogsScopedByProject(t *testing.T) {
+	dir := t.TempDir()
+
+	// Logs from two different projects.
+	projA := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"result":"done","permission_denials":["Write"],"session_id":"a1"}
+`
+	projB := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"total_cost_usd":0.01,"result":"done","permission_denials":["Read","Edit"],"session_id":"b1"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "alpha-issue-1.log"), []byte(projA), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "beta-issue-1.log"), []byte(projB), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scoped to alpha — should only see Write.
+	result := ScanAgentLogs(dir, "alpha")
+	if len(result) != 1 {
+		t.Fatalf("ScanAgentLogs(alpha) len = %d, want 1; got %v", len(result), result)
+	}
+	if result[0] != "Write" {
+		t.Errorf("result[0] = %q, want %q", result[0], "Write")
+	}
+
+	// Scoped to beta — should only see Edit, Read.
+	result = ScanAgentLogs(dir, "beta")
+	if len(result) != 2 {
+		t.Fatalf("ScanAgentLogs(beta) len = %d, want 2; got %v", len(result), result)
+	}
+	if !contains(result, "Edit") {
+		t.Errorf("result = %v, should contain 'Edit'", result)
+	}
+	if !contains(result, "Read") {
+		t.Errorf("result = %v, should contain 'Read'", result)
+	}
+
+	// Unscoped — should see all three.
+	result = ScanAgentLogs(dir, "")
+	if len(result) != 3 {
+		t.Fatalf("ScanAgentLogs('') len = %d, want 3; got %v", len(result), result)
+	}
+}
+
+func TestListAgentLogProjects(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create log files for different projects.
+	for _, name := range []string{
+		"alpha-issue-1.log",
+		"alpha-issue-2.log",
+		"beta-issue-1.log",
+		"gamma-issue-10.log",
+		"not-a-match.log",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	projects := ListAgentLogProjects(dir)
+	if len(projects) != 3 {
+		t.Fatalf("ListAgentLogProjects len = %d, want 3; got %v", len(projects), projects)
+	}
+	if projects[0] != "alpha" || projects[1] != "beta" || projects[2] != "gamma" {
+		t.Errorf("projects = %v, want [alpha beta gamma]", projects)
+	}
+}
+
+func TestListAgentLogProjectsEmpty(t *testing.T) {
+	result := ListAgentLogProjects("/nonexistent/path")
+	if result != nil {
+		t.Errorf("ListAgentLogProjects(nonexistent) = %v, want nil", result)
+	}
+
+	dir := t.TempDir()
+	result = ListAgentLogProjects(dir)
+	if result != nil {
+		t.Errorf("ListAgentLogProjects(empty) = %v, want nil", result)
+	}
+}
+
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
