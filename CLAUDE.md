@@ -108,10 +108,7 @@ Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash
 | `internal/discovery` | Repo scanning | `ScanRepo()`, `DeriveProjectName()`, `SuggestTopics()` |
 | `internal/sqliteutil` | SQLite health + WAL recovery | `OpenWithRecovery()`, stale -shm/-wal cleanup |
 | `internal/msgbus` | Agent-msg client + publisher | Read-only `Client`, read-write `Publisher` + `PublishReplace()` |
-
-### Legacy packages (still present, unused by v2)
-
-`internal/config` (YAML), `internal/state` (markdown parser), `internal/claude` (CLI wrapper), `internal/prompt` (Go templates)
+| `internal/config` | Global config + credentials | Viper-based YAML config, keychain integration via `internal/secrets` |
 
 ## Commands
 
