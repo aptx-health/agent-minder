@@ -291,3 +291,45 @@ func TestRestartTask_Requeues(t *testing.T) {
 		t.Errorf("completed_at should be cleared, got %q", tasks[0].CompletedAt)
 	}
 }
+
+func TestRestartTask_FailedRequeues(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  8,
+		IssueTitle:   "Failed task",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	// Mark it as failed.
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "failed"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus: %v", err)
+	}
+
+	// Restart with a cancelled context so fillSlots doesn't try to launch.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := sup.RestartTask(ctx, task.ID); err != nil {
+		t.Fatalf("RestartTask: %v", err)
+	}
+
+	tasks, err := store.GetAutopilotTasks(project.ID)
+	if err != nil {
+		t.Fatalf("GetAutopilotTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Status != "queued" {
+		t.Errorf("status = %q, want queued", tasks[0].Status)
+	}
+}
