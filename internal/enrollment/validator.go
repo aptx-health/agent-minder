@@ -1,7 +1,6 @@
 package enrollment
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dustinlange/agent-minder/internal/agentutil"
 )
 
 const (
@@ -28,6 +29,7 @@ type ValidateConfig struct {
 	TestCommand  string   // e.g., "go test ./..."
 	LintCommand  string   // e.g., "golangci-lint run"
 	LogDir       string   // Directory for agent log files
+	Model        string   // LLM model for the test agent (e.g., "claude-haiku-4-5")
 }
 
 // ValidateResult holds the outcome of the validation run.
@@ -101,7 +103,7 @@ func Validate(ctx context.Context, cfg ValidateConfig, runner CommandRunner) (*V
 		result.Attempts = attempt
 
 		logPath := filepath.Join(cfg.LogDir, fmt.Sprintf("validation-attempt-%d.log", attempt))
-		args := buildTestArgs(currentTools, cfg.TestCommand, cfg.LintCommand)
+		args := buildTestArgs(currentTools, cfg.TestCommand, cfg.LintCommand, cfg.Model)
 
 		exitCode, err := runner.Run(ctx, args, cfg.RepoDir, logPath)
 		if err != nil {
@@ -110,14 +112,14 @@ func Validate(ctx context.Context, cfg ValidateConfig, runner CommandRunner) (*V
 			break
 		}
 
-		agentResult, parseErr := parseValidationLog(logPath)
+		parsed, parseErr := agentutil.ParseAgentLog(logPath)
 		if parseErr != nil {
 			result.Failures = append(result.Failures,
 				fmt.Sprintf("attempt %d: parse log: %v", attempt, parseErr))
 			break
 		}
 
-		failReason := classifyValidation(agentResult, exitCode)
+		failReason := classifyValidation(parsed, exitCode)
 		if failReason == "" {
 			// Success.
 			result.Passed = true
@@ -136,7 +138,7 @@ func Validate(ctx context.Context, cfg ValidateConfig, runner CommandRunner) (*V
 		}
 
 		// Permission failure — try to extract and add denied tools.
-		denied := extractDeniedToolPatterns(agentResult)
+		denied := extractDeniedToolPatterns(parsed)
 		if len(denied) == 0 {
 			result.Failures = append(result.Failures,
 				fmt.Sprintf("attempt %d: permission failure but could not identify denied tools", attempt))
@@ -194,15 +196,18 @@ func ApplyResult(f *File, result *ValidateResult) {
 }
 
 // buildTestArgs constructs the claude CLI arguments for the test agent.
-func buildTestArgs(allowedTools []string, testCmd, lintCmd string) []string {
+func buildTestArgs(allowedTools []string, testCmd, lintCmd, model string) []string {
 	prompt := buildTestPrompt(testCmd, lintCmd)
 
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
-		"--verbose",
 		"--max-turns", fmt.Sprintf("%d", testMaxTurns),
 		"--max-budget-usd", fmt.Sprintf("%.2f", testMaxBudget),
+	}
+
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 
 	for _, tool := range allowedTools {
@@ -230,54 +235,10 @@ func buildTestPrompt(testCmd, lintCmd string) string {
 	return strings.Join(parts, " ")
 }
 
-// --- Stream-JSON log parsing (mirrors autopilot/outcome.go patterns) ---
-
-// agentResult holds parsed fields from the stream-json result event.
-type agentResult struct {
-	SubType           string            `json:"subtype"`
-	IsError           bool              `json:"is_error"`
-	NumTurns          int               `json:"num_turns"`
-	TotalCost         float64           `json:"total_cost_usd"`
-	Result            string            `json:"result"`
-	PermissionDenials []json.RawMessage `json:"permission_denials"`
-}
-
-// validationResultEvent wraps the stream-json event with its type field.
-type validationResultEvent struct {
-	Type string `json:"type"`
-	agentResult
-}
-
-// parseValidationLog reads the stream-json log and extracts the result event.
-// Returns nil (no error) if the log contains no result event.
-func parseValidationLog(logPath string) (*agentResult, error) {
-	f, err := os.Open(logPath)
-	if err != nil {
-		return nil, fmt.Errorf("open log: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024) // 1MB max line
-
-	for scanner.Scan() {
-		var evt validationResultEvent
-		if err := json.Unmarshal(scanner.Bytes(), &evt); err != nil {
-			continue
-		}
-		if evt.Type == "result" {
-			r := evt.agentResult
-			return &r, nil
-		}
-	}
-
-	return nil, nil
-}
-
 // classifyValidation determines the failure reason from the result event.
 // Returns empty string for success, "permissions" for permission denials,
 // or a human-readable description for other failures.
-func classifyValidation(result *agentResult, exitCode int) string {
+func classifyValidation(result *agentutil.AgentResult, exitCode int) string {
 	if result == nil {
 		if exitCode != 0 {
 			return fmt.Sprintf("agent exited with code %d (no result event)", exitCode)
@@ -293,8 +254,8 @@ func classifyValidation(result *agentResult, exitCode int) string {
 	// Explicit error flag.
 	if result.IsError {
 		detail := result.Result
-		if len(detail) > 200 {
-			detail = detail[:200] + "..."
+		if len(detail) > 500 {
+			detail = detail[:500] + "..."
 		}
 		return fmt.Sprintf("agent error: %s", detail)
 	}
@@ -310,7 +271,7 @@ func classifyValidation(result *agentResult, exitCode int) string {
 // extractDeniedToolPatterns parses the permission_denials array and returns
 // unique tool patterns suitable for --allowedTools. For Bash denials that
 // include a command, it derives a "Bash(<cmd> *)" pattern.
-func extractDeniedToolPatterns(result *agentResult) []string {
+func extractDeniedToolPatterns(result *agentutil.AgentResult) []string {
 	if result == nil || len(result.PermissionDenials) == 0 {
 		return nil
 	}
