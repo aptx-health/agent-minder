@@ -42,7 +42,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found — run 'agent-minder init' first", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	repos, _ := store.GetRepos(project.ID)

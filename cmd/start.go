@@ -56,7 +56,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Load project.
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found — run 'agent-minder init' first", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	// Resolve effective provider names for each tier.
