@@ -176,21 +176,23 @@ func (c *CompletedItem) DisplayRef() string {
 
 // AutopilotTask represents an issue being worked on by an autopilot agent.
 type AutopilotTask struct {
-	ID           int64  `db:"id"`
-	ProjectID    int64  `db:"project_id"`
-	Owner        string `db:"owner"`
-	Repo         string `db:"repo"`
-	IssueNumber  int    `db:"issue_number"`
-	IssueTitle   string `db:"issue_title"`
-	IssueBody    string `db:"issue_body"`
-	Dependencies string `db:"dependencies"` // JSON array of issue numbers
-	Status       string `db:"status"`       // queued, running, done, bailed, stopped, blocked
-	WorktreePath string `db:"worktree_path"`
-	Branch       string `db:"branch"`
-	PRNumber     int    `db:"pr_number"`
-	AgentLog     string `db:"agent_log"`
-	StartedAt    string `db:"started_at"`
-	CompletedAt  string `db:"completed_at"`
+	ID            int64  `db:"id"`
+	ProjectID     int64  `db:"project_id"`
+	Owner         string `db:"owner"`
+	Repo          string `db:"repo"`
+	IssueNumber   int    `db:"issue_number"`
+	IssueTitle    string `db:"issue_title"`
+	IssueBody     string `db:"issue_body"`
+	Dependencies  string `db:"dependencies"` // JSON array of issue numbers
+	Status        string `db:"status"`       // queued, running, done, bailed, stopped, blocked
+	WorktreePath  string `db:"worktree_path"`
+	Branch        string `db:"branch"`
+	PRNumber      int    `db:"pr_number"`
+	AgentLog      string `db:"agent_log"`
+	StartedAt     string `db:"started_at"`
+	CompletedAt   string `db:"completed_at"`
+	FailureReason string `db:"failure_reason"` // permissions, max_turns, max_budget, error
+	FailureDetail string `db:"failure_detail"` // JSON or text with specifics
 }
 
 // RepoEnrollment represents a cached enrollment file for a repo.

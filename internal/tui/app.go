@@ -178,9 +178,10 @@ type Model struct {
 
 	// Tracked items (refreshed on poll results).
 	trackedItems     []db.TrackedItem
-	bailedIssues     map[int]bool // issue numbers with bailed autopilot tasks
-	trackedExpanded  bool         // 'x' toggles compact strip vs expanded list with titles
-	concernsExpanded bool         // 'c' toggles capped vs full concern display
+	bailedIssues     map[int]bool   // issue numbers with bailed autopilot tasks
+	failedIssues     map[int]string // issue numbers with failed autopilot tasks → failure reason
+	trackedExpanded  bool           // 'x' toggles compact strip vs expanded list with titles
+	concernsExpanded bool           // 'c' toggles capped vs full concern display
 
 	// Settings dialog.
 	settingsState  *settingsState
@@ -238,6 +239,7 @@ type Model struct {
 	autopilotTasks         []db.AutopilotTask    // sorted task list for navigation
 	autopilotCursor        int                   // index into autopilotTasks
 	autopilotSelectedIssue int                   // issue number for pinning cursor across refreshes
+	failureDetailExpanded  bool                  // toggle full failure detail in task detail panel
 	autopilotPaused        bool                  // tracks pause state for display
 	autopilotDepGuidance   string                // user guidance for dep graph analysis
 	autopilotDepOptions    []autopilot.DepOption // dep graph options from LLM
@@ -743,7 +745,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{listenForAutopilotEvents(m.autopilotSupervisor)}
 		// Sync operations tab on state-changing events.
 		switch event.Type {
-		case "started", "completed", "bailed", "stopped", "finished":
+		case "started", "completed", "failed", "bailed", "stopped", "finished":
 			p := m.poller
 			cmds = append(cmds, func() tea.Msg {
 				time.Sleep(4 * time.Second)
@@ -1064,7 +1066,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		//   - review → launch review session
 		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
 			task := m.selectedAutopilotTask()
-			if task != nil && (task.Status == "bailed" || task.Status == "stopped") {
+			if task != nil && (task.Status == "failed" || task.Status == "bailed" || task.Status == "stopped") {
 				m.autopilotMode = "restart-confirm"
 				return m, nil
 			}
@@ -1096,6 +1098,14 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "i":
+		// Toggle failure detail expansion in autopilot task detail.
+		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
+			task := m.selectedAutopilotTask()
+			if task != nil && task.Status == "failed" && task.FailureDetail != "" {
+				m.failureDetailExpanded = !m.failureDetailExpanded
+				return m, nil
+			}
+		}
 		ghRepos := m.poller.GitHubRepos()
 		if len(ghRepos) == 0 {
 			m.trackStatus = "No GitHub repos enrolled"
@@ -1268,6 +1278,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.autopilotSelectedIssue = m.autopilotTasks[m.autopilotCursor].IssueNumber
+				m.failureDetailExpanded = false // reset on cursor change
 				m.rebuildAutopilotTaskContent()
 				// Ensure cursor is visible in viewport.
 				m.autopilotTaskVP.SetYOffset(m.autopilotCursor)
@@ -2159,7 +2170,7 @@ func (m Model) confirmStopTask() (tea.Model, tea.Cmd) {
 // confirmRestartTask restarts the selected bailed/stopped task after user confirms.
 func (m Model) confirmRestartTask() (tea.Model, tea.Cmd) {
 	task := m.selectedAutopilotTask()
-	if task == nil || (task.Status != "bailed" && task.Status != "stopped") {
+	if task == nil || (task.Status != "failed" && task.Status != "bailed" && task.Status != "stopped") {
 		m.autopilotMode = "running"
 		return m, nil
 	}
@@ -2245,24 +2256,34 @@ func listenForAutopilotEvents(sup *autopilot.Supervisor) tea.Cmd {
 	}
 }
 
-// refreshTrackedItems reloads tracked items and rebuilds the bailed issues map
+// refreshTrackedItems reloads tracked items and rebuilds the bailed/failed issues map
 // from autopilot tasks.
 func (m *Model) refreshTrackedItems() {
 	m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
 	m.bailedIssues = make(map[int]bool)
+	m.failedIssues = make(map[int]string)
 	if tasks, err := m.store.GetAutopilotTasks(m.project.ID); err == nil {
 		for _, t := range tasks {
-			if t.Status == "bailed" {
+			switch t.Status {
+			case "bailed":
 				m.bailedIssues[t.IssueNumber] = true
+			case "failed":
+				m.failedIssues[t.IssueNumber] = t.FailureReason
 			}
 		}
 	}
 }
 
 // effectiveStatus returns the display status for a tracked item, overlaying
-// bailed autopilot status when applicable.
+// bailed/failed autopilot status when applicable.
 func (m Model) effectiveStatus(item db.TrackedItem) string {
-	if m.bailedIssues[item.Number] && item.LastStatus != "Mrgd" && item.LastStatus != "Closd" {
+	if item.LastStatus == "Mrgd" || item.LastStatus == "Closd" {
+		return item.LastStatus
+	}
+	if _, ok := m.failedIssues[item.Number]; ok {
+		return "Faild"
+	}
+	if m.bailedIssues[item.Number] {
 		return "Baild"
 	}
 	return item.LastStatus
