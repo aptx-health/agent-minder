@@ -76,7 +76,7 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 - Worktree: `~/.agent-minder/worktrees/<project>/issue-<N>`, branch: `agent/issue-<N>`
 - Agent logs: `~/.agent-minder/agents/<project>-issue-<N>.log`
 
-**Agent command:** `claude -p --max-turns <N> --max-budget-usd <B> --dangerously-skip-permissions "<prompt>"` with `GITHUB_TOKEN` env var
+**Agent command:** `claude --agent autopilot -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var. Allowed tools are loaded from `.agent-minder/onboarding.yaml` (if present) or a built-in default set.
 
 ### DB schema (internal/db) — currently v9
 

@@ -192,3 +192,23 @@ func TestParseNonexistentFile(t *testing.T) {
 		t.Fatal("expected error for nonexistent file")
 	}
 }
+
+func TestToCliToolPattern(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Read", "Read"},
+		{"Edit", "Edit"},
+		{"Bash(git *)", "Bash(git:*)"},
+		{"Bash(gh *)", "Bash(gh:*)"},
+		{"Bash(go build *)", "Bash(go:build:*)"},
+		{"Bash(doppler run -- *)", "Bash(doppler:run:--:*)"},
+		{"Glob", "Glob"},
+	}
+	for _, tt := range tests {
+		if got := ToCliToolPattern(tt.input); got != tt.want {
+			t.Errorf("ToCliToolPattern(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}

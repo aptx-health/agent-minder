@@ -151,15 +151,21 @@ func TestBuildTestArgs(t *testing.T) {
 		t.Error("missing --model claude-haiku-4-5")
 	}
 
-	// Check that all allowed tools are present.
-	toolCount := 0
+	// Check that all allowed tools are in a single comma-separated --allowedTools value.
+	var toolsVal string
 	for i, a := range args {
 		if a == "--allowedTools" && i+1 < len(args) {
-			toolCount++
+			toolsVal = args[i+1]
+			break
 		}
 	}
-	if toolCount != 3 {
-		t.Errorf("expected 3 --allowedTools flags, got %d", toolCount)
+	if toolsVal == "" {
+		t.Fatal("missing --allowedTools flag")
+	}
+	for _, tool := range []string{"Read", "Edit", "Bash(go:*)"} {
+		if !strings.Contains(toolsVal, tool) {
+			t.Errorf("--allowedTools value %q missing %q", toolsVal, tool)
+		}
 	}
 
 	// Check that prompt is the last arg.

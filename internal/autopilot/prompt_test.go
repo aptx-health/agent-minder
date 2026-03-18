@@ -294,7 +294,8 @@ func TestBuildClaudeArgs(t *testing.T) {
 	}
 
 	t.Run("always uses --agent autopilot", func(t *testing.T) {
-		args := buildClaudeArgs(task, "main", "org", "repo", 50, 3.00)
+		tools := []string{"Read", "Edit", "Write", "Bash(git *)"}
+		args := buildClaudeArgs(task, "main", "org", "repo", 50, 3.00, tools)
 
 		// Should always use --agent autopilot as first args.
 		if args[0] != "--agent" || args[1] != "autopilot" {
@@ -311,6 +312,29 @@ func TestBuildClaudeArgs(t *testing.T) {
 			t.Error("should include --verbose")
 		}
 
+		// Should NOT include --dangerously-skip-permissions.
+		if strings.Contains(joined, "dangerously") {
+			t.Error("should not include --dangerously-skip-permissions")
+		}
+
+		// Should include --allowedTools with comma-separated tools in CLI format.
+		if !strings.Contains(joined, "--allowedTools") {
+			t.Error("should include --allowedTools flag")
+		}
+		// Find the allowedTools value.
+		for i, arg := range args {
+			if arg == "--allowedTools" && i+1 < len(args) {
+				toolsVal := args[i+1]
+				if !strings.Contains(toolsVal, "Read") {
+					t.Error("allowedTools should include Read")
+				}
+				if !strings.Contains(toolsVal, "Bash(git:*)") {
+					t.Errorf("allowedTools should include Bash(git:*), got %q", toolsVal)
+				}
+				break
+			}
+		}
+
 		// Prompt should be task context only (no behavioral instructions).
 		prompt := args[len(args)-1]
 		if strings.Contains(prompt, "Pre-check") {
@@ -322,7 +346,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 	})
 
 	t.Run("includes max turns and budget", func(t *testing.T) {
-		args := buildClaudeArgs(task, "main", "org", "repo", 75, 5.50)
+		args := buildClaudeArgs(task, "main", "org", "repo", 75, 5.50, defaultAllowedTools)
 		joined := strings.Join(args, " ")
 
 		if !strings.Contains(joined, "--max-turns 75") {
@@ -434,6 +458,78 @@ func TestAgentDefSourceDescription(t *testing.T) {
 			t.Errorf("AgentDefSource(%q).Description() = %q, want %q", tt.source, got, tt.want)
 		}
 	}
+}
+
+func TestToCliAllowedTools(t *testing.T) {
+	tools := []string{"Read", "Edit", "Bash(git *)", "Bash(gh *)"}
+	got := toCliAllowedTools(tools)
+	want := "Read,Edit,Bash(git:*),Bash(gh:*)"
+	if got != want {
+		t.Errorf("toCliAllowedTools() = %q, want %q", got, want)
+	}
+}
+
+func TestResolveAllowedTools(t *testing.T) {
+	t.Run("returns defaults when no onboarding file", func(t *testing.T) {
+		dir := t.TempDir()
+		tools := resolveAllowedTools(dir)
+		if len(tools) != len(defaultAllowedTools) {
+			t.Fatalf("expected %d tools, got %d", len(defaultAllowedTools), len(tools))
+		}
+		for i, tool := range tools {
+			if tool != defaultAllowedTools[i] {
+				t.Errorf("tool[%d] = %q, want %q", i, tool, defaultAllowedTools[i])
+			}
+		}
+	})
+
+	t.Run("returns defaults when onboarding has empty permissions", func(t *testing.T) {
+		dir := t.TempDir()
+		onboardDir := filepath.Join(dir, ".agent-minder")
+		if err := os.MkdirAll(onboardDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "version: 1\nscanned_at: 2024-01-01T00:00:00Z\npermissions:\n  allowed_tools: []\n"
+		if err := os.WriteFile(filepath.Join(onboardDir, "onboarding.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		tools := resolveAllowedTools(dir)
+		if len(tools) != len(defaultAllowedTools) {
+			t.Fatalf("expected defaults, got %d tools", len(tools))
+		}
+	})
+
+	t.Run("returns onboarding tools when present", func(t *testing.T) {
+		dir := t.TempDir()
+		onboardDir := filepath.Join(dir, ".agent-minder")
+		if err := os.MkdirAll(onboardDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := `version: 1
+scanned_at: 2024-01-01T00:00:00Z
+permissions:
+  allowed_tools:
+    - Read
+    - Write
+    - "Bash(go *)"
+    - "Bash(npm *)"
+`
+		if err := os.WriteFile(filepath.Join(onboardDir, "onboarding.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		tools := resolveAllowedTools(dir)
+		expected := []string{"Read", "Write", "Bash(go *)", "Bash(npm *)"}
+		if len(tools) != len(expected) {
+			t.Fatalf("expected %d tools, got %d: %v", len(expected), len(tools), tools)
+		}
+		for i, tool := range tools {
+			if tool != expected[i] {
+				t.Errorf("tool[%d] = %q, want %q", i, tool, expected[i])
+			}
+		}
+	})
 }
 
 func TestPrintPrompts(t *testing.T) {

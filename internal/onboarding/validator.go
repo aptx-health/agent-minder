@@ -195,6 +195,16 @@ func ApplyResult(f *File, result *ValidateResult) {
 	}
 }
 
+// toCliAllowedTools converts a list of tool patterns from settings.json format
+// to a single comma-separated string suitable for --allowedTools CLI flag.
+func toCliAllowedTools(tools []string) string {
+	converted := make([]string, len(tools))
+	for i, t := range tools {
+		converted[i] = ToCliToolPattern(t)
+	}
+	return strings.Join(converted, ",")
+}
+
 // buildTestArgs constructs the claude CLI arguments for the test agent.
 func buildTestArgs(allowedTools []string, testCmd, lintCmd, model string) []string {
 	prompt := buildTestPrompt(testCmd, lintCmd)
@@ -210,11 +220,11 @@ func buildTestArgs(allowedTools []string, testCmd, lintCmd, model string) []stri
 		args = append(args, "--model", model)
 	}
 
-	for _, tool := range allowedTools {
-		args = append(args, "--allowedTools", tool)
+	if len(allowedTools) > 0 {
+		args = append(args, "--allowedTools", toCliAllowedTools(allowedTools))
 	}
 
-	args = append(args, prompt)
+	args = append(args, "--", prompt)
 	return args
 }
 

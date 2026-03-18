@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -143,4 +144,16 @@ func FilePath(repoDir string) string {
 func Exists(repoDir string) bool {
 	_, err := os.Stat(FilePath(repoDir))
 	return err == nil
+}
+
+// ToCliToolPattern converts a single tool pattern from settings.json format
+// (spaces inside Bash parens) to CLI --allowedTools format (colons).
+// e.g. "Bash(git *)" → "Bash(git:*)", "Read" → "Read"
+func ToCliToolPattern(pattern string) string {
+	if !strings.HasPrefix(pattern, "Bash(") || !strings.HasSuffix(pattern, ")") {
+		return pattern
+	}
+	inner := pattern[5 : len(pattern)-1]
+	inner = strings.ReplaceAll(inner, " ", ":")
+	return "Bash(" + inner + ")"
 }

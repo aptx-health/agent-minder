@@ -50,17 +50,17 @@ The `tools` field in the frontmatter controls which Claude Code tools the agent 
 
 ## How it works
 
-Without agent definition (default):
+Without agent definition (legacy fallback):
 ```
-claude -p --max-turns 50 --max-budget-usd 3.00 --dangerously-skip-permissions "<full prompt with behavior + context>"
-```
-
-With agent definition:
-```
-claude --agent autopilot -p --max-turns 50 --max-budget-usd 3.00 --dangerously-skip-permissions "<task context only>"
+claude -p --max-turns 50 --max-budget-usd 3.00 --allowedTools Read --allowedTools Edit ... "<full prompt with behavior + context>"
 ```
 
-The agent definition becomes the system prompt; the task context becomes the user prompt.
+With agent definition (current):
+```
+claude --agent autopilot -p --max-turns 50 --max-budget-usd 3.00 --allowedTools Read --allowedTools Edit ... "<task context only>"
+```
+
+Allowed tools are loaded from `.agent-minder/onboarding.yaml` if available, otherwise a safe default set is used (`Read`, `Edit`, `Write`, `Glob`, `Grep`, `Bash(git *)`, `Bash(gh *)`). The agent definition becomes the system prompt; the task context becomes the user prompt.
 
 ---
 

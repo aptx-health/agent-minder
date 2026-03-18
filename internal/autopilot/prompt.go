@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/dustinlange/agent-minder/internal/db"
+	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
 // AgentDefSource identifies which tier of the failover chain provided the agent definition.
@@ -156,6 +157,42 @@ func ensureAgentDef(worktreePath string) (AgentDefSource, error) {
 	}
 
 	return AgentDefBuiltIn, nil
+}
+
+// defaultAllowedTools is the baseline set of tools permitted when no onboarding
+// file exists. Agents always need git and gh access; the other tools are the
+// standard Claude Code file-editing primitives.
+//
+// These use the settings.json format (spaces inside Bash patterns).
+// Use toCLIAllowedTools() to convert for --allowedTools flag.
+var defaultAllowedTools = []string{
+	"Read", "Edit", "Write", "Glob", "Grep",
+	"Bash(git *)", "Bash(gh *)",
+}
+
+// resolveAllowedTools loads the allowed tools list from the repo's onboarding
+// file. If no onboarding file exists or it has no permissions defined, a safe
+// default set is returned. The returned list uses settings.json format (spaces).
+func resolveAllowedTools(repoDir string) []string {
+	f, err := onboarding.Parse(onboarding.FilePath(repoDir))
+	if err != nil {
+		return defaultAllowedTools
+	}
+	if len(f.Permissions.AllowedTools) == 0 {
+		return defaultAllowedTools
+	}
+	return f.Permissions.AllowedTools
+}
+
+// toCliAllowedTools converts a list of tool patterns from settings.json format
+// to a single comma-separated string suitable for --allowedTools CLI flag.
+// Uses onboarding.ToCliToolPattern for the space→colon conversion.
+func toCliAllowedTools(tools []string) string {
+	converted := make([]string, len(tools))
+	for i, t := range tools {
+		converted[i] = onboarding.ToCliToolPattern(t)
+	}
+	return strings.Join(converted, ",")
 }
 
 // renderTaskContext builds a minimal prompt with only dynamic per-task context.

@@ -18,6 +18,7 @@ import (
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/llm"
+	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
 // debugLogger is a structured JSON logger for autopilot tracing.
@@ -226,14 +227,15 @@ func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSe
 	)
 
 	// Launch claude -p with stream-json so we can capture the session ID.
-	// Use --dangerously-skip-permissions so gh commands run without approval.
+	// Use --allowedTools for least-privilege access scoped to review needs.
+	allowedTools := resolveAllowedTools(s.repoDir)
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--max-turns", "3",
-		"--dangerously-skip-permissions",
-		prompt,
+		"--allowedTools", toCliAllowedTools(allowedTools),
+		"--", prompt,
 	}
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
@@ -1461,7 +1463,13 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		maxBudget = 3.00
 	}
 
-	args := buildClaudeArgs(task, baseBranch, s.owner, s.repo, maxTurns, maxBudget)
+	allowedTools := resolveAllowedTools(s.repoDir)
+	if onboarding.Exists(s.repoDir) {
+		s.emitEvent("info", fmt.Sprintf("Permissions: onboarded (%d tools)", len(allowedTools)), task)
+	} else {
+		s.emitEvent("info", "Permissions: defaults (run 'agent-minder repo enroll' for project-specific tools)", task)
+	}
+	args := buildClaudeArgs(task, baseBranch, s.owner, s.repo, maxTurns, maxBudget, allowedTools)
 	debugLog("claude command",
 		"stage", "autopilot", "step", "launch",
 		"issue", task.IssueNumber,
@@ -1688,6 +1696,14 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 				"issue", task.IssueNumber, "reason", reason)
 			return "failed"
 		}
+		if status == "warning" {
+			var denials []json.RawMessage
+			_ = json.Unmarshal([]byte(detail), &denials)
+			s.emitEvent("info", fmt.Sprintf("#%d had %d permission denial(s) — checking for PR", task.IssueNumber, len(denials)), task)
+			debugLog("inspectOutcome: warning (non-fatal)",
+				"issue", task.IssueNumber, "reason", reason, "detail", detail)
+			// Continue to PR check — agent may have completed despite warnings.
+		}
 	}
 
 	// Check if a PR was opened for this branch.
@@ -1731,7 +1747,11 @@ var userHomeDir = os.UserHomeDir
 // It always uses --agent autopilot with a minimal task-context prompt. The agent
 // definition is resolved via a three-tier failover chain (repo → user → built-in)
 // by ensureAgentDef(), which must be called before this function.
-func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, maxTurns int, maxBudget float64) []string {
+//
+// Instead of --dangerously-skip-permissions, each tool from allowedTools is
+// passed as a separate --allowedTools flag, giving the agent least-privilege
+// access scoped to the tools it actually needs.
+func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, maxTurns int, maxBudget float64, allowedTools []string) []string {
 	prompt := renderTaskContext(task, baseBranch, owner, repo)
 	return []string{
 		"--agent", "autopilot",
@@ -1740,8 +1760,8 @@ func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, max
 		"--verbose",
 		"--max-turns", strconv.Itoa(maxTurns),
 		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
-		"--dangerously-skip-permissions",
-		prompt,
+		"--allowedTools", toCliAllowedTools(allowedTools),
+		"--", prompt,
 	}
 }
 
