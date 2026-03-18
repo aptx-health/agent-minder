@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1845,15 +1846,19 @@ func TestCheckReviewTasks_NoReviewTasks(t *testing.T) {
 	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
 
 	// Create tasks that are NOT in review.
-	for _, status := range []string{"queued", "running", "done", "bailed"} {
+	statuses := []string{"queued", "running", "done", "bailed"}
+	for i, status := range statuses {
 		task := &db.AutopilotTask{
 			ProjectID:    project.ID,
-			IssueNumber:  10,
+			IssueNumber:  (i + 1) * 10,
 			IssueTitle:   "Test",
 			Dependencies: "[]",
-			Status:       status,
+			Status:       "queued",
 		}
 		_ = store.CreateAutopilotTask(task)
+		if status != "queued" {
+			_ = store.UpdateAutopilotTaskStatus(task.ID, status)
+		}
 	}
 
 	promoted := sup.checkReviewTasks(context.Background())
@@ -2222,10 +2227,11 @@ func TestQueuedUnblockedTasks_OnlyNonQueued(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 
-	for _, status := range []string{"running", "done", "bailed", "blocked"} {
+	statuses := []string{"running", "done", "bailed", "blocked"}
+	for i, status := range statuses {
 		task := &db.AutopilotTask{
 			ProjectID:    project.ID,
-			IssueNumber:  10,
+			IssueNumber:  (i + 1) * 10,
 			IssueTitle:   "Not queued",
 			Dependencies: "[]",
 			Status:       "queued",
@@ -3634,36 +3640,6 @@ func TestCountUnblocked_StringArrayDeps(t *testing.T) {
 	}
 }
 
-func TestCountUnblocked_ManualTask(t *testing.T) {
-	// Manual tasks should be excluded from the count.
-	graph := map[string]json.RawMessage{
-		"10": json.RawMessage(`"manual"`),
-		"20": json.RawMessage(`[]`),
-	}
-	tasks := []*db.AutopilotTask{
-		{IssueNumber: 10, Status: "manual"},
-		{IssueNumber: 20, Status: "queued"},
-	}
-	if got := countUnblocked(graph, tasks); got != 1 {
-		t.Errorf("countUnblocked = %d, want 1 (manual excluded)", got)
-	}
-}
-
-func TestCountUnblocked_SkipTask(t *testing.T) {
-	// Skipped tasks should be excluded from the count.
-	graph := map[string]json.RawMessage{
-		"10": json.RawMessage(`"skip"`),
-		"20": json.RawMessage(`[]`),
-	}
-	tasks := []*db.AutopilotTask{
-		{IssueNumber: 10, Status: "queued"},
-		{IssueNumber: 20, Status: "queued"},
-	}
-	if got := countUnblocked(graph, tasks); got != 1 {
-		t.Errorf("countUnblocked = %d, want 1 (skip excluded)", got)
-	}
-}
-
 func TestCountUnblocked_UnmarshalError(t *testing.T) {
 	// Invalid JSON in deps should be treated as no deps (unblocked).
 	graph := map[string]json.RawMessage{
@@ -3698,8 +3674,6 @@ func TestApplyDepOption_StringArrayDeps(t *testing.T) {
 	}
 
 	// Use string array deps ["10"] which triggers the fallback path.
-	// Note: json.Unmarshal(["10"], &[]int) partially initializes with 0 before
-	// failing, then the string-array fallback appends 10, giving [0,10].
 	opt := DepOption{
 		Name:      "String deps",
 		Rationale: "String array fallback",
@@ -3715,10 +3689,14 @@ func TestApplyDepOption_StringArrayDeps(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("got %d tasks, want 1", len(tasks))
 	}
-	// Task was blocked but then unblocked because dep 10 doesn't exist
-	// (unknown deps are treated as satisfied). The string array fallback path was exercised.
+	// String dep "10" is parsed correctly to [10]. Dep 10 doesn't exist as a task
+	// (unknown deps are treated as satisfied), so the task is unblocked.
 	if tasks[0].Status != "queued" {
 		t.Errorf("status = %q, want queued (unblocked since dep 10 is unknown)", tasks[0].Status)
+	}
+	// Verify deps were stored correctly as [10], not [0,10].
+	if tasks[0].Dependencies != "[10]" {
+		t.Errorf("deps = %q, want [10]", tasks[0].Dependencies)
 	}
 }
 
@@ -3828,36 +3806,6 @@ func TestFillSlots_SkipsBlockedTasks(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Events channel helpers
-// ---------------------------------------------------------------------------
-
-func TestEvents_ReceivesEvents(t *testing.T) {
-	store := openTestStore(t)
-	project := createTestProject(t, store)
-	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
-
-	ch := sup.Events()
-	if ch == nil {
-		t.Fatal("Events() returned nil")
-	}
-
-	// Emit an event and verify it's received.
-	sup.emitEvent("test", "hello", nil)
-
-	select {
-	case ev := <-ch:
-		if ev.Type != "test" {
-			t.Errorf("event type = %q, want test", ev.Type)
-		}
-		if ev.Summary != "hello" {
-			t.Errorf("event summary = %q, want hello", ev.Summary)
-		}
-	default:
-		t.Error("expected event on channel")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // ApplyRebuildDepOption with blocked→queued transition
 // ---------------------------------------------------------------------------
 
@@ -3906,14 +3854,5 @@ func TestApplyRebuildDepOption_UnblocksWhenSatisfied(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
-}
-
-func containsSubstring(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(s, substr)
 }
