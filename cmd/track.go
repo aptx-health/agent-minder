@@ -17,10 +17,18 @@ var trackCmd = &cobra.Command{
 	Use:   "track <project> <owner/repo#number> | <project> <owner/repo> <number> [number...]",
 	Short: "Track GitHub issues or PRs",
 	Long: `Track one or more GitHub issues or pull requests for a project.
+Tracked items appear in the TUI dashboard and status output, and are
+included in the LLM analysis context. Requires a GitHub token — run
+'agent-minder setup' first if you haven't configured one.
 
-Examples:
-  agent-minder track myproject octocat/hello-world#42
-  agent-minder track myproject octocat/hello-world 42 55 78`,
+Two reference formats are supported:
+  owner/repo#number    — track a single item
+  owner/repo N N N     — track multiple items from the same repo`,
+	Example: `  # Track a single issue
+  agent-minder track my-project octocat/hello-world#42
+
+  # Track multiple issues from the same repo
+  agent-minder track my-project octocat/hello-world 42 55 78`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: runTrack,
 }
@@ -80,7 +88,7 @@ func runTrack(cmd *cobra.Command, args []string) error {
 
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	gh := ghpkg.NewClient(token)

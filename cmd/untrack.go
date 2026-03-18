@@ -10,8 +10,12 @@ import (
 var untrackCmd = &cobra.Command{
 	Use:   "untrack <project> <owner/repo#number>",
 	Short: "Stop tracking a GitHub issue or PR",
-	Args:  cobra.ExactArgs(2),
-	RunE:  runUntrack,
+	Long: `Remove a GitHub issue or pull request from the project's tracked items.
+The item reference must use the owner/repo#number format.`,
+	Example: `  # Stop tracking an issue
+  agent-minder untrack my-project octocat/hello-world#42`,
+	Args: cobra.ExactArgs(2),
+	RunE: runUntrack,
 }
 
 func init() {
@@ -36,7 +40,7 @@ func runUntrack(cmd *cobra.Command, args []string) error {
 
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	if err := store.RemoveTrackedItem(project.ID, owner, repo, number); err != nil {

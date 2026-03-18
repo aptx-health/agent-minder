@@ -24,7 +24,10 @@ func defaultAgentLogDir() string {
 var repoCmd = &cobra.Command{
 	Use:   "repo",
 	Short: "Manage repository enrollment for autopilot",
-	Long:  "Commands for enrolling repositories, checking enrollment status, and refreshing enrollment data.",
+	Long: `Commands for enrolling repositories, checking enrollment status, and
+refreshing enrollment data. Enrollment configures a repo for optimal
+autopilot agent performance by scanning its build system, tooling,
+and existing configuration.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},
@@ -33,25 +36,39 @@ var repoCmd = &cobra.Command{
 var repoEnrollCmd = &cobra.Command{
 	Use:   "enroll <dir>",
 	Short: "Guided enrollment wizard for a repository",
-	Long:  "Scans a repository for language, build system, tooling, and existing configuration, then guides you through enrollment for optimal autopilot performance.",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runRepoEnroll,
+	Long: `Scans a repository for language, build system, tooling, and existing
+configuration, then guides you through enrollment for optimal autopilot
+performance.`,
+	Example: `  # Enroll a repository for autopilot
+  agent-minder repo enroll ~/repos/my-app
+
+  # Enroll with project-scoped agent log scanning
+  agent-minder repo enroll ~/repos/my-app --project my-project`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRepoEnroll,
 }
 
 var repoStatusCmd = &cobra.Command{
 	Use:   "status <dir>",
 	Short: "Show enrollment state for a repository",
-	Long:  "Displays the current enrollment state including mechanical inventory and any existing enrollment file data.",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runRepoStatus,
+	Long: `Displays the current enrollment state including mechanical inventory
+and any existing enrollment file data.`,
+	Example: `  # Check enrollment status
+  agent-minder repo status ~/repos/my-app`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRepoStatus,
 }
 
 var repoRefreshCmd = &cobra.Command{
 	Use:   "refresh <dir>",
 	Short: "Re-scan repository and update enrollment data",
-	Long:  "Re-runs the mechanical inventory scan and updates the enrollment file with fresh results.",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runRepoRefresh,
+	Long: `Re-runs the mechanical inventory scan and updates the enrollment file
+with fresh results. Useful after adding new build tools, changing CI,
+or modifying the project structure.`,
+	Example: `  # Refresh enrollment data after adding new tooling
+  agent-minder repo refresh ~/repos/my-app`,
+	Args: cobra.ExactArgs(1),
+	RunE: runRepoRefresh,
 }
 
 func init() {
