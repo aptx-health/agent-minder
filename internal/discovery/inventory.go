@@ -6,13 +6,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dustinlange/agent-minder/internal/enrollment"
+	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
 // ScanInventory performs a mechanical scan of a repository directory and returns
-// a populated Inventory struct suitable for inclusion in an enrollment file.
-func ScanInventory(dir string) enrollment.Inventory {
-	inv := enrollment.Inventory{
+// a populated Inventory struct suitable for inclusion in an onboarding file.
+func ScanInventory(dir string) onboarding.Inventory {
+	inv := onboarding.Inventory{
 		Languages:       detectLanguages(dir),
 		PackageManagers: detectPackageManagers(dir),
 		BuildFiles:      detectBuildFiles(dir),
@@ -152,8 +152,8 @@ type toolIndicator struct {
 }
 
 // detectTooling identifies development tooling.
-func detectTooling(dir string) enrollment.Tooling {
-	t := enrollment.Tooling{}
+func detectTooling(dir string) onboarding.Tooling {
+	t := onboarding.Tooling{}
 
 	// Secrets management (first match wins).
 	secretsIndicators := []toolIndicator{
@@ -227,8 +227,8 @@ func matchesAny(dir string, files []string) bool {
 }
 
 // detectClaudeConfig checks for existing Claude Code configuration.
-func detectClaudeConfig(dir string) enrollment.ExistingClaudeConfig {
-	cfg := enrollment.ExistingClaudeConfig{}
+func detectClaudeConfig(dir string) onboarding.ExistingClaudeConfig {
+	cfg := onboarding.ExistingClaudeConfig{}
 
 	cfg.SettingsJSON = fileExists(filepath.Join(dir, ".claude", "settings.json"))
 	cfg.ClaudeMD = fileExists(filepath.Join(dir, "CLAUDE.md"))

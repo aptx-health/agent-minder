@@ -1,4 +1,4 @@
-package enrollment
+package onboarding
 
 import (
 	"context"
@@ -25,7 +25,7 @@ const (
 // ValidateConfig holds parameters for running a test-task validation.
 type ValidateConfig struct {
 	RepoDir      string   // Target repository directory
-	AllowedTools []string // Permission list from enrollment
+	AllowedTools []string // Permission list from onboarding
 	TestCommand  string   // e.g., "go test ./..."
 	LintCommand  string   // e.g., "golangci-lint run"
 	LogDir       string   // Directory for agent log files
@@ -174,7 +174,7 @@ func Validate(ctx context.Context, cfg ValidateConfig, runner CommandRunner) (*V
 	return result, nil
 }
 
-// ApplyResult updates the enrollment file's Validation section based on
+// ApplyResult updates the onboarding file's Validation section based on
 // the validation result. If refinement added new tools, permissions are
 // also updated.
 func ApplyResult(f *File, result *ValidateResult) {

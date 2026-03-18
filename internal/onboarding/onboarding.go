@@ -1,6 +1,6 @@
-// Package enrollment defines the enrollment file schema and provides
-// parsing and writing utilities for .agent-minder/enrollment.yaml files.
-package enrollment
+// Package onboarding defines the onboarding file schema and provides
+// parsing and writing utilities for .agent-minder/onboarding.yaml files.
+package onboarding
 
 import (
 	"fmt"
@@ -11,10 +11,10 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// EnrollmentFileName is the path relative to a repository root.
-const EnrollmentFileName = ".agent-minder/enrollment.yaml"
+// OnboardingFileName is the path relative to a repository root.
+const OnboardingFileName = ".agent-minder/onboarding.yaml"
 
-// File represents the complete enrollment file schema.
+// File represents the complete onboarding file schema.
 type File struct {
 	Version   int       `yaml:"version"`
 	ScannedAt time.Time `yaml:"scanned_at"`
@@ -50,7 +50,7 @@ type ExistingClaudeConfig struct {
 	ClaudeMD     bool `yaml:"claude_md"`
 }
 
-// Context holds user-provided context populated by the enrollment agent.
+// Context holds user-provided context populated by the onboarding agent.
 type Context struct {
 	BuildCommand        string   `yaml:"build_command"`
 	TestCommand         string   `yaml:"test_command"`
@@ -71,7 +71,7 @@ type Validation struct {
 	Failures []string   `yaml:"failures"` // list of failure descriptions
 }
 
-// New creates a new enrollment file with version 1 and the given inventory.
+// New creates a new onboarding file with version 1 and the given inventory.
 func New(inv Inventory) *File {
 	return &File{
 		Version:   1,
@@ -84,33 +84,33 @@ func New(inv Inventory) *File {
 	}
 }
 
-// Parse reads and parses an enrollment file from the given path.
+// Parse reads and parses an onboarding file from the given path.
 func Parse(path string) (*File, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read enrollment file: %w", err)
+		return nil, fmt.Errorf("read onboarding file: %w", err)
 	}
 	return ParseBytes(data)
 }
 
-// ParseBytes parses enrollment YAML from raw bytes.
+// ParseBytes parses onboarding YAML from raw bytes.
 func ParseBytes(data []byte) (*File, error) {
 	var f File
 	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("parse enrollment yaml: %w", err)
+		return nil, fmt.Errorf("parse onboarding yaml: %w", err)
 	}
 	if f.Version == 0 {
-		return nil, fmt.Errorf("enrollment file missing or invalid version")
+		return nil, fmt.Errorf("onboarding file missing or invalid version")
 	}
 	return &f, nil
 }
 
-// Write serializes the enrollment file to the given path, creating parent
+// Write serializes the onboarding file to the given path, creating parent
 // directories as needed.
 func Write(path string, f *File) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create enrollment dir: %w", err)
+		return fmt.Errorf("create onboarding dir: %w", err)
 	}
 
 	data, err := Marshal(f)
@@ -119,26 +119,26 @@ func Write(path string, f *File) error {
 	}
 
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write enrollment file: %w", err)
+		return fmt.Errorf("write onboarding file: %w", err)
 	}
 	return nil
 }
 
-// Marshal serializes the enrollment file to YAML bytes.
+// Marshal serializes the onboarding file to YAML bytes.
 func Marshal(f *File) ([]byte, error) {
 	data, err := yaml.Marshal(f)
 	if err != nil {
-		return nil, fmt.Errorf("marshal enrollment yaml: %w", err)
+		return nil, fmt.Errorf("marshal onboarding yaml: %w", err)
 	}
 	return data, nil
 }
 
-// FilePath returns the enrollment file path for a given repo root directory.
+// FilePath returns the onboarding file path for a given repo root directory.
 func FilePath(repoDir string) string {
-	return filepath.Join(repoDir, EnrollmentFileName)
+	return filepath.Join(repoDir, OnboardingFileName)
 }
 
-// Exists returns true if an enrollment file exists at the expected location
+// Exists returns true if an onboarding file exists at the expected location
 // within the given repo directory.
 func Exists(repoDir string) bool {
 	_, err := os.Stat(FilePath(repoDir))

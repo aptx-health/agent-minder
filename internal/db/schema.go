@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 15
+const currentVersion = 16
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -148,11 +148,11 @@ CREATE TABLE IF NOT EXISTS completed_items (
 	completed_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS repo_enrollments (
+CREATE TABLE IF NOT EXISTS repo_onboarding (
 	id                INTEGER PRIMARY KEY,
 	repo_id           INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-	enrollment_yaml   TEXT NOT NULL DEFAULT '',
-	enrolled_at       TEXT DEFAULT (datetime('now')),
+	onboarding_yaml   TEXT NOT NULL DEFAULT '',
+	onboarded_at      TEXT DEFAULT (datetime('now')),
 	validated_at      TEXT DEFAULT '',
 	validation_status TEXT NOT NULL DEFAULT 'untested',
 	UNIQUE(repo_id)
@@ -275,6 +275,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 15 {
 		if err := migrateV15(db); err != nil {
 			return fmt.Errorf("apply migration v15: %w", err)
+		}
+	}
+
+	if version < 16 {
+		if err := migrateV16(db); err != nil {
+			return fmt.Errorf("apply migration v16: %w", err)
 		}
 	}
 
@@ -551,6 +557,20 @@ func migrateV15(db *sqlx.DB) error {
 	for _, col := range []string{"failure_reason", "failure_detail"} {
 		if _, err := db.Exec(fmt.Sprintf(`UPDATE autopilot_tasks SET %s = '' WHERE %s IS NULL`, col, col)); err != nil {
 			return fmt.Errorf("null-fill %s: %w", col, err)
+		}
+	}
+	return nil
+}
+
+func migrateV16(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE repo_enrollments RENAME TO repo_onboarding`,
+		`ALTER TABLE repo_onboarding RENAME COLUMN enrollment_yaml TO onboarding_yaml`,
+		`ALTER TABLE repo_onboarding RENAME COLUMN enrolled_at TO onboarded_at`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
 		}
 	}
 	return nil
