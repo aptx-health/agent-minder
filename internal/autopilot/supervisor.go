@@ -1697,7 +1697,9 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			return "failed"
 		}
 		if status == "warning" {
-			s.emitEvent("warning", fmt.Sprintf("#%d: %s (%s)", task.IssueNumber, reason, detail), task)
+			var denials []json.RawMessage
+			_ = json.Unmarshal([]byte(detail), &denials)
+			s.emitEvent("info", fmt.Sprintf("#%d had %d permission denial(s) — checking for PR", task.IssueNumber, len(denials)), task)
 			debugLog("inspectOutcome: warning (non-fatal)",
 				"issue", task.IssueNumber, "reason", reason, "detail", detail)
 			// Continue to PR check — agent may have completed despite warnings.
