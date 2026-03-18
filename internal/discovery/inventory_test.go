@@ -296,6 +296,44 @@ func TestScanAgentLogsScopedByProject(t *testing.T) {
 	}
 }
 
+func TestListAgentLogProjects(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create log files for different projects.
+	for _, name := range []string{
+		"alpha-issue-1.log",
+		"alpha-issue-2.log",
+		"beta-issue-1.log",
+		"gamma-issue-10.log",
+		"not-a-match.log",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	projects := ListAgentLogProjects(dir)
+	if len(projects) != 3 {
+		t.Fatalf("ListAgentLogProjects len = %d, want 3; got %v", len(projects), projects)
+	}
+	if projects[0] != "alpha" || projects[1] != "beta" || projects[2] != "gamma" {
+		t.Errorf("projects = %v, want [alpha beta gamma]", projects)
+	}
+}
+
+func TestListAgentLogProjectsEmpty(t *testing.T) {
+	result := ListAgentLogProjects("/nonexistent/path")
+	if result != nil {
+		t.Errorf("ListAgentLogProjects(nonexistent) = %v, want nil", result)
+	}
+
+	dir := t.TempDir()
+	result = ListAgentLogProjects(dir)
+	if result != nil {
+		t.Errorf("ListAgentLogProjects(empty) = %v, want nil", result)
+	}
+}
+
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {

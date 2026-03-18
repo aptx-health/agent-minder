@@ -83,13 +83,17 @@ func runRepoEnroll(cmd *cobra.Command, args []string) error {
 	projectName, _ := cmd.Flags().GetString("project")
 	logDir := defaultAgentLogDir()
 	permFailures := discovery.ScanAgentLogs(logDir, projectName)
+	var availableProjects []string
+	if projectName == "" {
+		availableProjects = discovery.ListAgentLogProjects(logDir)
+	}
 
 	// Step 2: Present overview.
 	fmt.Println()
 	printRepoHeader(info)
 	printInventory(info.Inventory)
 	printEnrollmentStatus(hasEnrollment, info.Path)
-	printPermissionFailures(permFailures, projectName)
+	printPermissionFailures(permFailures, projectName, availableProjects)
 
 	if hasEnrollment {
 		fmt.Println("\nEnrollment file already exists.")
@@ -133,7 +137,11 @@ func runRepoStatus(cmd *cobra.Command, args []string) error {
 	projectName, _ := cmd.Flags().GetString("project")
 	logDir := defaultAgentLogDir()
 	permFailures := discovery.ScanAgentLogs(logDir, projectName)
-	printPermissionFailures(permFailures, projectName)
+	var availableProjects []string
+	if projectName == "" {
+		availableProjects = discovery.ListAgentLogProjects(logDir)
+	}
+	printPermissionFailures(permFailures, projectName, availableProjects)
 
 	return nil
 }
@@ -267,21 +275,21 @@ func printEnrollmentFile(f *onboarding.File) {
 	}
 }
 
-func printPermissionFailures(failures []string, projectName string) {
+func printPermissionFailures(failures []string, projectName string, availableProjects []string) {
 	scope := "all projects"
 	if projectName != "" {
 		scope = fmt.Sprintf("project %q", projectName)
 	}
 	if len(failures) == 0 {
 		fmt.Printf("\nPrior agent runs (%s): no permission failures detected\n", scope)
-		if projectName == "" {
-			fmt.Println("  Hint: use --project to scope to a specific project's logs")
+	} else {
+		fmt.Printf("\nPrior agent runs (%s): %d permission failure(s) detected\n", scope, len(failures))
+		for _, f := range failures {
+			fmt.Printf("  - %s\n", f)
 		}
-		return
 	}
-	fmt.Printf("\nPrior agent runs (%s): %d permission failure(s) detected\n", scope, len(failures))
-	for _, f := range failures {
-		fmt.Printf("  - %s\n", f)
+	if projectName == "" && len(availableProjects) > 0 {
+		fmt.Printf("  Hint: use --project to scope. Available: %s\n", strings.Join(availableProjects, ", "))
 	}
 }
 

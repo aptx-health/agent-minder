@@ -56,6 +56,39 @@ func ScanAgentLogs(logDir string, projectName string) []string {
 	return patterns
 }
 
+// ListAgentLogProjects extracts unique project names from agent log filenames
+// in the given directory. Log files follow the naming convention
+// "<projectName>-issue-<N>.log". Returns a sorted list of project names.
+func ListAgentLogProjects(logDir string) []string {
+	if !dirExists(logDir) {
+		return nil
+	}
+
+	matches, err := filepath.Glob(filepath.Join(logDir, "*-issue-*.log"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	for _, logPath := range matches {
+		base := filepath.Base(logPath)
+		// Find the last occurrence of "-issue-" to extract project name.
+		idx := strings.LastIndex(base, "-issue-")
+		if idx <= 0 {
+			continue
+		}
+		project := base[:idx]
+		seen[project] = true
+	}
+
+	var projects []string
+	for p := range seen {
+		projects = append(projects, p)
+	}
+	sort.Strings(projects)
+	return projects
+}
+
 // denialRawToPattern converts a json.RawMessage permission denial into
 // a human-readable tool pattern string. Handles both object
 // ({"tool_name":"Bash",...}) and plain string ("Write") formats.
