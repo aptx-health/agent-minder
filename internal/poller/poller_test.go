@@ -102,17 +102,17 @@ func (m *mockProvider) Complete(_ context.Context, req *llm.Request) (*llm.Respo
 func createTestProject(t *testing.T, store *db.Store) *db.Project {
 	t.Helper()
 	p := &db.Project{
-		Name:               "test-project",
-		GoalType:           "feature",
-		GoalDescription:    "Build and test a feature",
-		RefreshIntervalSec: 300,
-		MessageTTLSec:      172800,
-		MinderIdentity:     "test-project/minder",
-		LLMProvider:        "anthropic",
-		LLMModel:           "claude-haiku-4-5",
-		LLMSummarizerModel: "claude-haiku-4-5",
-		LLMAnalyzerModel:   "claude-sonnet-4-6",
-		StatusIntervalSec:  300,
+		Name:                "test-project",
+		GoalType:            "feature",
+		GoalDescription:     "Build and test a feature",
+		RefreshIntervalSec:  300,
+		MessageTTLSec:       172800,
+		MinderIdentity:      "test-project/minder",
+		LLMProvider:         "anthropic",
+		LLMModel:            "claude-haiku-4-5",
+		LLMSummarizerModel:  "claude-haiku-4-5",
+		LLMAnalyzerModel:    "claude-sonnet-4-6",
+		StatusIntervalSec:   300,
 		AnalysisIntervalSec: 1800,
 	}
 	if err := store.CreateProject(p); err != nil {
@@ -483,7 +483,7 @@ func TestPoller_EmitWithPollResult(t *testing.T) {
 	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
 
 	result := &PollResult{
-		NewCommits: 5,
+		NewCommits:   5,
 		Tier1Summary: "test summary",
 	}
 	p.emit("poll", "5 new commits", result)
@@ -557,12 +557,12 @@ func TestRecordPollResult(t *testing.T) {
 
 	poller := New(store, p, nil, nil, nil)
 	result := &PollResult{
-		NewCommits:    5,
-		NewMessages:   2,
-		Tier1Summary:  "git activity detected",
-		Tier2Analysis: "everything stable",
+		NewCommits:     5,
+		NewMessages:    2,
+		Tier1Summary:   "git activity detected",
+		Tier2Analysis:  "everything stable",
 		BusMessageSent: "[proj/coord] update",
-		Concerns:      []string{"[warning] schema drift"},
+		Concerns:       []string{"[warning] schema drift"},
 	}
 
 	poller.recordPollResult(result)
@@ -1434,8 +1434,8 @@ func TestParseAnalysis_Corpus(t *testing.T) {
 			wantConcerns: 0,
 		},
 		{
-			name: "json with leading text",
-			raw:  "Here's the analysis:\n```json\n{\"analysis\":\"Fenced\",\"concerns\":[]}\n```\nDone.",
+			name:         "json with leading text",
+			raw:          "Here's the analysis:\n```json\n{\"analysis\":\"Fenced\",\"concerns\":[]}\n```\nDone.",
 			wantAnalysis: "Fenced",
 			wantConcerns: 0,
 		},
