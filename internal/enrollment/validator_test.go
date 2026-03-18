@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dustinlange/agent-minder/internal/agentutil"
 )
 
 // --- Mock runner ---
@@ -124,7 +126,7 @@ func TestBuildTestPrompt_OnlyTest(t *testing.T) {
 
 func TestBuildTestArgs(t *testing.T) {
 	tools := []string{"Bash(go *)", "Read", "Edit"}
-	args := buildTestArgs(tools, "go test ./...", "golangci-lint run")
+	args := buildTestArgs(tools, "go test ./...", "golangci-lint run", "claude-haiku-4-5")
 
 	// Check required flags.
 	hasFlag := func(flag, value string) bool {
@@ -144,6 +146,9 @@ func TestBuildTestArgs(t *testing.T) {
 	}
 	if !hasFlag("--max-budget-usd", "0.25") {
 		t.Error("missing --max-budget-usd 0.25")
+	}
+	if !hasFlag("--model", "claude-haiku-4-5") {
+		t.Error("missing --model claude-haiku-4-5")
 	}
 
 	// Check that all allowed tools are present.
@@ -176,7 +181,16 @@ func TestBuildTestArgs(t *testing.T) {
 	}
 }
 
-// --- parseValidationLog tests ---
+func TestBuildTestArgs_NoModel(t *testing.T) {
+	args := buildTestArgs([]string{"Read"}, "go test ./...", "", "")
+	for _, a := range args {
+		if a == "--model" {
+			t.Error("should not include --model when empty")
+		}
+	}
+}
+
+// --- ParseAgentLog tests (via agentutil) ---
 
 func TestParseValidationLog_Success(t *testing.T) {
 	dir := t.TempDir()
@@ -185,7 +199,7 @@ func TestParseValidationLog_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := parseValidationLog(logPath)
+	result, err := agentutil.ParseAgentLog(logPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -214,7 +228,7 @@ func TestParseValidationLog_PermissionDenials(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := parseValidationLog(logPath)
+	result, err := agentutil.ParseAgentLog(logPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,7 +250,7 @@ func TestParseValidationLog_NoResultEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := parseValidationLog(logPath)
+	result, err := agentutil.ParseAgentLog(logPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -256,7 +270,7 @@ more garbage
 		t.Fatal(err)
 	}
 
-	result, err := parseValidationLog(logPath)
+	result, err := agentutil.ParseAgentLog(logPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -269,7 +283,7 @@ more garbage
 }
 
 func TestParseValidationLog_MissingFile(t *testing.T) {
-	_, err := parseValidationLog("/nonexistent/path/test.log")
+	_, err := agentutil.ParseAgentLog("/nonexistent/path/test.log")
 	if err == nil {
 		t.Error("expected error for missing file")
 	}
@@ -278,7 +292,7 @@ func TestParseValidationLog_MissingFile(t *testing.T) {
 // --- classifyValidation tests ---
 
 func TestClassifyValidation_Success(t *testing.T) {
-	result := &agentResult{NumTurns: 3, TotalCost: 0.05}
+	result := &agentutil.AgentResult{NumTurns: 3, TotalCost: 0.05}
 	reason := classifyValidation(result, 0)
 	if reason != "" {
 		t.Errorf("reason = %q, want empty", reason)
@@ -286,7 +300,7 @@ func TestClassifyValidation_Success(t *testing.T) {
 }
 
 func TestClassifyValidation_Permissions(t *testing.T) {
-	result := &agentResult{
+	result := &agentutil.AgentResult{
 		PermissionDenials: []json.RawMessage{json.RawMessage(`"Bash"`)},
 	}
 	reason := classifyValidation(result, 0)
@@ -296,7 +310,7 @@ func TestClassifyValidation_Permissions(t *testing.T) {
 }
 
 func TestClassifyValidation_Error(t *testing.T) {
-	result := &agentResult{IsError: true, Result: "something broke"}
+	result := &agentutil.AgentResult{IsError: true, Result: "something broke"}
 	reason := classifyValidation(result, 1)
 	if !strings.Contains(reason, "agent error") {
 		t.Errorf("reason = %q, should contain 'agent error'", reason)
@@ -304,7 +318,7 @@ func TestClassifyValidation_Error(t *testing.T) {
 }
 
 func TestClassifyValidation_LongErrorTruncated(t *testing.T) {
-	result := &agentResult{IsError: true, Result: strings.Repeat("x", 300)}
+	result := &agentutil.AgentResult{IsError: true, Result: strings.Repeat("x", 600)}
 	reason := classifyValidation(result, 1)
 	if !strings.HasSuffix(reason, "...") {
 		t.Error("long error should be truncated with ...")
@@ -327,7 +341,7 @@ func TestClassifyValidation_NilResultZeroExit(t *testing.T) {
 
 func TestClassifyValidation_PermissionsPriority(t *testing.T) {
 	// Permissions should take priority over error flag.
-	result := &agentResult{
+	result := &agentutil.AgentResult{
 		IsError:           true,
 		PermissionDenials: []json.RawMessage{json.RawMessage(`"Bash"`)},
 	}
@@ -398,7 +412,7 @@ func TestDenialToPattern_EmptyString(t *testing.T) {
 // --- extractDeniedToolPatterns tests ---
 
 func TestExtractDeniedToolPatterns_Mixed(t *testing.T) {
-	result := &agentResult{
+	result := &agentutil.AgentResult{
 		PermissionDenials: []json.RawMessage{
 			json.RawMessage(`{"tool_name":"Bash","command":"npm test"}`),
 			json.RawMessage(`"Write"`),
@@ -419,7 +433,7 @@ func TestExtractDeniedToolPatterns_Mixed(t *testing.T) {
 }
 
 func TestExtractDeniedToolPatterns_Dedup(t *testing.T) {
-	result := &agentResult{
+	result := &agentutil.AgentResult{
 		PermissionDenials: []json.RawMessage{
 			json.RawMessage(`"Bash"`),
 			json.RawMessage(`"Bash"`),
@@ -440,7 +454,7 @@ func TestExtractDeniedToolPatterns_Nil(t *testing.T) {
 }
 
 func TestExtractDeniedToolPatterns_Empty(t *testing.T) {
-	result := &agentResult{}
+	result := &agentutil.AgentResult{}
 	patterns := extractDeniedToolPatterns(result)
 	if patterns != nil {
 		t.Errorf("expected nil, got %v", patterns)
