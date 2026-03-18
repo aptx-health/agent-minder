@@ -1,4 +1,4 @@
-package enrollment
+package onboarding
 
 import (
 	"os"
@@ -128,7 +128,7 @@ func TestParseMissingVersion(t *testing.T) {
 
 func TestWriteAndParse(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".agent-minder", "enrollment.yaml")
+	path := filepath.Join(dir, ".agent-minder", "onboarding.yaml")
 
 	inv := Inventory{
 		Languages:       []string{"go"},
@@ -167,7 +167,7 @@ func TestWriteAndParse(t *testing.T) {
 func TestFilePathAndExists(t *testing.T) {
 	dir := t.TempDir()
 	path := FilePath(dir)
-	expected := filepath.Join(dir, ".agent-minder", "enrollment.yaml")
+	expected := filepath.Join(dir, ".agent-minder", "onboarding.yaml")
 	if path != expected {
 		t.Errorf("FilePath = %q, want %q", path, expected)
 	}
@@ -187,7 +187,7 @@ func TestFilePathAndExists(t *testing.T) {
 }
 
 func TestParseNonexistentFile(t *testing.T) {
-	_, err := Parse("/nonexistent/path/enrollment.yaml")
+	_, err := Parse("/nonexistent/path/onboarding.yaml")
 	if err == nil {
 		t.Fatal("expected error for nonexistent file")
 	}

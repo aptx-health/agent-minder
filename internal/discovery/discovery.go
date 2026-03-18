@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dustinlange/agent-minder/internal/enrollment"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
+	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
 // LegacyWorktree is kept for backward compat with v1 callers.
@@ -34,7 +34,7 @@ type RepoInfo struct {
 	Worktrees  []LegacyWorktree
 	RecentLogs []gitpkg.LogEntry
 	Branches   []gitpkg.BranchInfo
-	Inventory  enrollment.Inventory // Mechanical inventory of the repo
+	Inventory  onboarding.Inventory // Mechanical inventory of the repo
 }
 
 // ScanRepo gathers information about a single repository directory.

@@ -1690,11 +1690,11 @@ func TestParseDependencies(t *testing.T) {
 	}
 }
 
-func TestRepoEnrollmentCRUD(t *testing.T) {
+func TestRepoOnboardingCRUD(t *testing.T) {
 	store := openTestDB(t)
 
 	// Create project and repo.
-	p := &Project{Name: "enroll-test", MinderIdentity: "enroll-test/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	p := &Project{Name: "onboard-test", MinderIdentity: "onboard-test/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
 	if err := store.CreateProject(p); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -1703,39 +1703,39 @@ func TestRepoEnrollmentCRUD(t *testing.T) {
 		t.Fatalf("AddRepo: %v", err)
 	}
 
-	// Upsert enrollment.
-	e := &RepoEnrollment{
+	// Upsert onboarding.
+	e := &RepoOnboarding{
 		RepoID:           r.ID,
-		EnrollmentYAML:   "version: 1\ninventory:\n  languages: [go]\n",
+		OnboardingYAML:   "version: 1\ninventory:\n  languages: [go]\n",
 		ValidationStatus: "untested",
 	}
-	if err := store.UpsertRepoEnrollment(e); err != nil {
-		t.Fatalf("UpsertRepoEnrollment: %v", err)
+	if err := store.UpsertRepoOnboarding(e); err != nil {
+		t.Fatalf("UpsertRepoOnboarding: %v", err)
 	}
 	if e.ID == 0 {
 		t.Error("expected non-zero ID after upsert")
 	}
 
 	// Get by repo ID.
-	got, err := store.GetRepoEnrollment(r.ID)
+	got, err := store.GetRepoOnboarding(r.ID)
 	if err != nil {
-		t.Fatalf("GetRepoEnrollment: %v", err)
+		t.Fatalf("GetRepoOnboarding: %v", err)
 	}
 	if got.ValidationStatus != "untested" {
 		t.Errorf("ValidationStatus = %q, want %q", got.ValidationStatus, "untested")
 	}
-	if got.EnrollmentYAML == "" {
-		t.Error("EnrollmentYAML should not be empty")
+	if got.OnboardingYAML == "" {
+		t.Error("OnboardingYAML should not be empty")
 	}
-	if got.EnrolledAt == "" {
-		t.Error("EnrolledAt should be set")
+	if got.OnboardedAt == "" {
+		t.Error("OnboardedAt should be set")
 	}
 
 	// Update validation status.
-	if err := store.UpdateRepoEnrollmentValidation(r.ID, "pass"); err != nil {
-		t.Fatalf("UpdateRepoEnrollmentValidation: %v", err)
+	if err := store.UpdateRepoOnboardingValidation(r.ID, "pass"); err != nil {
+		t.Fatalf("UpdateRepoOnboardingValidation: %v", err)
 	}
-	got, _ = store.GetRepoEnrollment(r.ID)
+	got, _ = store.GetRepoOnboarding(r.ID)
 	if got.ValidationStatus != "pass" {
 		t.Errorf("ValidationStatus = %q, want %q", got.ValidationStatus, "pass")
 	}
@@ -1744,42 +1744,42 @@ func TestRepoEnrollmentCRUD(t *testing.T) {
 	}
 
 	// Upsert again (should update, not duplicate).
-	e2 := &RepoEnrollment{
+	e2 := &RepoOnboarding{
 		RepoID:           r.ID,
-		EnrollmentYAML:   "version: 1\ninventory:\n  languages: [go, python]\n",
+		OnboardingYAML:   "version: 1\ninventory:\n  languages: [go, python]\n",
 		ValidationStatus: "untested",
 	}
-	if err := store.UpsertRepoEnrollment(e2); err != nil {
-		t.Fatalf("UpsertRepoEnrollment second: %v", err)
+	if err := store.UpsertRepoOnboarding(e2); err != nil {
+		t.Fatalf("UpsertRepoOnboarding second: %v", err)
 	}
-	got, _ = store.GetRepoEnrollment(r.ID)
-	if got.EnrollmentYAML != e2.EnrollmentYAML {
-		t.Errorf("EnrollmentYAML not updated after second upsert")
+	got, _ = store.GetRepoOnboarding(r.ID)
+	if got.OnboardingYAML != e2.OnboardingYAML {
+		t.Errorf("OnboardingYAML not updated after second upsert")
 	}
 
 	// Get by project.
-	enrollments, err := store.GetRepoEnrollments(p.ID)
+	records, err := store.GetRepoOnboardings(p.ID)
 	if err != nil {
-		t.Fatalf("GetRepoEnrollments: %v", err)
+		t.Fatalf("GetRepoOnboardings: %v", err)
 	}
-	if len(enrollments) != 1 {
-		t.Errorf("got %d enrollments, want 1", len(enrollments))
+	if len(records) != 1 {
+		t.Errorf("got %d onboarding records, want 1", len(records))
 	}
 
 	// Delete.
-	if err := store.DeleteRepoEnrollment(r.ID); err != nil {
-		t.Fatalf("DeleteRepoEnrollment: %v", err)
+	if err := store.DeleteRepoOnboarding(r.ID); err != nil {
+		t.Fatalf("DeleteRepoOnboarding: %v", err)
 	}
-	enrollments, _ = store.GetRepoEnrollments(p.ID)
-	if len(enrollments) != 0 {
-		t.Errorf("got %d enrollments after delete, want 0", len(enrollments))
+	records, _ = store.GetRepoOnboardings(p.ID)
+	if len(records) != 0 {
+		t.Errorf("got %d onboarding records after delete, want 0", len(records))
 	}
 }
 
-func TestRepoEnrollmentCascadeDelete(t *testing.T) {
+func TestRepoOnboardingCascadeDelete(t *testing.T) {
 	store := openTestDB(t)
 
-	p := &Project{Name: "enroll-cascade", MinderIdentity: "enroll-cascade/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
+	p := &Project{Name: "onboard-cascade", MinderIdentity: "onboard-cascade/minder", LLMProvider: "anthropic", LLMModel: "claude-haiku-4-5", LLMSummarizerModel: "claude-haiku-4-5", LLMAnalyzerModel: "claude-sonnet-4-6"}
 	if err := store.CreateProject(p); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -1788,23 +1788,23 @@ func TestRepoEnrollmentCascadeDelete(t *testing.T) {
 		t.Fatalf("AddRepo: %v", err)
 	}
 
-	e := &RepoEnrollment{
+	e := &RepoOnboarding{
 		RepoID:           r.ID,
-		EnrollmentYAML:   "version: 1\n",
+		OnboardingYAML:   "version: 1\n",
 		ValidationStatus: "untested",
 	}
-	if err := store.UpsertRepoEnrollment(e); err != nil {
-		t.Fatalf("UpsertRepoEnrollment: %v", err)
+	if err := store.UpsertRepoOnboarding(e); err != nil {
+		t.Fatalf("UpsertRepoOnboarding: %v", err)
 	}
 
-	// Delete the repo — enrollment should cascade.
+	// Delete the repo — onboarding should cascade.
 	if err := store.DeleteRepo(r.ID); err != nil {
 		t.Fatalf("DeleteRepo: %v", err)
 	}
 
-	enrollments, _ := store.GetRepoEnrollments(p.ID)
-	if len(enrollments) != 0 {
-		t.Errorf("got %d enrollments after repo delete, want 0 (cascade)", len(enrollments))
+	records, _ := store.GetRepoOnboardings(p.ID)
+	if len(records) != 0 {
+		t.Errorf("got %d onboarding records after repo delete, want 0 (cascade)", len(records))
 	}
 }
 
