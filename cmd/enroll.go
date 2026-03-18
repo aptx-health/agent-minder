@@ -12,8 +12,17 @@ import (
 var enrollCmd = &cobra.Command{
 	Use:   "enroll <project> <repo-dir>",
 	Short: "Add a repo or worktree to an active project",
-	Args:  cobra.ExactArgs(2),
-	RunE:  runEnroll,
+	Long: `Add a new repository or worktree to an existing project. The directory
+is scanned for git metadata, a topic is created, and the repo is
+registered in the project database. A notification is published to
+the coordination topic if agent-pub is available.`,
+	Example: `  # Add a new repo to an existing project
+  agent-minder enroll my-project ~/repos/new-service
+
+  # Add a worktree directory
+  agent-minder enroll my-project ~/repos/my-app-feature-branch`,
+	Args: cobra.ExactArgs(2),
+	RunE: runEnroll,
 }
 
 func init() {
@@ -33,7 +42,7 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	// Scan the new directory.

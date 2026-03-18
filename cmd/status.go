@@ -14,8 +14,16 @@ import (
 var statusCmd = &cobra.Command{
 	Use:   "status <project>",
 	Short: "Show catch-up summary for the human (no AI call)",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runStatus,
+	Long: `Display a quick catch-up summary for a project without making any LLM
+calls. Shows the project goal, enrolled repos with recent commits,
+message bus traffic, tracked GitHub items, active concerns, and the
+last LLM analysis.
+
+Useful for checking project state before launching the full TUI.`,
+	Example: `  # Show status for a project
+  agent-minder status my-project`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStatus,
 }
 
 func init() {
@@ -34,7 +42,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found — run 'agent-minder init' first", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	repos, _ := store.GetRepos(project.ID)

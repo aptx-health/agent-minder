@@ -16,8 +16,19 @@ var deleteCmd = &cobra.Command{
 	Use:     "delete <project>",
 	Aliases: []string{"rm"},
 	Short:   "Delete a project and all its data",
-	Args:    cobra.ExactArgs(1),
-	RunE:    runDelete,
+	Long: `Delete a project and all associated data (repos, topics, polls, concerns,
+tracked items) from the database. Prompts for confirmation unless --force
+is specified.`,
+	Example: `  # Delete a project (with confirmation prompt)
+  agent-minder delete my-project
+
+  # Delete without confirmation
+  agent-minder delete my-project --force
+
+  # Same command using the alias
+  agent-minder rm my-project`,
+	Args: cobra.ExactArgs(1),
+	RunE: runDelete,
 }
 
 func init() {
@@ -37,7 +48,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	if !deleteForce {

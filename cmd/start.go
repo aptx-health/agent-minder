@@ -18,8 +18,23 @@ import (
 var startCmd = &cobra.Command{
 	Use:   "start <project>",
 	Short: "Launch the monitoring dashboard",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runStart,
+	Long: `Launch the TUI monitoring dashboard for a project. The dashboard shows
+real-time git activity, message bus traffic, LLM analysis, and active
+concerns. It runs a two-tier LLM pipeline (Haiku summarizer → Sonnet
+analyzer) on each poll cycle.
+
+Key bindings: p=pause, r=poll now, e=expand, u=user msg, m=broadcast,
+o=onboard, a=autopilot, A=stop autopilot, t=theme, q=quit.`,
+	Example: `  # Start monitoring a project
+  agent-minder start my-project
+
+  # Start with a custom database (useful for testing)
+  MINDER_DB=~/test.db agent-minder start my-project
+
+  # Start with debug logging enabled
+  MINDER_DEBUG=1 agent-minder start my-project`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStart,
 }
 
 func init() {
@@ -41,7 +56,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Load project.
 	project, err := store.GetProject(projectName)
 	if err != nil {
-		return fmt.Errorf("project %q not found — run 'agent-minder init' first", projectName)
+		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
 	// Resolve effective provider names for each tier.

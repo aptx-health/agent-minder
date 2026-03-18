@@ -17,8 +17,18 @@ var showProviders bool
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Configure providers and integrations",
-	Long:  "Interactive wizard to set up LLM providers (API keys) and integrations (GitHub, etc.).",
-	RunE:  runSetup,
+	Long: `Interactive wizard to set up LLM providers (API keys) and integrations
+(GitHub tokens). Supports Anthropic and OpenAI providers. Credentials
+are stored securely in the system keychain when available, with a
+config file fallback.
+
+Run this before 'agent-minder init' to configure your API keys.`,
+	Example: `  # Run the setup wizard
+  agent-minder setup
+
+  # Show which providers are configured and their credential sources
+  agent-minder setup --show-providers`,
+	RunE: runSetup,
 }
 
 func init() {

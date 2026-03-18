@@ -19,8 +19,18 @@ import (
 var initCmd = &cobra.Command{
 	Use:   "init [repo-dir ...]",
 	Short: "Bootstrap a new project from one or more repo directories",
-	Args:  cobra.MinimumNArgs(1),
-	RunE:  runInit,
+	Long: `Interactive wizard that scans one or more repository directories, derives a
+project name, and walks you through goal selection, poll interval, topic
+configuration, LLM provider selection, and optional autopilot onboarding.
+
+All state is stored in SQLite at ~/.agent-minder/minder.db.`,
+	Example: `  # Initialize a project from a single repo
+  agent-minder init ~/repos/my-app
+
+  # Initialize from multiple repos (creates a multi-repo project)
+  agent-minder init ~/repos/frontend ~/repos/backend ~/repos/shared-lib`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runInit,
 }
 
 func init() {

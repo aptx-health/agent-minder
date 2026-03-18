@@ -11,8 +11,16 @@ var listCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
 	Short:   "List all projects",
-	Args:    cobra.NoArgs,
-	RunE:    runList,
+	Long: `List all configured projects with their goal type, number of enrolled
+repos, and poll interval. Use this to find the project name to pass
+to other commands like 'start' or 'status'.`,
+	Example: `  # List all projects
+  agent-minder list
+
+  # Same command using the alias
+  agent-minder ls`,
+	Args: cobra.NoArgs,
+	RunE: runList,
 }
 
 func init() {
