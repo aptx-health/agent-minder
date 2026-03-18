@@ -481,6 +481,7 @@ func (s *Supervisor) ApplyDepOption(ctx context.Context, opt DepOption) error {
 		// Parse deps array.
 		var deps []int
 		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			deps = nil // reset: failed unmarshal may have partially initialized the slice
 			var strDeps []string
 			if err2 := json.Unmarshal(rawDeps, &strDeps); err2 != nil {
 				continue
@@ -2028,6 +2029,7 @@ func (s *Supervisor) ApplyRebuildDepOption(ctx context.Context, opt DepOption) (
 
 		var deps []int
 		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			deps = nil // reset: failed unmarshal may have partially initialized the slice
 			var strDeps []string
 			if err2 := json.Unmarshal(rawDeps, &strDeps); err2 != nil {
 				_ = s.store.UpdateAutopilotTaskDeps(t.ID, "[]")
