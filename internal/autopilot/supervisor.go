@@ -306,8 +306,8 @@ func (s *Supervisor) RestartTask(ctx context.Context, taskID int64) error {
 	if task == nil {
 		return fmt.Errorf("task %d not found", taskID)
 	}
-	if task.Status != "bailed" && task.Status != "stopped" {
-		return fmt.Errorf("task #%d has status %q — only bailed or stopped tasks can be restarted", task.IssueNumber, task.Status)
+	if task.Status != "bailed" && task.Status != "stopped" && task.Status != "failed" {
+		return fmt.Errorf("task #%d has status %q — only bailed, stopped, or failed tasks can be restarted", task.IssueNumber, task.Status)
 	}
 
 	// Clean up worktree and branch from the previous attempt.
