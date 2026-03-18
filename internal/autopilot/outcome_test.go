@@ -114,8 +114,8 @@ func TestClassifyOutcome_PermissionDenials(t *testing.T) {
 		PermissionDenials: []json.RawMessage{json.RawMessage(`"Bash"`), json.RawMessage(`"Edit"`)},
 	}
 	status, reason, detail := classifyOutcome(result, 50, 3.0)
-	if status != "failed" {
-		t.Errorf("status = %q, want %q", status, "failed")
+	if status != "warning" {
+		t.Errorf("status = %q, want %q", status, "warning")
 	}
 	if reason != "permissions" {
 		t.Errorf("reason = %q, want %q", reason, "permissions")
@@ -201,16 +201,19 @@ func TestClassifyOutcome_Nil(t *testing.T) {
 }
 
 func TestClassifyOutcome_PriorityOrder(t *testing.T) {
-	// Permission denials should take priority over max_turns.
+	// Hard failures (max_turns, budget, error) take priority over permission warnings.
 	result := &AgentResult{
 		NumTurns:          50,
 		TotalCost:         2.90,
 		IsError:           true,
 		PermissionDenials: []json.RawMessage{json.RawMessage(`"Bash"`)},
 	}
-	_, reason, _ := classifyOutcome(result, 50, 3.0)
-	if reason != "permissions" {
-		t.Errorf("reason = %q, want %q (permissions should take priority)", reason, "permissions")
+	status, reason, _ := classifyOutcome(result, 50, 3.0)
+	if status != "failed" {
+		t.Errorf("status = %q, want %q", status, "failed")
+	}
+	if reason != "max_turns" {
+		t.Errorf("reason = %q, want %q (hard failures should take priority over permission warnings)", reason, "max_turns")
 	}
 }
 

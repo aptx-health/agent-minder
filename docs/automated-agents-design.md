@@ -138,14 +138,16 @@ The graph is computed once at `Prepare()` time. Fallback if LLM fails: sequentia
 ## Agent Invocation
 
 ```bash
-claude -p \
+claude --agent autopilot -p \
   --max-turns 50 \
   --max-budget-usd 3.00 \
-  --dangerously-skip-permissions \
-  "<templated prompt>"
+  --allowedTools Read --allowedTools Edit --allowedTools Write \
+  --allowedTools Glob --allowedTools Grep \
+  --allowedTools "Bash(git *)" --allowedTools "Bash(gh *)" \
+  "<task context prompt>"
 ```
 
-Environment: `GITHUB_TOKEN` is set for `gh` CLI access.
+Allowed tools are loaded from `.agent-minder/onboarding.yaml` if available, otherwise the default set shown above is used. Environment: `GITHUB_TOKEN` is set for `gh` CLI access.
 
 ### Prompt Template
 
