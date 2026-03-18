@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/discovery"
+	"github.com/dustinlange/agent-minder/internal/onboarding"
 	"github.com/spf13/cobra"
 )
 
@@ -260,6 +262,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Repos: %d\n", len(repos))
 	fmt.Printf("  Topics: %s\n", strings.Join(topics, ", "))
 	fmt.Printf("  DB: %s\n", dbPath)
+
+	// 10. Offer autopilot enrollment for repos that lack onboarding.
+	promptOnboarding(reader, repos)
+
 	fmt.Printf("\nNext: run 'agent-minder start %s' to begin monitoring.\n", projectName)
 
 	return nil
@@ -286,6 +292,228 @@ func parseChoice(s string, max int) int {
 		return 0
 	}
 	return n - 1
+}
+
+// promptOnboarding checks which repos lack onboarding and offers to run the
+// onboarding agent interactively for each one.
+func promptOnboarding(reader *bufio.Reader, repos []*discovery.RepoInfo) {
+	var unenrolled []*discovery.RepoInfo
+	for _, ri := range repos {
+		if !onboarding.Exists(ri.Path) {
+			unenrolled = append(unenrolled, ri)
+		}
+	}
+	if len(unenrolled) == 0 {
+		return
+	}
+
+	fmt.Printf("\n%d of %d repo(s) in the project do not have autopilot onboarding.\n", len(unenrolled), len(repos))
+	fmt.Println("Onboarding improves agent performance and reliability.")
+	fmt.Printf("Would you like to onboard %s now?\n", pluralRepos(len(unenrolled)))
+	fmt.Print("Onboarding is optional. It takes roughly 1 minute per repo and requires some manual input. (y/N) ")
+	answer := readLine(reader)
+	if !strings.HasPrefix(strings.ToLower(answer), "y") {
+		return
+	}
+
+	for i, ri := range unenrolled {
+		fmt.Printf("\nOnboarding repo %d of %d: %s...\n", i+1, len(unenrolled), ri.ShortName)
+
+		if err := runRepoOnboarding(ri); err != nil {
+			fmt.Printf("  ✗ Onboarding failed for %s: %v\n", ri.ShortName, err)
+			if i < len(unenrolled)-1 {
+				fmt.Print("  Continue with remaining repos? (Y/n) ")
+				cont := readLine(reader)
+				if strings.HasPrefix(strings.ToLower(cont), "n") {
+					fmt.Println("  Skipping remaining repos.")
+					return
+				}
+			}
+			continue
+		}
+		fmt.Printf("  ✓ Onboarded %s\n", ri.ShortName)
+	}
+}
+
+// runRepoOnboarding writes the initial onboarding file with inventory and
+// launches an interactive Claude session with onboarding instructions injected
+// via --append-system-prompt. On failure, the partially-written onboarding
+// file is removed so the repo can be retried on the next init.
+func runRepoOnboarding(ri *discovery.RepoInfo) error {
+	// Write initial onboarding YAML with mechanical inventory.
+	obFile := onboarding.New(ri.Inventory)
+	obPath := onboarding.FilePath(ri.Path)
+	if err := onboarding.Write(obPath, obFile); err != nil {
+		return fmt.Errorf("writing initial onboarding file: %w", err)
+	}
+
+	// Build the system prompt: onboarding instructions + inventory context.
+	systemPrompt := onboardingSystemPrompt + "\n\n" + buildInventoryContext(ri, obPath)
+
+	// Launch interactive Claude session with onboarding instructions injected.
+	// The positional prompt sends the first message so the agent starts
+	// immediately with its interview questions.
+	cmd := exec.Command("claude", "--append-system-prompt", systemPrompt,
+		"Begin the onboarding interview for this repository.")
+	cmd.Dir = ri.Path
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		// Clean up the partial onboarding file so the repo isn't
+		// incorrectly skipped on the next init run.
+		_ = os.Remove(obPath)
+		return fmt.Errorf("onboarding agent: %w", err)
+	}
+	return nil
+}
+
+// buildInventoryContext formats the mechanical inventory into a context block
+// that is appended to the onboarding system prompt.
+func buildInventoryContext(ri *discovery.RepoInfo, obPath string) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "## Repo Context")
+	fmt.Fprintf(&b, "Repo directory: %s\n", ri.Path)
+	fmt.Fprintf(&b, "Onboarding file path: %s\n\n", obPath)
+
+	fmt.Fprintln(&b, "## Mechanical Inventory")
+	if len(ri.Inventory.Languages) > 0 {
+		fmt.Fprintf(&b, "Languages: %s\n", strings.Join(ri.Inventory.Languages, ", "))
+	}
+	if len(ri.Inventory.PackageManagers) > 0 {
+		fmt.Fprintf(&b, "Package managers: %s\n", strings.Join(ri.Inventory.PackageManagers, ", "))
+	}
+	if len(ri.Inventory.BuildFiles) > 0 {
+		fmt.Fprintf(&b, "Build files: %s\n", strings.Join(ri.Inventory.BuildFiles, ", "))
+	}
+	if len(ri.Inventory.CI) > 0 {
+		fmt.Fprintf(&b, "CI: %s\n", strings.Join(ri.Inventory.CI, ", "))
+	}
+	if ri.Inventory.Tooling.Secrets != "" {
+		fmt.Fprintf(&b, "Secrets: %s\n", ri.Inventory.Tooling.Secrets)
+	}
+	if ri.Inventory.Tooling.Process != "" {
+		fmt.Fprintf(&b, "Process manager: %s\n", ri.Inventory.Tooling.Process)
+	}
+	if ri.Inventory.Tooling.Containers != "" {
+		fmt.Fprintf(&b, "Containers: %s\n", ri.Inventory.Tooling.Containers)
+	}
+	if len(ri.Inventory.Tooling.Env) > 0 {
+		fmt.Fprintf(&b, "Env tools: %s\n", strings.Join(ri.Inventory.Tooling.Env, ", "))
+	}
+
+	fmt.Fprintln(&b, "\n## Existing Claude Config")
+	fmt.Fprintf(&b, "settings.json: %v\n", ri.Inventory.ExistingClaude.SettingsJSON)
+	fmt.Fprintf(&b, "CLAUDE.md: %v\n", ri.Inventory.ExistingClaude.ClaudeMD)
+	fmt.Fprintf(&b, "Agent definitions: %v\n", ri.Inventory.ExistingClaude.AgentDef)
+
+	return b.String()
+}
+
+// onboardingSystemPrompt contains the behavioral instructions for the
+// onboarding session. This is injected via --append-system-prompt so there
+// is no dependency on an external agent definition file.
+const onboardingSystemPrompt = `You are an onboarding agent for agent-minder. Your job is to interview the user about their repository, then generate configuration files that enable autonomous agents to work in this repo safely and effectively.
+
+The mechanical inventory and repo context are provided below. Use them as your starting point.
+
+## Step 1: Ask targeted questions
+
+Based on the inventory, ask the user **at most 5 targeted questions** about things that cannot be mechanically detected. Tailor your questions to what the inventory actually found — skip questions that don't apply.
+
+Choose from questions like these (adapt wording to match what was detected):
+
+- **Secrets management**: "I see doppler.yaml — do agents need doppler run -- to access env vars, or are secrets available through other means?"
+- **Process management**: "I see Procfile.dev — do you use Overmind or Foreman? Do agents need to start services before running tests?"
+- **Build commands**: "What's the canonical command to build the project? I see a Makefile — is make build the right command, or something else?"
+- **Test commands**: "What's the canonical command to run tests? Are there integration tests that need external services (databases, APIs, etc.)?"
+- **Lint commands**: "I see golangci-lint in your tooling — is golangci-lint run the standard lint command?"
+- **Custom tooling**: "Is there anything unusual about your build, test, or deploy workflow that an autonomous agent should know about?"
+- **Special constraints**: "Are there files or directories that agents should never modify? Any commands that are dangerous to run?"
+
+Guidelines:
+- Do NOT ask about things the inventory already answers definitively
+- Do NOT do a full interview — keep it focused and efficient
+- If the inventory is comprehensive and the repo is straightforward, you may ask fewer than 5 questions
+- Wait for the user's answers before proceeding to artifact generation
+
+## Step 2: Generate artifacts
+
+Based on the inventory and the user's answers, generate three artifacts. Present each to the user for review before writing to disk.
+
+### Artifact 1: Onboarding file
+
+Update the existing onboarding file's context and permissions sections with the user-provided information. The onboarding file was already created by the mechanical scan with the inventory section populated — you are filling in the remaining sections.
+
+The context fields to populate:
+- build_command: e.g., "go build ./...", "make build", "npm run build"
+- test_command: e.g., "go test ./...", "make test", "npm test"
+- lint_command: e.g., "golangci-lint run", "npm run lint"
+- special_instructions: Free-text notes for agents (secrets prefixes, service startup, etc.)
+- tools_needed: CLI tools agents need: [go, git, gh, make, golangci-lint, etc.]
+
+The permissions.allowed_tools list rules:
+- Each entry is "Bash(<command> *)" where <command> comes from tools_needed and the build/test/lint commands
+- Always include "Bash(git *)" and "Bash(gh *)" — agents always need version control
+- Always include "Read", "Edit", "Write", "Glob", "Grep" — agents need file access
+- If a secrets manager is detected (e.g., doppler), include "Bash(doppler run -- *)" or the equivalent prefix
+- If a process manager is detected, include its command pattern
+- Do NOT include overly broad patterns like "Bash(*)" — be specific
+- Keep the list minimal but sufficient for the build/test/lint commands
+
+Rules for updating the onboarding file:
+- Use the existing onboarding file structure — do NOT rewrite the inventory section
+- Read the current onboarding file, update the context and permissions sections, and write back
+- Do NOT modify the validation section — it is managed by a separate process
+- Keep tools_needed to tools that agents will actually invoke (not libraries or runtimes they won't call directly)
+- special_instructions should be concise, actionable text that an agent can follow
+
+### Artifact 2: .claude/settings.json
+
+Generate a Claude Code settings file with permissions derived from the onboarding file's permissions.allowed_tools list. The onboarding file is the source of truth; settings.json is the runtime artifact that Claude Code reads.
+
+If .claude/settings.json already exists, read it first and merge your permissions with the existing configuration — do NOT overwrite other settings.
+
+The permissions.allow array should contain exactly the same entries as the onboarding file's permissions.allowed_tools list.
+
+### Artifact 3: .claude/agents/autopilot.md
+
+Generate a project-specific autopilot agent definition only if .claude/agents/autopilot.md does not already exist in the target repo. If one already exists, skip this artifact and tell the user.
+
+If a global autopilot template exists at ~/.claude/agents/autopilot.md, use it as the base and customize it. Otherwise, generate a fresh definition.
+
+Customize with:
+- A "Project-specific guidance" section listing build, test, lint commands and special instructions
+- The standard autopilot workflow sections (first steps, pre-check, decision, constraints)
+
+## Step 3: Review with user
+
+Before writing any files, present all artifacts to the user in a clear format. Ask: "Does this look correct? I'll write these files when you confirm. Let me know if you'd like to change anything."
+
+## Step 4: Write files
+
+After the user confirms:
+1. Write the updated onboarding file to the onboarding file path
+2. Write .claude/settings.json to the repo directory (creating .claude/ if needed)
+3. Write .claude/agents/autopilot.md to the repo directory (if generating one)
+
+Report what was written and their paths.
+
+## Important constraints
+
+- Only write files within the target repository directory
+- Never overwrite existing files without reading them first and merging appropriately
+- Keep all generated content minimal and actionable
+- The onboarding file schema is fixed — do not add fields or change the YAML structure
+- If you're unsure about a tool or command, ask the user rather than guessing`
+
+// pluralRepos returns "these N repos" or "this repo" depending on count.
+func pluralRepos(n int) string {
+	if n == 1 {
+		return "this repo"
+	}
+	return fmt.Sprintf("these %d repos", n)
 }
 
 // promptMinutes asks the user for a duration in minutes, reprompting on invalid input.
