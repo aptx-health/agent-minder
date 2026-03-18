@@ -55,19 +55,90 @@ Launches a TUI dashboard that:
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Supported platforms
+
+| OS | Architecture | Status | Notes |
+|----|-------------|--------|-------|
+| macOS | amd64 (Intel) | Supported | Primary development platform |
+| macOS | arm64 (Apple Silicon) | Supported | Primary development platform |
+| Linux | amd64 | Supported | Tested on Ubuntu, Fedora |
+| Linux | arm64 | Supported | |
+| Windows | amd64 | Supported | Native or WSL2 |
+
+## Prerequisites
+
+### Required
+
+| Dependency | Min version | Purpose | Install |
+|-----------|-------------|---------|---------|
+| **Go** | 1.25+ | Build from source (bubbletea v2 requires 1.25+) | [go.dev/dl](https://go.dev/dl/) |
+| **git** | 2.x | Repository monitoring, worktree management | Package manager or [git-scm.com](https://git-scm.com/) |
+| **`ANTHROPIC_API_KEY`** | — | LLM pipeline (tier 1 + tier 2 analysis) | [console.anthropic.com](https://console.anthropic.com/) |
+
+### Required for specific features
+
+| Dependency | Feature | What happens if missing |
+|-----------|---------|------------------------|
+| **`GITHUB_TOKEN`** or **`GH_TOKEN`** | Tracked items (issue/PR sweep), autopilot | `track`/`untrack` commands and the sweep pipeline are unavailable. Autopilot refuses to start with an error message. Token can also be stored in the OS keychain via `agent-minder setup`. |
+| **[gh](https://cli.github.com/)** (GitHub CLI) | Autopilot agent operations | Autopilot agents use `gh` to interact with GitHub (create PRs, post comments, manage labels). Without it, agents will fail. Not needed for non-autopilot usage. |
+| **[claude](https://docs.anthropic.com/en/docs/claude-code)** (Claude Code CLI) | Autopilot, LLM-assisted init | Autopilot dispatches work via `claude -p`. The `init` command can optionally use Claude Code for repo onboarding. Without it, autopilot cannot run and init skips the onboarding step. |
+
+### Optional
+
+| Dependency | Feature | What happens if missing |
+|-----------|---------|------------------------|
+| **[agent-msg](https://github.com/dustinlange/agent-msg)** | Inter-agent message bus | Bus features (broadcast, onboard, user messages) are unavailable. A warning is logged at startup. Polling, git monitoring, and GitHub sweeps continue normally. |
+| **jq** | Debug log viewing | `tail -f` log viewing works without it, but structured output (`jq` piping) is unavailable. |
+| **lnav** | Color-coded debug log viewer | Optional — `tail -f` works as a simpler alternative. |
+
+### OS keychain (go-keyring)
+
+agent-minder uses [go-keyring](https://github.com/zalando/go-keyring) to store API keys and tokens securely in the OS-native keychain. The keychain is **optional** — if unavailable, credentials fall back to the config file or environment variables.
+
+| Platform | Backend | System requirement |
+|----------|---------|-------------------|
+| **macOS** | Keychain (Security framework) | None — built-in |
+| **Linux** | Secret Service API (via D-Bus) | Requires a running D-Bus session and a secret service provider (e.g., `gnome-keyring`, `kwallet`). Install: `sudo apt install gnome-keyring dbus-x11` (Ubuntu/Debian) or `sudo dnf install gnome-keyring` (Fedora). Headless servers and minimal containers typically lack these — the keychain will be unavailable but agent-minder works fine without it. |
+| **Windows** | Windows Credential Manager (WinCred) | None — built-in |
+| **WSL2** | Secret Service API (via D-Bus) | Same as Linux. Some WSL2 distros ship without D-Bus — install as above. |
+
+**Graceful degradation:** On startup, `agent-minder setup` probes the keychain with a test write/delete. If the probe fails, credentials are stored in the config file (`~/.agent-minder/config.yaml`) instead. A warning is printed when a keychain write fails:
+
+```
+Warning: keychain write failed: <error> — falling back to config file
+```
+
+### Platform-specific notes
+
+**Ubuntu / Debian:**
+```bash
+# Keychain support (optional)
+sudo apt install gnome-keyring dbus-x11
+
+# If running headless (SSH, containers), start a D-Bus session:
+eval $(dbus-launch --sh-syntax)
+```
+
+**Fedora:**
+```bash
+# Keychain support (optional)
+sudo dnf install gnome-keyring
+```
+
+**macOS:**
+No additional system dependencies. Keychain, git, and all required frameworks are built-in.
+
+**Windows (native):**
+Windows Credential Manager is built-in. Install git from [git-scm.com](https://git-scm.com/). The TUI requires a terminal emulator with ANSI support (Windows Terminal, ConEmu, or similar).
+
+**WSL2:**
+Behaves like Linux. Install dependencies via your distro's package manager. Note that `pbcopy` (used for clipboard operations in the TUI) is macOS-only — clipboard features are unavailable on Linux/WSL2.
+
 ## Installation
 
 ```bash
 go install github.com/dustinlange/agent-minder@latest
 ```
-
-Requires:
-- Go 1.25+
-- `ANTHROPIC_API_KEY` environment variable set
-
-Optional:
-- [agent-msg](https://github.com/dustinlange/agent-msg) — enables the shared message bus for inter-agent coordination. Without it, agent-minder runs normally but bus features (broadcast, onboard, user messages) are unavailable.
-- `GITHUB_TOKEN` — enables tracked items (issue/PR status fetching via GitHub API). Without it, the `track`/`untrack` commands and sweep pipeline are unavailable.
 
 ## Commands
 
