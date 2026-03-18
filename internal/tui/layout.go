@@ -341,6 +341,8 @@ func (m Model) renderAutopilotRunningContent() string {
 			slotHeader = "Slots  " + warningStyle().Render("PAUSED")
 		}
 		b.WriteString(headerStyle().Render(slotHeader))
+		b.WriteString("  ")
+		b.WriteString(mutedStyle().Render("[+: add slot]"))
 		b.WriteString("\n")
 		for _, slot := range slots {
 			if slot.Status == "idle" {
@@ -1950,6 +1952,17 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpKeyStyle().Render("n"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "add-slot-confirm" {
+			currentSlots := 0
+			if m.autopilotSupervisor != nil {
+				currentSlots = len(m.autopilotSupervisor.SlotStatus())
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Add slot? Currently %d. ", currentSlots)))
+			b.WriteString(helpKeyStyle().Render("y"))
+			b.WriteString(helpStyle().Render(": add • "))
+			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "review-confirm" {
 			task := m.selectedAutopilotTask()
 			issueNum := 0
@@ -2165,6 +2178,7 @@ var (
 		{"s", "stop selected"},
 		{"r", "restart/review selected"},
 		{"c", "copy worktree path"},
+		{"+", "add slot"},
 		{"P", "pause/resume slots"},
 		{"D", "show dependencies"},
 		{"G", "rebuild dep graph"},

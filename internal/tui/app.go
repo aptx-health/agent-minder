@@ -226,7 +226,7 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor       *autopilot.Supervisor
-	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "review-confirm", "completed"
+	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "review-confirm", "add-slot-confirm", "completed"
 	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
 	autopilotStatus           string
 	autopilotTotal            int
@@ -1018,6 +1018,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.autopilotMode == "add-slot-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "y", "enter":
+			return m.confirmAddSlot()
+		case "n", "esc":
+			m.autopilotMode = "running"
+			return m, nil
+		}
+	}
 
 	switch msg.String() {
 	case "1":
@@ -1317,6 +1326,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 			return clearAutopilotStatusMsg{}
 		})
+
+	case "+":
+		if m.activeTab != tabAutopilot || m.autopilotSupervisor == nil || m.autopilotMode != "running" {
+			return m, nil
+		}
+		currentSlots := len(m.autopilotSupervisor.SlotStatus())
+		m.autopilotMode = "add-slot-confirm"
+		m.autopilotStatus = fmt.Sprintf("Add slot? Currently %d slots.", currentSlots)
+		return m, nil
 
 	case "c":
 		if m.activeTab == tabAnalysis {
@@ -2199,6 +2217,27 @@ func (m Model) confirmRestartTask() (tea.Model, tea.Cmd) {
 			Summary: fmt.Sprintf("Restarted #%d — re-queued", issueNum),
 		})
 	}
+}
+
+// confirmAddSlot adds a new slot to the supervisor and persists the setting.
+func (m Model) confirmAddSlot() (tea.Model, tea.Cmd) {
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	newCount := sup.AddSlot(context.Background())
+
+	// Persist to project settings.
+	m.project.AutopilotMaxAgents = newCount
+	_ = m.store.UpdateProject(m.project)
+
+	m.autopilotMode = "running"
+	m.autopilotStatus = fmt.Sprintf("Now %d slots — filling if tasks available", newCount)
+	return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		return clearAutopilotStatusMsg{}
+	})
 }
 
 // launchReviewSession restores the worktree and launches a pre-warmed Claude session for review.

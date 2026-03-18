@@ -353,6 +353,19 @@ func (s *Supervisor) Resume(ctx context.Context) {
 	s.fillSlots(ctx)
 }
 
+// AddSlot appends one idle slot to the supervisor and immediately tries to fill it.
+// Returns the new total slot count.
+func (s *Supervisor) AddSlot(ctx context.Context) int {
+	s.mu.Lock()
+	s.slots = append(s.slots, nil)
+	n := len(s.slots)
+	s.emitEventLocked("info", fmt.Sprintf("Added slot — now %d total", n), nil)
+	s.mu.Unlock()
+
+	s.fillSlots(ctx)
+	return n
+}
+
 // IsPaused returns whether slot filling is currently paused.
 func (s *Supervisor) IsPaused() bool {
 	s.mu.Lock()
