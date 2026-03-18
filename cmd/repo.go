@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dustinlange/agent-minder/internal/discovery"
 	"github.com/dustinlange/agent-minder/internal/onboarding"
@@ -58,6 +59,11 @@ func init() {
 	repoCmd.AddCommand(repoEnrollCmd)
 	repoCmd.AddCommand(repoStatusCmd)
 	repoCmd.AddCommand(repoRefreshCmd)
+
+	// --project flag scopes agent log scanning to a specific project.
+	for _, cmd := range []*cobra.Command{repoEnrollCmd, repoStatusCmd} {
+		cmd.Flags().String("project", "", "project name to scope agent log scanning (e.g., minder-improvement)")
+	}
 }
 
 func runRepoEnroll(cmd *cobra.Command, args []string) error {
@@ -73,16 +79,17 @@ func runRepoEnroll(cmd *cobra.Command, args []string) error {
 	// Check for existing enrollment file.
 	hasEnrollment := onboarding.Exists(info.Path)
 
-	// Scan agent logs for prior permission failures.
+	// Scan agent logs for prior permission failures (scoped to project).
+	projectName, _ := cmd.Flags().GetString("project")
 	logDir := defaultAgentLogDir()
-	permFailures := discovery.ScanAgentLogs(logDir)
+	permFailures := discovery.ScanAgentLogs(logDir, projectName)
 
 	// Step 2: Present overview.
 	fmt.Println()
 	printRepoHeader(info)
 	printInventory(info.Inventory)
 	printEnrollmentStatus(hasEnrollment, info.Path)
-	printPermissionFailures(permFailures)
+	printPermissionFailures(permFailures, projectName)
 
 	if hasEnrollment {
 		fmt.Println("\nEnrollment file already exists.")
@@ -122,10 +129,11 @@ func runRepoStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	printInventory(info.Inventory)
 
-	// Show permission failures if any.
+	// Show permission failures if any (scoped to project).
+	projectName, _ := cmd.Flags().GetString("project")
 	logDir := defaultAgentLogDir()
-	permFailures := discovery.ScanAgentLogs(logDir)
-	printPermissionFailures(permFailures)
+	permFailures := discovery.ScanAgentLogs(logDir, projectName)
+	printPermissionFailures(permFailures, projectName)
 
 	return nil
 }
@@ -155,6 +163,7 @@ func runRepoRefresh(cmd *cobra.Command, args []string) error {
 	}
 
 	f.Inventory = info.Inventory
+	f.ScannedAt = time.Now().UTC()
 	if err := onboarding.Write(filePath, f); err != nil {
 		return fmt.Errorf("writing enrollment file: %w", err)
 	}
@@ -258,12 +267,19 @@ func printEnrollmentFile(f *onboarding.File) {
 	}
 }
 
-func printPermissionFailures(failures []string) {
+func printPermissionFailures(failures []string, projectName string) {
+	scope := "all projects"
+	if projectName != "" {
+		scope = fmt.Sprintf("project %q", projectName)
+	}
 	if len(failures) == 0 {
-		fmt.Println("\nPrior agent runs: no permission failures detected")
+		fmt.Printf("\nPrior agent runs (%s): no permission failures detected\n", scope)
+		if projectName == "" {
+			fmt.Println("  Hint: use --project to scope to a specific project's logs")
+		}
 		return
 	}
-	fmt.Printf("\nPrior agent runs: %d permission failure(s) detected\n", len(failures))
+	fmt.Printf("\nPrior agent runs (%s): %d permission failure(s) detected\n", scope, len(failures))
 	for _, f := range failures {
 		fmt.Printf("  - %s\n", f)
 	}
