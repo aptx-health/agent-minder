@@ -1,6 +1,6 @@
 # agent-minder
 
-A Go CLI tool that coordinates AI agents working across multiple repositories. It monitors git activity, watches the [agent-msg](https://github.com/dustinlange/agent-msg) message bus, tracks GitHub issues/PRs, and uses a two-tier LLM pipeline to analyze changes and keep agents informed.
+A Go CLI tool that coordinates AI agents working across multiple repositories. It monitors git activity, watches the [agent-msg](https://github.com/aptx-health/agent-msg) message bus, tracks GitHub issues/PRs, and uses a two-tier LLM pipeline to analyze changes and keep agents informed.
 
 Built as a coordination layer on top of agent-msg's simple bash scripts + SQLite foundation.
 
@@ -87,7 +87,7 @@ Launches a TUI dashboard that:
 
 | Dependency | Feature | What happens if missing |
 |-----------|---------|------------------------|
-| **[agent-msg](https://github.com/dustinlange/agent-msg)** | Inter-agent message bus | Bus features (broadcast, onboard, user messages) are unavailable. A warning is logged at startup. Polling, git monitoring, and GitHub sweeps continue normally. |
+| **[agent-msg](https://github.com/aptx-health/agent-msg)** | Inter-agent message bus | Bus features (broadcast, onboard, user messages) are unavailable. A warning is logged at startup. Polling, git monitoring, and GitHub sweeps continue normally. |
 | **jq** | Debug log viewing | `tail -f` log viewing works without it, but structured output (`jq` piping) is unavailable. |
 | **lnav** | Color-coded debug log viewer | Optional — `tail -f` works as a simpler alternative. |
 
@@ -98,7 +98,7 @@ agent-minder uses [go-keyring](https://github.com/zalando/go-keyring) to store A
 | Platform | Backend | System requirement |
 |----------|---------|-------------------|
 | **macOS** | Keychain (Security framework) | None — built-in |
-| **Linux** | Secret Service API (via D-Bus) | Requires a running D-Bus session and a secret service provider (e.g., `gnome-keyring`, `kwallet`). Install: `sudo apt install gnome-keyring dbus-x11` (Ubuntu/Debian) or `sudo dnf install gnome-keyring` (Fedora). Headless servers and minimal containers typically lack these — the keychain will be unavailable but agent-minder works fine without it. |
+| **Linux** | Secret Service API (via D-Bus) | Requires a running D-Bus session and a secret service provider (e.g., `gnome-keyring`, `kwallet`). The daemon must be running, not just installed — start it with `gnome-keyring-daemon --start --components=secrets` or ensure your desktop session launches it automatically. Install: `sudo apt install gnome-keyring dbus-x11` (Ubuntu/Debian) or `sudo dnf install gnome-keyring` (Fedora). Headless servers and minimal containers typically lack these — the keychain will be unavailable but agent-minder works fine without it. |
 | **Windows** | Windows Credential Manager (WinCred) | None — built-in |
 | **WSL2** | Secret Service API (via D-Bus) | Same as Linux. Some WSL2 distros ship without D-Bus — install as above. |
 
