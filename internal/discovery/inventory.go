@@ -1,11 +1,14 @@
 package discovery
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/dustinlange/agent-minder/internal/agentutil"
 	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
@@ -253,4 +256,89 @@ func fileExists(path string) bool {
 func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// ScanAgentLogs scans .log files in the given directory for permission
+// failures from prior Claude Code agent runs. It returns a deduplicated
+// list of denied tool patterns (e.g., "Bash(go *)", "Write").
+// Returns nil and no error if the directory does not exist or contains no logs.
+func ScanAgentLogs(logDir string) []string {
+	if !dirExists(logDir) {
+		return nil
+	}
+
+	matches, err := filepath.Glob(filepath.Join(logDir, "*.log"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var patterns []string
+
+	for _, logPath := range matches {
+		result, err := agentutil.ParseAgentLog(logPath)
+		if err != nil || result == nil {
+			continue
+		}
+		if len(result.PermissionDenials) == 0 {
+			continue
+		}
+		// Re-use the extraction logic from the onboarding validator's
+		// underlying agentutil package — permission_denials is a
+		// []json.RawMessage that we surface as tool pattern strings.
+		for _, raw := range result.PermissionDenials {
+			pattern := denialRawToPattern(raw)
+			if pattern != "" && !seen[pattern] {
+				seen[pattern] = true
+				patterns = append(patterns, pattern)
+			}
+		}
+	}
+
+	sort.Strings(patterns)
+	return patterns
+}
+
+// denialRawToPattern converts a json.RawMessage permission denial into
+// a human-readable tool pattern string. Handles both object
+// ({"tool_name":"Bash",...}) and plain string ("Write") formats.
+func denialRawToPattern(raw json.RawMessage) string {
+	// Try as object with tool_name field.
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) == nil {
+		name, _ := obj["tool_name"].(string)
+		if name == "" {
+			return ""
+		}
+		if name == "Bash" {
+			if cmd := extractBashCommand(obj); cmd != "" {
+				parts := strings.Fields(cmd)
+				if len(parts) > 0 {
+					return fmt.Sprintf("Bash(%s *)", parts[0])
+				}
+			}
+		}
+		return name
+	}
+
+	// Try as plain string.
+	var s string
+	if json.Unmarshal(raw, &s) == nil && s != "" {
+		return s
+	}
+	return ""
+}
+
+// extractBashCommand tries to find the denied command from a permission
+// denial object. Checks "command" at top level and nested "tool_input".
+func extractBashCommand(obj map[string]any) string {
+	if cmd, ok := obj["command"].(string); ok && cmd != "" {
+		return cmd
+	}
+	if input, ok := obj["tool_input"].(map[string]any); ok {
+		if cmd, ok := input["command"].(string); ok && cmd != "" {
+			return cmd
+		}
+	}
+	return ""
 }
