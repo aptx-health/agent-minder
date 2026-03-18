@@ -1186,8 +1186,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.trackedExpanded = !m.trackedExpanded
 		m.resizeViewports()
 		return m, nil
-	case "s":
-		// On tab 3 during autopilot, 's' stops the selected agent.
+	case "S":
+		// On tab 3 during autopilot, 'S' stops the selected agent.
 		if m.activeTab == tabAutopilot && m.autopilotMode == "running" {
 			task := m.selectedAutopilotTask()
 			if task != nil && task.Status == "running" {
@@ -1195,6 +1195,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+	case "s":
 		m.settingsState = newSettingsState(m.project)
 		// Apply textarea theme to match current theme.
 		var s textarea.Styles

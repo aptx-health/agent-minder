@@ -2175,7 +2175,7 @@ var (
 	autopilotHints = []helpHint{
 		{"a", "launch autopilot"},
 		{"A", "stop all agents"},
-		{"s", "stop selected"},
+		{"S", "stop selected"},
 		{"r", "restart/review selected"},
 		{"c", "copy worktree path"},
 		{"+", "add slot"},
