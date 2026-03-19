@@ -45,7 +45,7 @@ func testModel(t *testing.T) Model {
 	t.Helper()
 	store := testStore(t)
 	proj := testProject()
-	p := poller.New(store, proj, nil, nil, nil)
+	p := poller.New(store, proj, nil, nil)
 	return New(proj, store, p)
 }
 
@@ -78,7 +78,7 @@ func testModelWithProject(t *testing.T) (Model, *db.Store) {
 	if err := store.CreateProject(proj); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	p := poller.New(store, proj, nil, nil, nil)
+	p := poller.New(store, proj, nil, nil)
 	return New(proj, store, p), store
 }
 
@@ -142,7 +142,7 @@ func TestInit_WithIdlePause(t *testing.T) {
 	store := testStore(t)
 	proj := testProject()
 	proj.IdlePauseSec = 300
-	p := poller.New(store, proj, nil, nil, nil)
+	p := poller.New(store, proj, nil, nil)
 	m := New(proj, store, p)
 
 	cmd := m.Init()

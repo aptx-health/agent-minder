@@ -6,9 +6,8 @@ import (
 	"log"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/dustinlange/agent-minder/internal/config"
+	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/db"
-	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 	"github.com/dustinlange/agent-minder/internal/poller"
 	"github.com/dustinlange/agent-minder/internal/tui"
@@ -20,8 +19,7 @@ var startCmd = &cobra.Command{
 	Short: "Launch the monitoring dashboard",
 	Long: `Launch the TUI monitoring dashboard for a project. The dashboard shows
 real-time git activity, message bus traffic, LLM analysis, and active
-concerns. It runs a two-tier LLM pipeline (Haiku summarizer → Sonnet
-analyzer) on each poll cycle.
+concerns. It uses the Claude Code CLI for all LLM calls.
 
 Key bindings: p=pause, r=poll now, e=expand, u=user msg, m=broadcast,
 o=onboard, a=autopilot, A=stop autopilot, t=theme, q=quit.`,
@@ -44,6 +42,13 @@ func init() {
 func runStart(cmd *cobra.Command, args []string) error {
 	projectName := args[0]
 
+	// Verify claude CLI is installed.
+	version, err := claudecli.CheckVersion("")
+	if err != nil {
+		return fmt.Errorf("claude CLI not found: %w\nInstall from https://claude.ai/code", err)
+	}
+	log.Printf("Using Claude Code CLI: %s", version)
+
 	// Open database.
 	dbPath := db.DefaultDBPath()
 	conn, err := db.Open(dbPath)
@@ -59,37 +64,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
 	}
 
-	// Resolve effective provider names for each tier.
-	// Per-tier overrides fall back to the project-level provider.
-	summarizerProviderName := project.LLMSummarizerProvider
-	if summarizerProviderName == "" {
-		summarizerProviderName = project.LLMProvider
-	}
-	analyzerProviderName := project.LLMAnalyzerProvider
-	if analyzerProviderName == "" {
-		analyzerProviderName = project.LLMProvider
-	}
-
-	// Create summarizer (tier 1) provider.
-	summarizerProvider, err := createProvider(summarizerProviderName)
-	if err != nil {
-		return fmt.Errorf("creating summarizer provider: %w", err)
-	}
-
-	// Reuse the same instance if both tiers use the same provider,
-	// otherwise create a separate analyzer (tier 2) provider.
-	analyzerProvider := summarizerProvider
-	if analyzerProviderName != summarizerProviderName {
-		analyzerProvider, err = createProvider(analyzerProviderName)
-		if err != nil {
-			return fmt.Errorf("creating analyzer provider: %w", err)
-		}
-	}
-
-	// Log provider configuration when different providers are used per tier.
-	if summarizerProviderName != analyzerProviderName {
-		log.Printf("Using %s for summarizer (tier 1), %s for analyzer (tier 2)", summarizerProviderName, analyzerProviderName)
-	}
+	// Create Claude CLI completer for all LLM calls.
+	completer := claudecli.NewCLICompleter()
 
 	// Create bus publisher (non-fatal if unavailable).
 	var publisher *msgbus.Publisher
@@ -106,7 +82,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	p := poller.New(store, project, summarizerProvider, analyzerProvider, publisher)
+	p := poller.New(store, project, completer, publisher)
 	p.Start(ctx)
 	defer p.Stop()
 
@@ -118,16 +94,4 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
-}
-
-// createProvider builds an LLM provider by name, sourcing credentials from config.
-func createProvider(name string) (llm.Provider, error) {
-	var opts []llm.Option
-	if apiKey := config.GetProviderAPIKey(name); apiKey != "" {
-		opts = append(opts, llm.WithAPIKey(apiKey))
-	}
-	if baseURL := config.GetProviderBaseURL(name); baseURL != "" {
-		opts = append(opts, llm.WithBaseURL(baseURL))
-	}
-	return llm.NewProvider(name, opts...)
 }

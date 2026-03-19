@@ -1,7 +1,7 @@
 // Package poller implements the periodic monitoring loop.
-// It checks git repos and the message bus for changes, then runs a two-tier
-// LLM pipeline: tier 1 (Haiku) summarizes, tier 2 (Sonnet) analyzes and
-// optionally publishes to the agent-msg bus.
+// It checks git repos and the message bus for changes, then runs an LLM
+// analysis pipeline via the Claude Code CLI and optionally publishes to
+// the agent-msg bus.
 // THIS FILE CONTAINS PROMPTS FOR MINDER AGENTS
 package poller
 
@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
-	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 )
 
@@ -136,12 +136,11 @@ func (r *PollResult) LLMResponse() string {
 
 // Poller runs the monitoring loop with separate status and analysis tickers.
 type Poller struct {
-	store              *db.Store
-	project            *db.Project
-	summarizerProvider llm.Provider // tier 1: summarization (Haiku-class)
-	analyzerProvider   llm.Provider // tier 2: analysis (Sonnet-class)
-	publisher          *msgbus.Publisher
-	events             chan Event
+	store     *db.Store
+	project   *db.Project
+	completer claudecli.Completer // claude CLI for all LLM calls
+	publisher *msgbus.Publisher
+	events    chan Event
 
 	mu                    sync.Mutex
 	paused                bool
@@ -153,15 +152,12 @@ type Poller struct {
 }
 
 // New creates a new Poller. Publisher may be nil if bus publishing is not available.
-// summarizerProvider is used for tier 1 (summarization) calls; analyzerProvider is
-// used for tier 2 (analysis), broadcast, and onboard calls. They may be the same
-// instance when both tiers use the same underlying LLM provider.
-func New(store *db.Store, project *db.Project, summarizerProvider, analyzerProvider llm.Provider, publisher *msgbus.Publisher) *Poller {
+// The completer is used for all LLM calls (analysis, broadcast, onboard, sweep).
+func New(store *db.Store, project *db.Project, completer claudecli.Completer, publisher *msgbus.Publisher) *Poller {
 	return &Poller{
 		store:                 store,
 		project:               project,
-		summarizerProvider:    summarizerProvider,
-		analyzerProvider:      analyzerProvider,
+		completer:             completer,
 		publisher:             publisher,
 		events:                make(chan Event, 64),
 		statusIntervalChanged: make(chan time.Duration, 1),
@@ -178,11 +174,10 @@ func (p *Poller) Project() *db.Project {
 	return p.project
 }
 
-// Provider returns the poller's LLM provider.
-// AnalyzerProvider returns the tier 2 (analyzer) provider.
-// Used by autopilot, which only makes analyzer-class LLM calls.
-func (p *Poller) AnalyzerProvider() llm.Provider {
-	return p.analyzerProvider
+// Completer returns the poller's CLI completer.
+// Used by autopilot for dependency analysis calls.
+func (p *Poller) Completer() claudecli.Completer {
+	return p.completer
 }
 
 // SetAutopilotDepGraphFunc sets a callback that returns the autopilot dependency graph
@@ -302,66 +297,53 @@ func (p *Poller) Broadcast(ctx context.Context, userPrompt string) (*BusMessage,
 
 	model := p.project.LLMAnalyzerModel
 	if model == "" {
-		model = "claude-sonnet-4-6"
+		model = "opus"
 	}
 
 	system := `You are an AI project coordinator. The user wants to broadcast a message to other agents working on this project.
 
 Given the project context and the user's intent, write a concise, helpful bus message.
 
-Respond with ONLY a JSON object:
-{
-  "topic": "<project>/coord",
-  "message": "your message here"
-}
-
 Keep messages actionable and concise. Use the project's coordination topic.`
 
 	prompt := fmt.Sprintf("## Project Context\n%s\n\n## User Request\n%s", contextBuf.String(), userPrompt)
 
+	busMessageSchema := `{"type":"object","properties":{"topic":{"type":"string"},"message":{"type":"string"}},"required":["topic","message"]}`
+
 	debugLog("llm call", "stage", "broadcast", "step", "input", "component", "analyzer", "model", model,
 		"system_prompt", system, "user_prompt", prompt,
 		"est_system_tokens", estimateTokens(system), "est_user_tokens", estimateTokens(prompt))
-	resp, err := p.analyzerProvider.Complete(ctx, &llm.Request{
-		Model:     model,
-		System:    system,
-		Messages:  []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens: 512,
+	resp, err := p.completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: system,
+		Prompt:       prompt,
+		Model:        model,
+		JSONSchema:   busMessageSchema,
 	})
 	if err != nil {
 		debugLog("llm error", "stage", "broadcast", "step", "error", "component", "analyzer", "error", err.Error())
 		return nil, fmt.Errorf("LLM broadcast call: %w", err)
 	}
-	debugLog("llm response", "stage", "broadcast", "step", "output", "component", "analyzer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
+	debugLog("llm response", "stage", "broadcast", "step", "output", "component", "analyzer", "response", resp.Content(), "input_tokens", resp.InputTokens, "output_tokens", resp.OutputTokens)
 
-	parsed := parseAnalysis(resp.Content)
+	// Parse the structured output directly as a BusMessage.
+	var msg BusMessage
+	content := resp.Content()
+	if err := parseJSON(content, &msg); err == nil && msg.Topic != "" && msg.Message != "" {
+		if err := p.publisher.Publish(msg.Topic, p.project.MinderIdentity, msg.Message); err != nil {
+			return nil, fmt.Errorf("publishing broadcast: %w", err)
+		}
+		p.emit("broadcast", fmt.Sprintf("Sent to %s", msg.Topic), nil)
+		return &msg, nil
+	}
+
+	// Fallback: try parsing from the full analysis envelope.
+	parsed := parseAnalysis(content)
 	if parsed.BusMessage != nil {
 		if err := p.publisher.Publish(parsed.BusMessage.Topic, p.project.MinderIdentity, parsed.BusMessage.Message); err != nil {
 			return nil, fmt.Errorf("publishing broadcast: %w", err)
 		}
 		p.emit("broadcast", fmt.Sprintf("Sent to %s", parsed.BusMessage.Topic), nil)
 		return parsed.BusMessage, nil
-	}
-
-	// Fallback: the LLM returned a plain message structure (topic+message at top level).
-	// Try parsing as a BusMessage directly.
-	var msg BusMessage
-	raw := strings.TrimSpace(resp.Content)
-	if idx := strings.Index(raw, "```"); idx >= 0 {
-		start := idx + 3
-		if jIdx := strings.Index(raw[idx:], "json"); jIdx >= 0 && jIdx < 10 {
-			start = idx + jIdx + 4
-		}
-		if end := strings.Index(raw[start:], "```"); end >= 0 {
-			raw = strings.TrimSpace(raw[start : start+end])
-		}
-	}
-	if err := parseJSON(raw, &msg); err == nil && msg.Topic != "" && msg.Message != "" {
-		if err := p.publisher.Publish(msg.Topic, p.project.MinderIdentity, msg.Message); err != nil {
-			return nil, fmt.Errorf("publishing broadcast: %w", err)
-		}
-		p.emit("broadcast", fmt.Sprintf("Sent to %s", msg.Topic), nil)
-		return &msg, nil
 	}
 
 	return nil, fmt.Errorf("LLM did not produce a publishable message")
@@ -419,7 +401,7 @@ func (p *Poller) Onboard(ctx context.Context, userGuidance string) (*BusMessage,
 
 	model := p.project.LLMAnalyzerModel
 	if model == "" {
-		model = "claude-sonnet-4-6"
+		model = "opus"
 	}
 
 	system := fmt.Sprintf(`You are an AI project coordinator for %q. Generate an onboarding message for a new AI agent joining this project.
@@ -431,13 +413,7 @@ The message should help the new agent understand:
 4. Current state: recent progress, active concerns, what needs attention
 5. How to communicate (message bus topics, coordination patterns)
 
-Write a clear, actionable onboarding briefing. Be concise but thorough — this is the new agent's primary orientation document.
-
-Respond with ONLY a JSON object:
-{
-  "topic": "%s/onboarding",
-  "message": "your onboarding message here"
-}`, p.project.Name, p.project.Name)
+Write a clear, actionable onboarding briefing. Be concise but thorough — this is the new agent's primary orientation document.`, p.project.Name)
 
 	var prompt string
 	if strings.TrimSpace(userGuidance) != "" {
@@ -446,48 +422,42 @@ Respond with ONLY a JSON object:
 		prompt = fmt.Sprintf("## Project Context\n%s\n\nGenerate a general onboarding message for any new agent joining this project.", contextBuf.String())
 	}
 
+	busMessageSchema := `{"type":"object","properties":{"topic":{"type":"string"},"message":{"type":"string"}},"required":["topic","message"]}`
+
 	debugLog("llm call", "stage", "onboard", "step", "input", "component", "analyzer", "model", model,
 		"system_prompt", system, "user_prompt", prompt,
 		"est_system_tokens", estimateTokens(system), "est_user_tokens", estimateTokens(prompt))
-	resp, err := p.analyzerProvider.Complete(ctx, &llm.Request{
-		Model:     model,
-		System:    system,
-		Messages:  []llm.Message{{Role: "user", Content: prompt}},
-		MaxTokens: 1024,
+	resp, err := p.completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: system,
+		Prompt:       prompt,
+		Model:        model,
+		JSONSchema:   busMessageSchema,
 	})
 	if err != nil {
 		debugLog("llm error", "stage", "onboard", "step", "error", "component", "analyzer", "error", err.Error())
 		return nil, fmt.Errorf("LLM onboard call: %w", err)
 	}
-	debugLog("llm response", "stage", "onboard", "step", "output", "component", "analyzer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
+	debugLog("llm response", "stage", "onboard", "step", "output", "component", "analyzer", "response", resp.Content(), "input_tokens", resp.InputTokens, "output_tokens", resp.OutputTokens)
 
-	parsed := parseAnalysis(resp.Content)
+	// Parse the structured output directly as a BusMessage.
+	var msg BusMessage
+	content := resp.Content()
+	if err := parseJSON(content, &msg); err == nil && msg.Topic != "" && msg.Message != "" {
+		if err := p.publisher.PublishReplace(msg.Topic, p.project.MinderIdentity, msg.Message); err != nil {
+			return nil, fmt.Errorf("publishing onboarding: %w", err)
+		}
+		p.emit("broadcast", fmt.Sprintf("Onboarding published to %s", msg.Topic), nil)
+		return &msg, nil
+	}
+
+	// Fallback: try parsing from the full analysis envelope.
+	parsed := parseAnalysis(content)
 	if parsed.BusMessage != nil {
 		if err := p.publisher.PublishReplace(parsed.BusMessage.Topic, p.project.MinderIdentity, parsed.BusMessage.Message); err != nil {
 			return nil, fmt.Errorf("publishing onboarding: %w", err)
 		}
 		p.emit("broadcast", fmt.Sprintf("Onboarding published to %s", parsed.BusMessage.Topic), nil)
 		return parsed.BusMessage, nil
-	}
-
-	// Fallback: try parsing as a bare BusMessage.
-	var msg BusMessage
-	raw := strings.TrimSpace(resp.Content)
-	if idx := strings.Index(raw, "```"); idx >= 0 {
-		start := idx + 3
-		if jIdx := strings.Index(raw[idx:], "json"); jIdx >= 0 && jIdx < 10 {
-			start = idx + jIdx + 4
-		}
-		if end := strings.Index(raw[start:], "```"); end >= 0 {
-			raw = strings.TrimSpace(raw[start : start+end])
-		}
-	}
-	if err := parseJSON(raw, &msg); err == nil && msg.Topic != "" && msg.Message != "" {
-		if err := p.publisher.PublishReplace(msg.Topic, p.project.MinderIdentity, msg.Message); err != nil {
-			return nil, fmt.Errorf("publishing onboarding: %w", err)
-		}
-		p.emit("broadcast", fmt.Sprintf("Onboarding published to %s", msg.Topic), nil)
-		return &msg, nil
 	}
 
 	return nil, fmt.Errorf("LLM did not produce a publishable onboarding message")
@@ -810,81 +780,19 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	// Get active concerns for context.
 	concerns, _ := p.store.ActiveConcerns(p.project.ID)
 
-	// --- Tier 1: Parallel Haiku summarizers (git + bus) ---
-	tier1Model := p.project.LLMSummarizerModel
-	if tier1Model == "" {
-		tier1Model = p.project.LLMModel
+	// --- Single consolidated analysis call (replaces tier 1 + tier 2) ---
+	analyzerModel := p.project.LLMAnalyzerModel
+	if analyzerModel == "" {
+		analyzerModel = "sonnet"
 	}
 
-	var gitTier1, busTier1 string
-	var gitErr, busErr error
-	var tier1WG sync.WaitGroup
-
-	// Git summarizer agent.
-	if result.NewCommits > 0 {
-		tier1WG.Add(1)
-		go func() {
-			defer tier1WG.Done()
-			prompt := buildGitSummaryPrompt(p.project, gathered.repos, gathered.gitSummary)
-			sys := gitSummarizerSystemPrompt()
-			debugLog("llm call", "stage", "tier1", "step", "input", "component", "git_summarizer", "model", tier1Model,
-				"system_prompt", sys, "user_prompt", prompt,
-				"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
-			resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
-				Model:     tier1Model,
-				System:    sys,
-				Messages:  []llm.Message{{Role: "user", Content: prompt}},
-				MaxTokens: 256,
-			})
-			if err != nil {
-				gitErr = err
-				debugLog("llm error", "stage", "tier1", "step", "error", "component", "git_summarizer", "error", err.Error())
-				return
-			}
-			gitTier1 = resp.Content
-			debugLog("llm response", "stage", "tier1", "step", "output", "component", "git_summarizer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
-		}()
-	}
-
-	// Bus summarizer agent.
-	if result.NewMessages > 0 {
-		tier1WG.Add(1)
-		go func() {
-			defer tier1WG.Done()
-			prompt := buildBusSummaryPrompt(p.project, gathered.msgSummary)
-			sys := busSummarizerSystemPrompt()
-			debugLog("llm call", "stage", "tier1", "step", "input", "component", "bus_summarizer", "model", tier1Model,
-				"system_prompt", sys, "user_prompt", prompt,
-				"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
-			resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
-				Model:     tier1Model,
-				System:    sys,
-				Messages:  []llm.Message{{Role: "user", Content: prompt}},
-				MaxTokens: 256,
-			})
-			if err != nil {
-				busErr = err
-				debugLog("llm error", "stage", "tier1", "step", "error", "component", "bus_summarizer", "error", err.Error())
-				return
-			}
-			busTier1 = resp.Content
-			debugLog("llm response", "stage", "tier1", "step", "output", "component", "bus_summarizer", "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
-		}()
-	}
-
-	tier1WG.Wait()
-
-	// Combine tier 1 results for the record.
+	// Build a summary of raw data for the record.
 	var tier1Parts []string
-	if gitErr != nil {
-		tier1Parts = append(tier1Parts, fmt.Sprintf("Git summarizer error: %v", gitErr))
-	} else if gitTier1 != "" {
-		tier1Parts = append(tier1Parts, gitTier1)
+	if gathered.gitSummary != "" {
+		tier1Parts = append(tier1Parts, gathered.gitSummary)
 	}
-	if busErr != nil {
-		tier1Parts = append(tier1Parts, fmt.Sprintf("Bus summarizer error: %v", busErr))
-	} else if busTier1 != "" {
-		tier1Parts = append(tier1Parts, busTier1)
+	if gathered.msgSummary != "" {
+		tier1Parts = append(tier1Parts, gathered.msgSummary)
 	}
 	if gathered.trackedChanges != "" {
 		tier1Parts = append(tier1Parts, "Tracked item status changes: "+gathered.trackedChanges)
@@ -893,12 +801,6 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		tier1Parts = append(tier1Parts, "Activity detected but no summaries produced.")
 	}
 	result.Tier1Summary = strings.Join(tier1Parts, "\n\n")
-
-	// --- Tier 2: Analyzer (Opus) ---
-	tier2Model := p.project.LLMAnalyzerModel
-	if tier2Model == "" {
-		tier2Model = "claude-opus-4-6"
-	}
 
 	// Fetch recently completed items for progress context.
 	ttl := p.project.MessageTTLSec
@@ -913,30 +815,34 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	// Fetch autopilot tasks to tag tracked items as autopilot-managed vs manual.
 	autopilotTasks, _ := p.store.GetAutopilotTasks(p.project.ID)
 
-	tier2Prompt := p.buildTier2Prompt(gitTier1, busTier1, concerns, gathered.trackedItems, completedItems, autopilotTasks)
-	tier2System := tier2SystemPrompt(p.project.Name, p.project.AnalyzerFocus)
-	debugLog("llm call", "stage", "tier2", "step", "input", "component", "analyzer", "model", tier2Model,
-		"system_prompt", tier2System, "user_prompt", tier2Prompt,
-		"est_system_tokens", estimateTokens(tier2System), "est_user_tokens", estimateTokens(tier2Prompt))
+	// Build a combined prompt with raw data (no separate tier 1 summarization).
+	analysisPrompt := p.buildAnalysisPrompt(gathered, concerns, completedItems, autopilotTasks)
+	analysisSystem := analysisSystemPrompt(p.project.Name, p.project.AnalyzerFocus)
 
-	tier2Resp, err := p.analyzerProvider.Complete(ctx, &llm.Request{
-		Model:     tier2Model,
-		System:    tier2System,
-		Messages:  []llm.Message{{Role: "user", Content: tier2Prompt}},
-		MaxTokens: 1024,
+	analysisSchema := `{"type":"object","properties":{"analysis":{"type":"string"},"concerns":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["info","warning","danger"]},"message":{"type":"string"}},"required":["severity","message"]}},"bus_message":{"type":"object","properties":{"topic":{"type":"string"},"message":{"type":"string"}},"required":["topic","message"]}},"required":["analysis","concerns"]}`
+
+	debugLog("llm call", "stage", "analysis", "step", "input", "component", "analyzer", "model", analyzerModel,
+		"system_prompt", analysisSystem, "user_prompt", analysisPrompt,
+		"est_system_tokens", estimateTokens(analysisSystem), "est_user_tokens", estimateTokens(analysisPrompt))
+
+	analysisResp, err := p.completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: analysisSystem,
+		Prompt:       analysisPrompt,
+		Model:        analyzerModel,
+		JSONSchema:   analysisSchema,
 	})
 	if err != nil {
-		debugLog("llm error", "stage", "tier2", "step", "error", "component", "analyzer", "error", err.Error())
+		debugLog("llm error", "stage", "analysis", "step", "error", "component", "analyzer", "error", err.Error())
 		result.Duration = time.Since(start)
-		// Tier 2 failed but tier 1 succeeded — still usable.
+		// Analysis failed but we still have raw data — usable.
 		p.recordPollResult(result)
 		return result, nil
 	}
 
-	debugLog("llm response", "stage", "tier2", "step", "output", "component", "analyzer", "response", tier2Resp.Content, "input_tokens", tier2Resp.InputToks, "output_tokens", tier2Resp.OutputToks)
+	debugLog("llm response", "stage", "analysis", "step", "output", "component", "analyzer", "response", analysisResp.Content(), "input_tokens", analysisResp.InputTokens, "output_tokens", analysisResp.OutputTokens)
 
-	// Parse tier 2 structured response.
-	analysis := parseAnalysis(tier2Resp.Content)
+	// Parse structured analysis response.
+	analysis := parseAnalysis(analysisResp.Content())
 	result.Tier2Analysis = analysis.Analysis
 
 	// Publish bus message if the analyzer decided one is warranted.
@@ -972,57 +878,14 @@ func (p *Poller) recordPollResult(result *PollResult) {
 	})
 }
 
-// --- Tier 1 Haiku Agent Prompts (focused, parallel) ---
+// --- Combined Analysis System Prompt ---
 
-func gitSummarizerSystemPrompt() string {
-	return `You are a concise git activity summarizer. Given recent commits across one or more repos for a software project, produce a brief factual summary.
-
-Rules:
-- Be terse: 1-3 sentences max
-- Focus on what changed, who did it, and which repos
-- Note cross-repo patterns or dependencies if visible
-- Do NOT provide recommendations — just summarize the facts`
-}
-
-func buildGitSummaryPrompt(project *db.Project, repos []db.Repo, gitActivity string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "**Project:** %s\n", project.Name)
-	fmt.Fprintf(&b, "**Repos:** %d\n\n", len(repos))
-	b.WriteString("## Git Commits Since Last Poll\n")
-	b.WriteString(gitActivity)
-	return b.String()
-}
-
-func busSummarizerSystemPrompt() string {
-	return `You are a concise message bus summarizer. Given recent inter-agent messages for a software project, produce a brief factual summary.
-
-Rules:
-- Be terse: 1-3 sentences max
-- Focus on what was communicated, by whom, and any action items or coordination signals
-- Note cross-agent patterns or requests
-- Each message includes a relative age (e.g., "5m ago", "2h ago"). Prioritize recent messages over older ones. Older messages may have been superseded by newer activity — note their age when summarizing so the analyzer can weigh recency.
-- Do NOT provide recommendations — just summarize the facts`
-}
-
-func buildBusSummaryPrompt(project *db.Project, msgActivity string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "**Project:** %s\n\n", project.Name)
-	b.WriteString("## Message Bus Activity\n")
-	b.WriteString(msgActivity)
-	return b.String()
-}
-
-// --- Tier 2 System Prompt (Opus analyzer) ---
-
-func tier2SystemPrompt(projectName, analyzerFocus string) string {
-	base := fmt.Sprintf(`You are an AI project analyzer for %q. Synthesize git, bus, and tracked item data into a structured analysis.
-
-Respond with JSON (no fences):
-{"analysis":"2-4 sentence status update","concerns":[{"severity":"info|warning|danger","message":"..."}],"bus_message":{"topic":"%s/coord","message":"..."}}
+func analysisSystemPrompt(projectName, analyzerFocus string) string {
+	base := fmt.Sprintf(`You are an AI project analyzer for %q. You receive raw git commits, bus messages, and tracked item data. Summarize and analyze them into a structured assessment.
 
 ## Output rules
 
-analysis: Clear, actionable status update synthesizing all inputs.
+analysis: Clear, actionable 2-4 sentence status update synthesizing all inputs. Summarize what happened (git activity, bus messages) and assess project state.
 
 concerns: Return the FULL currently-valid list. Reconcile each existing concern against current evidence:
 - Drop or rewrite concerns contradicted by new data (e.g., branch now has PR, item merged).
@@ -1041,7 +904,7 @@ bus_message: Only when genuinely actionable for other agents (breaking changes, 
 - The project owner routinely clears completed work from tracking. A smaller tracked items list indicates progress, not stagnation. Never raise velocity concerns based on shrinking item counts.
 - Items tagged [autopilot] have an explicit dependency graph and execution plan. Do not raise velocity concerns about queued autopilot tasks — they are intentionally waiting on dependencies.
 - Items tagged [manual] are not managed by autopilot and may need human attention.
-- When a dependency graph is present, use it to reason about blockers and ordering. Queued tasks waiting on running tasks are working as intended.`, projectName, projectName)
+- When a dependency graph is present, use it to reason about blockers and ordering. Queued tasks waiting on running tasks are working as intended.`, projectName)
 
 	focus := analyzerFocus
 	if focus == "" {
@@ -1056,7 +919,9 @@ bus_message: Only when genuinely actionable for other agents (breaking changes, 
 // It reflects the analyzer's built-in engineering coordinator persona.
 const DefaultAnalyzerFocus = `Focus on cross-repo coordination and engineering progress. Be concise, evidence-based, and actionable. Prioritize blockers and coordination needs. Use direct, professional language.`
 
-func (p *Poller) buildTier2Prompt(gitSummary, busSummary string, concerns []db.Concern, trackedItems []db.TrackedItem, completedItems []db.CompletedItem, autopilotTasks []db.AutopilotTask) string {
+func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, concerns []db.Concern, completedItems []db.CompletedItem, autopilotTasks []db.AutopilotTask) string {
+	trackedItems := gathered.trackedItems
+
 	// Build lookup of autopilot-managed issues: owner/repo#number → status.
 	autopilotIndex := make(map[string]string, len(autopilotTasks))
 	for _, t := range autopilotTasks {
@@ -1070,11 +935,17 @@ func (p *Poller) buildTier2Prompt(gitSummary, busSummary string, concerns []db.C
 	fmt.Fprintf(&b, "Project: %s\n", p.project.Name)
 	fmt.Fprintf(&b, "Goal: %s — %s\n\n", p.project.GoalType, p.project.GoalDescription)
 
-	if gitSummary != "" {
-		fmt.Fprintf(&b, "## Git Activity Summary\n%s\n\n", gitSummary)
+	// Include raw git data directly (no tier 1 summarization).
+	if gathered.gitSummary != "" {
+		fmt.Fprintf(&b, "## Git Activity Since Last Poll\n%s\n\n", gathered.gitSummary)
 	}
-	if busSummary != "" {
-		fmt.Fprintf(&b, "## Bus Activity Summary\n%s\n\n", busSummary)
+	// Include raw bus messages directly.
+	if gathered.msgSummary != "" {
+		fmt.Fprintf(&b, "## Message Bus Activity\n%s\n\n", gathered.msgSummary)
+	}
+	// Include tracked item status changes.
+	if gathered.trackedChanges != "" {
+		fmt.Fprintf(&b, "## Tracked Item Status Changes\n%s\n\n", gathered.trackedChanges)
 	}
 
 	// Tracked items with autopilot/manual tags.

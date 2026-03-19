@@ -1,6 +1,6 @@
 # agent-minder
 
-Go CLI coordination layer on top of [agent-msg](../agent-msg). Monitors git repos, watches the message bus, and uses a two-tier LLM pipeline to analyze changes and coordinate agents.
+Go CLI coordination layer on top of [agent-msg](../agent-msg). Monitors git repos, watches the message bus, and uses Claude Code CLI for LLM analysis to coordinate agents.
 
 ## Quick orientation
 
@@ -8,16 +8,15 @@ Go CLI coordination layer on top of [agent-msg](../agent-msg). Monitors git repo
 - **Go version**: 1.25+ (bubbletea v2 requirement)
 - **State**: SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys)
 - **agent-msg DB**: `~/repos/agent-msg/messages.db` (or `AGENT_MSG_DB` env var)
-- **LLM**: `ANTHROPIC_API_KEY` env var required
+- **LLM**: Claude Code CLI (`claude -p`) — no API key needed
 
 ## Architecture
 
-### Two-tier LLM pipeline (internal/poller)
+### LLM pipeline (internal/poller)
 
-Each poll cycle with new activity runs two sequential LLM calls:
+All LLM calls go through `internal/claudecli`, which wraps `claude -p` with `--output-format json`. The `claudecli.Completer` interface is the single abstraction for all LLM interactions.
 
-1. **Tier 1 — Haiku** (`project.LLMSummarizerModel`): Summarizes raw git + bus data. 512 max tokens. Plain text output.
-2. **Tier 2 — Sonnet** (`project.LLMAnalyzerModel`): Analyzes tier 1 summary + active concerns + project context. 1024 max tokens. Returns structured JSON:
+Each poll cycle with new activity runs a single `claude -p --model <analyzer_model>` call with `--json-schema` to enforce structured output:
 
 ```json
 {
@@ -26,6 +25,8 @@ Each poll cycle with new activity runs two sequential LLM calls:
   "bus_message": {"topic": "project/coord", "message": "..."}
 }
 ```
+
+Raw git commits and bus messages are passed directly to the analyzer (no separate summarization step). The model is controlled by `project.LLMAnalyzerModel` (default: `"sonnet"`).
 
 - `parseAnalysis()` in `analysis.go` handles raw JSON, markdown-fenced JSON, and plain text fallback
 - Concerns are managed by the analyzer: each cycle returns the full desired concern list, `reconcileConcerns()` diffs against existing (adds new, resolves dropped, updates severity)
@@ -78,9 +79,9 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 
 **Agent command:** `claude --agent autopilot -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var. Allowed tools are loaded from `.agent-minder/onboarding.yaml` (if present) or a built-in default set.
 
-### DB schema (internal/db) — currently v9
+### DB schema (internal/db) — currently v18
 
-**projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider, llm_model, llm_summarizer_model, llm_analyzer_model, autopilot_max_agents, autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label
+**projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider (deprecated), llm_model (deprecated), llm_summarizer_model, llm_analyzer_model, autopilot_max_agents, autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label
 
 **polls**: project_id, new_commits, new_messages, concerns_raised, llm_response (legacy), tier1_response, tier2_response, bus_message_sent, polled_at
 
@@ -90,7 +91,7 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 
 **Also**: repos, worktrees, topics, concerns (see `schema.go` for full DDL)
 
-Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns).
+Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns).
 
 `Poll.LLMResponse()` accessor returns tier2 > tier1 > raw (backward compat).
 
@@ -101,7 +102,7 @@ Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash
 | `internal/autopilot` | Autopilot supervisor | Manages concurrent Claude Code agents on GitHub issues |
 | `cmd/` | Cobra commands | init, start, status, enroll, pause, resume |
 | `internal/db` | SQLite schema + CRUD | `Store` wraps sqlx.DB, migrations in `schema.go` |
-| `internal/llm` | LLM provider interface | Anthropic + OpenAI adapters, `Provider.Complete()` |
+| `internal/claudecli` | Claude Code CLI wrapper | `Completer` interface, `claude -p` invocation |
 | `internal/poller` | Poll loop + LLM pipeline | `poller.go`, `analysis.go` (parsing + dedup) |
 | `internal/tui` | Bubbletea dashboard | `app.go` (model/update/view), `styles.go` (themes) |
 | `internal/git` | Git CLI wrappers | `LogSince()`, `Branches()`, `WorktreeList()` |
@@ -121,12 +122,12 @@ Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash
 
 ```bash
 go test ./...                           # All unit tests
-go test ./internal/db/... -v            # DB + migration tests (9 tests)
-go test ./internal/poller/... -v        # Analysis parsing + concern dedup (9 tests)
-go test ./internal/msgbus/... -v        # Client + publisher tests (9 tests)
+go test ./internal/db/... -v            # DB + migration tests
+go test ./internal/poller/... -v        # Analysis parsing + concern dedup
+go test ./internal/msgbus/... -v        # Client + publisher tests
 
-# Integration test (requires ANTHROPIC_API_KEY + existing agent-test project):
-go test -tags integration -run TestIntegrationTwoTierPipeline -v ./internal/poller/ -timeout 90s
+# Integration test (requires Claude Code CLI + existing agent-test project):
+go test -tags integration -run TestIntegrationAnalysisPipeline -v ./internal/poller/ -timeout 120s
 ```
 
 ## Debug logging
@@ -152,9 +153,9 @@ The `lnav/agent-minder.json` format file ships with the repo. It color-codes sta
 
 ## Key patterns
 
-- `Poller.doPoll()` is the main loop body — gathers git + bus data, runs both LLM tiers, publishes, records
-- `Poller.Broadcast()` is the user-initiated broadcast path — gathers context, calls tier 2, publishes
-- `Poller.Onboard()` generates onboarding messages — gathers rich context, calls tier 2, publishes to `<project>/onboarding` with replace semantics
+- `Poller.doPoll()` is the main loop body — gathers git + bus data, runs single analysis call via `claudecli.Completer`, publishes, records
+- `Poller.Broadcast()` is the user-initiated broadcast path — gathers context, calls completer, publishes
+- `Poller.Onboard()` generates onboarding messages — gathers rich context, calls completer, publishes to `<project>/onboarding` with replace semantics
 - All TUI async operations use bubbletea Cmd pattern (return `func() tea.Msg`), not raw goroutines
 - Spinner ticks flow through the standard bubbletea Update loop via `spinner.TickMsg`
 - Theme is global mutable state (package-level `themeIndex`), cycled via `cycleTheme()`
@@ -189,8 +190,11 @@ This auto-derives paths from the branch name (e.g., `agent/issue-65` → `~/.age
 - `MINDER_LOG` — override debug log path (default: `~/.agent-minder/debug.log`)
 - `MINDER_DEBUG=1` — enable structured JSON debug logging
 
-## Anthropic SDK notes
+## Claude Code CLI notes
 
-- System prompt uses `TextBlockParam{Text: "..."}` (NOT `NewTextBlock()` which returns `ContentBlockParamUnion`)
-- SDK reads `ANTHROPIC_API_KEY` from env by default
-- Model IDs: `claude-haiku-4-5`, `claude-sonnet-4-6`, `claude-opus-4-6`
+- All LLM calls use `claude -p --output-format json` via `internal/claudecli`
+- `--json-schema` enforces structured output → appears in `structured_output` field (not `result`)
+- `--model haiku`/`--model sonnet` aliases work (no need for full model IDs)
+- `--tools ""` disables tool use for cheap/fast calls (e.g., tracked item sweep)
+- ~10s overhead per `claude -p` call regardless of tools setting
+- No API key required — Claude Code CLI handles authentication

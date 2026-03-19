@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/db"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
-	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
@@ -78,24 +78,21 @@ func openTestMsgDB(t *testing.T) (*sqlx.DB, *msgbus.Publisher) {
 	return conn, pub
 }
 
-// mockProvider is a configurable mock LLM provider for tests.
-type mockProvider struct {
-	name      string
+// mockCompleter is a configurable mock claudecli.Completer for tests.
+type mockCompleter struct {
 	response  string
 	err       error
 	calls     atomic.Int32
 	lastModel string
 }
 
-func (m *mockProvider) Name() string { return m.name }
-
-func (m *mockProvider) Complete(_ context.Context, req *llm.Request) (*llm.Response, error) {
+func (m *mockCompleter) Complete(_ context.Context, req *claudecli.Request) (*claudecli.Response, error) {
 	m.calls.Add(1)
 	m.lastModel = req.Model
 	if m.err != nil {
 		return nil, m.err
 	}
-	return &llm.Response{Content: m.response, InputToks: 100, OutputToks: 50}, nil
+	return &claudecli.Response{Result: m.response, InputTokens: 100, OutputTokens: 50}, nil
 }
 
 // createTestProject creates a project in the test DB and returns it.
@@ -363,7 +360,7 @@ func TestParseAnalysis_EmptyAnalysisFieldFallback(t *testing.T) {
 // --- Poller lifecycle tests ---
 
 func TestPoller_PauseResume(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 
 	if p.IsPaused() {
 		t.Error("expected not paused initially")
@@ -381,7 +378,7 @@ func TestPoller_PauseResume(t *testing.T) {
 }
 
 func TestPoller_PauseEmitsEvent(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 
 	p.Pause()
 
@@ -396,7 +393,7 @@ func TestPoller_PauseEmitsEvent(t *testing.T) {
 }
 
 func TestPoller_ResumeEmitsEvent(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	// Drain the pause event.
 	p.Pause()
 	<-p.Events()
@@ -414,7 +411,7 @@ func TestPoller_ResumeEmitsEvent(t *testing.T) {
 }
 
 func TestPoller_SetAutopilotDepGraphFunc(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	called := false
 	p.SetAutopilotDepGraphFunc(func() string {
 		called = true
@@ -438,7 +435,7 @@ func TestPoller_SetAutopilotDepGraphFunc(t *testing.T) {
 }
 
 func TestPoller_EventsChannel(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 
 	// Emit an event.
 	p.emit("test", "test summary", nil)
@@ -457,7 +454,7 @@ func TestPoller_EventsChannel(t *testing.T) {
 }
 
 func TestPoller_EmitDropsWhenFull(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 
 	// Fill the channel (capacity is 64).
 	for i := 0; i < 64; i++ {
@@ -480,7 +477,7 @@ func TestPoller_EmitDropsWhenFull(t *testing.T) {
 }
 
 func TestPoller_EmitWithPollResult(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 
 	result := &PollResult{
 		NewCommits:   5,
@@ -500,7 +497,7 @@ func TestPoller_EmitWithPollResult(t *testing.T) {
 // --- summarize tests ---
 
 func TestSummarize_AllFields(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	result := &PollResult{
 		NewCommits:   3,
 		NewMessages:  2,
@@ -530,7 +527,7 @@ func TestSummarize_AllFields(t *testing.T) {
 }
 
 func TestSummarize_NoActivity(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	result := &PollResult{}
 
 	summary := p.summarize(result)
@@ -540,7 +537,7 @@ func TestSummarize_NoActivity(t *testing.T) {
 }
 
 func TestSummarize_CommitsOnly(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	result := &PollResult{NewCommits: 7}
 
 	summary := p.summarize(result)
@@ -555,7 +552,7 @@ func TestRecordPollResult(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	result := &PollResult{
 		NewCommits:     5,
 		NewMessages:    2,
@@ -599,7 +596,7 @@ func TestRecordPollResult_LLMResponseFallback(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	result := &PollResult{
 		Tier1Summary:  "only tier 1",
 		Tier2Analysis: "",
@@ -617,14 +614,19 @@ func TestRecordPollResult_LLMResponseFallback(t *testing.T) {
 	}
 }
 
-// --- buildTier2Prompt tests ---
+// --- buildAnalysisPrompt tests ---
 
-func TestBuildTier2Prompt_BasicStructure(t *testing.T) {
+func TestBuildAnalysisPrompt_BasicStructure(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
-	prompt := poller.buildTier2Prompt("git summary", "bus summary", nil, nil, nil, nil)
+	poller := New(store, p, nil, nil)
+	gathered := &gatherResult{
+		result:     &PollResult{},
+		gitSummary: "git summary",
+		msgSummary: "bus summary",
+	}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
 
 	if !strings.Contains(prompt, "Project: test-project") {
 		t.Error("missing project name")
@@ -632,13 +634,13 @@ func TestBuildTier2Prompt_BasicStructure(t *testing.T) {
 	if !strings.Contains(prompt, "feature") {
 		t.Error("missing goal type")
 	}
-	if !strings.Contains(prompt, "Git Activity Summary") {
+	if !strings.Contains(prompt, "Git Activity") {
 		t.Error("missing git section")
 	}
 	if !strings.Contains(prompt, "git summary") {
 		t.Error("missing git summary content")
 	}
-	if !strings.Contains(prompt, "Bus Activity Summary") {
+	if !strings.Contains(prompt, "Message Bus Activity") {
 		t.Error("missing bus section")
 	}
 	if !strings.Contains(prompt, "bus summary") {
@@ -652,15 +654,16 @@ func TestBuildTier2Prompt_BasicStructure(t *testing.T) {
 	}
 }
 
-func TestBuildTier2Prompt_WithConcerns(t *testing.T) {
+func TestBuildAnalysisPrompt_WithConcerns(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	concerns := []db.Concern{
 		{Severity: "warning", Message: "Test concern", CreatedAt: "2025-01-01 00:00:00"},
 	}
-	prompt := poller.buildTier2Prompt("", "", concerns, nil, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, concerns, nil, nil)
 
 	if !strings.Contains(prompt, "[warning]") {
 		t.Error("missing concern severity")
@@ -670,11 +673,11 @@ func TestBuildTier2Prompt_WithConcerns(t *testing.T) {
 	}
 }
 
-func TestBuildTier2Prompt_WithTrackedItems(t *testing.T) {
+func TestBuildAnalysisPrompt_WithTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	items := []db.TrackedItem{
 		{
 			Owner:      "org",
@@ -685,7 +688,8 @@ func TestBuildTier2Prompt_WithTrackedItems(t *testing.T) {
 			LastStatus: "Open",
 		},
 	}
-	prompt := poller.buildTier2Prompt("", "", nil, items, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
 
 	if !strings.Contains(prompt, "Tracked Issues/PRs") {
 		t.Error("missing tracked items section")
@@ -701,11 +705,11 @@ func TestBuildTier2Prompt_WithTrackedItems(t *testing.T) {
 	}
 }
 
-func TestBuildTier2Prompt_WithAutopilotTags(t *testing.T) {
+func TestBuildAnalysisPrompt_WithAutopilotTags(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	items := []db.TrackedItem{
 		{Owner: "org", Repo: "repo", Number: 42, ItemType: "issue", Title: "Autopilot task", LastStatus: "InProg"},
 		{Owner: "org", Repo: "repo", Number: 43, ItemType: "issue", Title: "Manual task", LastStatus: "Open"},
@@ -713,7 +717,8 @@ func TestBuildTier2Prompt_WithAutopilotTags(t *testing.T) {
 	autopilotTasks := []db.AutopilotTask{
 		{Owner: "org", Repo: "repo", IssueNumber: 42, Status: "running"},
 	}
-	prompt := poller.buildTier2Prompt("", "", nil, items, nil, autopilotTasks)
+	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, autopilotTasks)
 
 	if !strings.Contains(prompt, "[autopilot:running]") {
 		t.Error("expected autopilot:running tag")
@@ -723,15 +728,16 @@ func TestBuildTier2Prompt_WithAutopilotTags(t *testing.T) {
 	}
 }
 
-func TestBuildTier2Prompt_WithCompletedItems(t *testing.T) {
+func TestBuildAnalysisPrompt_WithCompletedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	completed := []db.CompletedItem{
 		{Owner: "org", Repo: "repo", Number: 10, ItemType: "issue", Title: "Done task", FinalStatus: "Closd", Summary: "Task completed."},
 	}
-	prompt := poller.buildTier2Prompt("", "", nil, nil, completed, nil)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, completed, nil)
 
 	if !strings.Contains(prompt, "Recently Completed Work") {
 		t.Error("missing completed items section")
@@ -744,43 +750,46 @@ func TestBuildTier2Prompt_WithCompletedItems(t *testing.T) {
 	}
 }
 
-func TestBuildTier2Prompt_NoGitOrBus(t *testing.T) {
+func TestBuildAnalysisPrompt_NoGitOrBus(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
-	prompt := poller.buildTier2Prompt("", "", nil, nil, nil, nil)
+	poller := New(store, p, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
 
-	if strings.Contains(prompt, "Git Activity Summary") {
+	if strings.Contains(prompt, "Git Activity") {
 		t.Error("should not have git section when empty")
 	}
-	if strings.Contains(prompt, "Bus Activity Summary") {
+	if strings.Contains(prompt, "Message Bus Activity") {
 		t.Error("should not have bus section when empty")
 	}
 }
 
-func TestBuildTier2Prompt_NoConcerns(t *testing.T) {
+func TestBuildAnalysisPrompt_NoConcerns(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
-	prompt := poller.buildTier2Prompt("", "", nil, nil, nil, nil)
+	poller := New(store, p, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
 
 	if !strings.Contains(prompt, "No active concerns") {
 		t.Error("expected 'No active concerns' message")
 	}
 }
 
-func TestBuildTier2Prompt_AutopilotDepGraph(t *testing.T) {
+func TestBuildAnalysisPrompt_AutopilotDepGraph(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	poller.SetAutopilotDepGraphFunc(func() string {
 		return "## Autopilot Dependency Graph\n42 -> 43 -> 44"
 	})
 
-	prompt := poller.buildTier2Prompt("", "", nil, nil, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
 
 	if !strings.Contains(prompt, "Autopilot Dependency Graph") {
 		t.Error("expected dep graph in prompt")
@@ -790,11 +799,11 @@ func TestBuildTier2Prompt_AutopilotDepGraph(t *testing.T) {
 	}
 }
 
-func TestBuildTier2Prompt_WithPRDetails(t *testing.T) {
+func TestBuildAnalysisPrompt_WithPRDetails(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	items := []db.TrackedItem{
 		{
 			Owner:       "org",
@@ -808,7 +817,8 @@ func TestBuildTier2Prompt_WithPRDetails(t *testing.T) {
 			LastStatus:  "Draft",
 		},
 	}
-	prompt := poller.buildTier2Prompt("", "", nil, items, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
 
 	if !strings.Contains(prompt, "[PR]") {
 		t.Error("expected PR type tag")
@@ -824,78 +834,26 @@ func TestBuildTier2Prompt_WithPRDetails(t *testing.T) {
 // --- Tier 2 system prompt tests ---
 
 func TestTier2SystemPrompt_ContainsProjectName(t *testing.T) {
-	prompt := tier2SystemPrompt("my-project", "")
+	prompt := analysisSystemPrompt("my-project", "")
 	if !strings.Contains(prompt, "my-project") {
 		t.Error("expected project name in system prompt")
 	}
 }
 
 func TestTier2SystemPrompt_DefaultFocus(t *testing.T) {
-	prompt := tier2SystemPrompt("test", "")
+	prompt := analysisSystemPrompt("test", "")
 	if !strings.Contains(prompt, DefaultAnalyzerFocus) {
 		t.Error("expected default focus when none specified")
 	}
 }
 
 func TestTier2SystemPrompt_CustomFocus(t *testing.T) {
-	prompt := tier2SystemPrompt("test", "Focus on security")
+	prompt := analysisSystemPrompt("test", "Focus on security")
 	if !strings.Contains(prompt, "Focus on security") {
 		t.Error("expected custom focus in prompt")
 	}
 	if strings.Contains(prompt, DefaultAnalyzerFocus) {
 		t.Error("expected default focus to be replaced")
-	}
-}
-
-// --- Tier 1 prompt builders ---
-
-func TestBuildGitSummaryPrompt(t *testing.T) {
-	project := &db.Project{Name: "test-project"}
-	repos := []db.Repo{
-		{ShortName: "repo-a"},
-		{ShortName: "repo-b"},
-	}
-	gitActivity := "### repo-a (5 new commits)\n- abc1234: fix stuff (alice)\n"
-
-	prompt := buildGitSummaryPrompt(project, repos, gitActivity)
-	if !strings.Contains(prompt, "test-project") {
-		t.Error("missing project name")
-	}
-	if !strings.Contains(prompt, "Repos:**") || !strings.Contains(prompt, "2") {
-		t.Error("missing repo count")
-	}
-	if !strings.Contains(prompt, "abc1234") {
-		t.Error("missing git activity")
-	}
-}
-
-func TestBuildBusSummaryPrompt(t *testing.T) {
-	project := &db.Project{Name: "test-project"}
-	msgActivity := "### Recent Messages\n- (5m ago) [proj/coord] alice: hello\n"
-
-	prompt := buildBusSummaryPrompt(project, msgActivity)
-	if !strings.Contains(prompt, "test-project") {
-		t.Error("missing project name")
-	}
-	if !strings.Contains(prompt, "Message Bus Activity") {
-		t.Error("missing bus activity header")
-	}
-	if !strings.Contains(prompt, "alice: hello") {
-		t.Error("missing message content")
-	}
-}
-
-func TestGitSummarizerSystemPrompt(t *testing.T) {
-	prompt := gitSummarizerSystemPrompt()
-	if !strings.Contains(prompt, "git activity summarizer") {
-		t.Error("unexpected system prompt content")
-	}
-}
-
-func TestBusSummarizerSystemPrompt(t *testing.T) {
-	prompt := busSummarizerSystemPrompt()
-	if !strings.Contains(prompt, "message bus summarizer") {
-		t.Error("unexpected system prompt content")
 	}
 }
 
@@ -905,7 +863,7 @@ func TestBroadcast_NilPublisher(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	_, err := poller.Broadcast(context.Background(), "test message")
 
 	if err == nil {
@@ -921,12 +879,12 @@ func TestBroadcast_LLMFailure(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name: "analyzer",
-		err:  fmt.Errorf("API rate limit exceeded"),
+	analyzer := &mockCompleter{
+
+		err: fmt.Errorf("API rate limit exceeded"),
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, err := poller.Broadcast(context.Background(), "test message")
 
 	if err == nil {
@@ -942,12 +900,12 @@ func TestBroadcast_SuccessWithBusMessage(t *testing.T) {
 	p := createTestProject(t, store)
 	msgConn, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"Broadcasting update","bus_message":{"topic":"test-project/coord","message":"All agents: please focus on testing"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "tell agents to focus on testing")
 
 	if err != nil {
@@ -984,12 +942,12 @@ func TestBroadcast_FallbackBareJSON(t *testing.T) {
 	_, pub := openTestMsgDB(t)
 
 	// Return a bare BusMessage (not wrapped in AnalysisResponse).
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"topic":"test-project/coord","message":"Direct message"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "send a direct message")
 
 	if err != nil {
@@ -1008,12 +966,12 @@ func TestBroadcast_FallbackFencedBareJSON(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: "```json\n{\"topic\":\"test-project/coord\",\"message\":\"Fenced direct\"}\n```",
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "send a fenced message")
 
 	if err != nil {
@@ -1029,12 +987,12 @@ func TestBroadcast_NonPublishableResponse(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: "I'm not sure what to say.",
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, err := poller.Broadcast(context.Background(), "something vague")
 
 	if err == nil {
@@ -1055,12 +1013,12 @@ func TestBroadcast_GathersContext(t *testing.T) {
 	_ = store.AddConcern(&db.Concern{ProjectID: p.ID, Severity: "warning", Message: "Low coverage"})
 
 	var capturedPrompt string
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"topic":"test-project/coord","message":"context check"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, _ = poller.Broadcast(context.Background(), "check context")
 
 	// Can't directly check the prompt since mockProvider doesn't capture it,
@@ -1076,12 +1034,12 @@ func TestBroadcast_EmitsEvent(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"ok","bus_message":{"topic":"test-project/coord","message":"update"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, _ = poller.Broadcast(context.Background(), "emit test")
 
 	// Drain events looking for broadcast event.
@@ -1110,7 +1068,7 @@ func TestOnboard_NilPublisher(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	_, err := poller.Onboard(context.Background(), "focus on testing")
 
 	if err == nil {
@@ -1126,12 +1084,12 @@ func TestOnboard_LLMFailure(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name: "analyzer",
-		err:  fmt.Errorf("service unavailable"),
+	analyzer := &mockCompleter{
+
+		err: fmt.Errorf("service unavailable"),
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, err := poller.Onboard(context.Background(), "")
 
 	if err == nil {
@@ -1147,12 +1105,12 @@ func TestOnboard_Success(t *testing.T) {
 	p := createTestProject(t, store)
 	msgConn, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"onboarding","bus_message":{"topic":"test-project/onboarding","message":"Welcome to the project!"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "")
 
 	if err != nil {
@@ -1178,12 +1136,12 @@ func TestOnboard_ReplaceSemantics(t *testing.T) {
 	p := createTestProject(t, store)
 	msgConn, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"v1","bus_message":{"topic":"test-project/onboarding","message":"Version 1"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 
 	// First onboard.
 	_, err := poller.Onboard(context.Background(), "")
@@ -1218,12 +1176,12 @@ func TestOnboard_WithUserGuidance(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"topic":"test-project/onboarding","message":"Focused on testing"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "focus on test coverage")
 
 	if err != nil {
@@ -1239,12 +1197,12 @@ func TestOnboard_NonPublishableResponse(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: "Here's an onboarding message without JSON structure.",
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, err := poller.Onboard(context.Background(), "")
 
 	if err == nil {
@@ -1261,7 +1219,7 @@ func TestPostUserMessage_NilPublisher(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	poller := New(store, p, nil, nil, nil)
+	poller := New(store, p, nil, nil)
 	err := poller.PostUserMessage(context.Background(), "hello")
 
 	if err == nil {
@@ -1277,7 +1235,7 @@ func TestPostUserMessage_Success(t *testing.T) {
 	p := createTestProject(t, store)
 	msgConn, pub := openTestMsgDB(t)
 
-	poller := New(store, p, nil, nil, pub)
+	poller := New(store, p, nil, pub)
 	err := poller.PostUserMessage(context.Background(), "hello from user")
 
 	if err != nil {
@@ -1308,7 +1266,7 @@ func TestPostUserMessage_EmitsEvent(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	poller := New(store, p, nil, nil, pub)
+	poller := New(store, p, nil, pub)
 	_ = poller.PostUserMessage(context.Background(), "test")
 
 	select {
@@ -1359,28 +1317,28 @@ func TestParseJSON_EmptyObject(t *testing.T) {
 	}
 }
 
-// --- Poller.Project and AnalyzerProvider ---
+// --- Poller.Project and Completer ---
 
 func TestPoller_Project(t *testing.T) {
 	proj := &db.Project{Name: "my-proj"}
-	p := New(nil, proj, nil, nil, nil)
+	p := New(nil, proj, nil, nil)
 	if p.Project().Name != "my-proj" {
 		t.Errorf("Project().Name = %q", p.Project().Name)
 	}
 }
 
-func TestPoller_AnalyzerProvider(t *testing.T) {
-	analyzer := &mockProvider{name: "sonnet"}
-	p := New(nil, &db.Project{}, nil, analyzer, nil)
-	if p.AnalyzerProvider().Name() != "sonnet" {
-		t.Errorf("AnalyzerProvider().Name() = %q", p.AnalyzerProvider().Name())
+func TestPoller_Completer(t *testing.T) {
+	completer := &mockCompleter{}
+	p := New(nil, &db.Project{}, completer, nil)
+	if p.Completer() != completer {
+		t.Error("Completer() should return the completer")
 	}
 }
 
 // --- SetStatusInterval tests ---
 
 func TestPoller_SetStatusInterval(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 
 	p.SetStatusInterval(10 * time.Second)
 
@@ -1483,7 +1441,7 @@ func TestParseAnalysis_Corpus(t *testing.T) {
 
 func TestPoller_StopNilCancel(t *testing.T) {
 	// Stop should not panic when cancel is nil (poller never started).
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	// Should not panic.
 	p.Stop()
 }
@@ -1494,10 +1452,9 @@ func TestPollNow_EmptyProject(t *testing.T) {
 	store := openTestDB(t)
 	proj := createTestProject(t, store)
 
-	summarizer := &mockProvider{name: "summarizer", response: "No activity."}
-	analyzer := &mockProvider{name: "analyzer", response: `{"analysis":"All quiet","concerns":[]}`}
+	analyzer := &mockCompleter{response: `{"analysis":"All quiet","concerns":[]}`}
 
-	poller := New(store, proj, summarizer, analyzer, nil)
+	poller := New(store, proj, analyzer, nil)
 	poller.PollNow(context.Background())
 
 	// Should get a "polling" event followed by a "poll" event.
@@ -1526,11 +1483,8 @@ func TestPollNow_EmptyProject(t *testing.T) {
 		t.Errorf("Tier1Summary = %q", pollResult.Tier1Summary)
 	}
 	// No LLM calls should have been made.
-	if summarizer.calls.Load() != 0 {
-		t.Errorf("summarizer calls = %d, want 0", summarizer.calls.Load())
-	}
 	if analyzer.calls.Load() != 0 {
-		t.Errorf("analyzer calls = %d, want 0", analyzer.calls.Load())
+		t.Errorf("completer calls = %d, want 0", analyzer.calls.Load())
 	}
 }
 
@@ -1538,7 +1492,7 @@ func TestStatusNow_EmptyProject(t *testing.T) {
 	store := openTestDB(t)
 	proj := createTestProject(t, store)
 
-	poller := New(store, proj, nil, nil, nil)
+	poller := New(store, proj, nil, nil)
 	poller.StatusNow(context.Background())
 
 	var pollResult *PollResult
@@ -1570,7 +1524,7 @@ func TestStatusNow_RecordsSummary(t *testing.T) {
 	store := openTestDB(t)
 	proj := createTestProject(t, store)
 
-	poller := New(store, proj, nil, nil, nil)
+	poller := New(store, proj, nil, nil)
 	poller.StatusNow(context.Background())
 
 	// Drain events.
@@ -1590,7 +1544,7 @@ func TestPollNow_EmitsPollingAndPollEvents(t *testing.T) {
 	store := openTestDB(t)
 	proj := createTestProject(t, store)
 
-	poller := New(store, proj, nil, nil, nil)
+	poller := New(store, proj, nil, nil)
 	poller.PollNow(context.Background())
 
 	events := make([]string, 0)
@@ -1621,7 +1575,7 @@ func TestRun_PausedSkipsPolling(t *testing.T) {
 	proj := createTestProject(t, store)
 	proj.StatusIntervalSec = 1 // 1 second for fast test.
 
-	poller := New(store, proj, nil, nil, nil)
+	poller := New(store, proj, nil, nil)
 
 	ctx := context.Background()
 	poller.Start(ctx)
@@ -1669,7 +1623,7 @@ func TestRun_StatusIntervalChange(t *testing.T) {
 	proj := createTestProject(t, store)
 	proj.StatusIntervalSec = 60 // 60 seconds initially (won't fire).
 
-	poller := New(store, proj, nil, nil, nil)
+	poller := New(store, proj, nil, nil)
 
 	ctx := context.Background()
 	poller.Start(ctx)
@@ -1712,7 +1666,7 @@ func TestPoller_StartStop(t *testing.T) {
 	// We need a poller that can start without actually polling (no repos, no bus).
 	// The run() loop does a StatusNow first which calls gatherActivity which
 	// touches the store. This should work with an empty project.
-	poller := New(store, proj, nil, nil, nil)
+	poller := New(store, proj, nil, nil)
 
 	ctx := context.Background()
 	poller.Start(ctx)
@@ -1784,7 +1738,7 @@ func TestReconcileConcerns_MultipleCycles(t *testing.T) {
 // --- Event time is set ---
 
 func TestEvent_TimeIsSet(t *testing.T) {
-	p := New(nil, &db.Project{Name: "test"}, nil, nil, nil)
+	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	before := time.Now()
 	p.emit("test", "msg", nil)
 	after := time.Now()
@@ -1932,12 +1886,12 @@ func TestBroadcast_WithRichContext(t *testing.T) {
 		Tier2Response: "5 commits across 2 repos, focus on auth module",
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"context test","bus_message":{"topic":"test-project/coord","message":"Context verified"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "verify context gathering")
 
 	if err != nil {
@@ -1964,12 +1918,12 @@ func TestOnboard_WithRichContext(t *testing.T) {
 		Tier2Response: "Recent progress on auth module",
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"onboarding","bus_message":{"topic":"test-project/onboarding","message":"Welcome! Project goal: Build a feature"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "mention the schema migration")
 
 	if err != nil {
@@ -2017,16 +1971,16 @@ func TestBroadcast_DefaultModel(t *testing.T) {
 
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"topic":"test-project/coord","message":"default model test"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, _ = poller.Broadcast(context.Background(), "test")
 
-	if analyzer.lastModel != "claude-sonnet-4-6" {
-		t.Errorf("model = %q, want %q", analyzer.lastModel, "claude-sonnet-4-6")
+	if analyzer.lastModel != "opus" {
+		t.Errorf("model = %q, want %q", analyzer.lastModel, "opus")
 	}
 }
 
@@ -2038,16 +1992,16 @@ func TestOnboard_DefaultModel(t *testing.T) {
 
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"topic":"test-project/onboarding","message":"default model test"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, _ = poller.Onboard(context.Background(), "")
 
-	if analyzer.lastModel != "claude-sonnet-4-6" {
-		t.Errorf("model = %q, want %q", analyzer.lastModel, "claude-sonnet-4-6")
+	if analyzer.lastModel != "opus" {
+		t.Errorf("model = %q, want %q", analyzer.lastModel, "opus")
 	}
 }
 
@@ -2058,12 +2012,12 @@ func TestOnboard_NoGuidance(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"general","bus_message":{"topic":"test-project/onboarding","message":"General onboarding"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "")
 
 	if err != nil {
@@ -2079,12 +2033,12 @@ func TestOnboard_WithWhitespaceGuidance(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"trimmed","bus_message":{"topic":"test-project/onboarding","message":"Guidance trimmed"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "   \n  ")
 
 	if err != nil {
@@ -2162,12 +2116,12 @@ func TestOnboard_FallbackBareJSON(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"topic":"test-project/onboarding","message":"Bare JSON onboard"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "")
 
 	if err != nil {
@@ -2188,12 +2142,12 @@ func TestOnboard_FallbackFencedBareJSON(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: "```json\n{\"topic\":\"test-project/onboarding\",\"message\":\"Fenced onboard\"}\n```",
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "")
 
 	if err != nil {
@@ -2214,12 +2168,12 @@ func TestBroadcast_UsesAnalyzerModel(t *testing.T) {
 
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"topic":"test-project/coord","message":"model routing test"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, _ = poller.Broadcast(context.Background(), "test")
 
 	if analyzer.lastModel != "claude-opus-4-6" {
@@ -2241,12 +2195,12 @@ func TestBroadcast_TruncatesLongPollResponse(t *testing.T) {
 		Tier2Response: longResp,
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"truncation test","bus_message":{"topic":"test-project/coord","message":"Checked"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "test truncation")
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
@@ -2363,16 +2317,11 @@ func TestDoPoll_WithBusActivity(t *testing.T) {
 	// Point AGENT_MSG_DB to our test DB.
 	t.Setenv("AGENT_MSG_DB", dbPath)
 
-	summarizer := &mockProvider{
-		name:     "summarizer",
-		response: "1 new bus message: other-agent completed their task",
-	}
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
 		response: `{"analysis":"other-agent completed their task","concerns":[{"severity":"info","message":"Task done"}]}`,
 	}
 
-	poller := New(store, p, summarizer, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	result, err := poller.doPoll(context.Background())
 	if err != nil {
 		t.Fatalf("doPoll: %v", err)
@@ -2383,16 +2332,12 @@ func TestDoPoll_WithBusActivity(t *testing.T) {
 		t.Error("expected bus messages to be detected")
 	}
 
-	// Verify tier 1 ran (bus summarizer).
-	if summarizer.calls.Load() == 0 {
-		// It's OK if tier 1 didn't run (depends on activity detection).
-		// But if messages were detected, tier 1 should run.
-		if result.NewMessages > 0 {
-			t.Error("expected bus summarizer to be called with bus activity")
-		}
+	// Verify analysis ran (now a single call instead of tier 1 + tier 2).
+	if result.NewMessages > 0 && analyzer.calls.Load() == 0 {
+		t.Error("expected completer to be called with bus activity")
 	}
 
-	// Verify tier 2 ran.
+	// Verify analysis produced output.
 	if result.Tier2Analysis == "" && result.NewMessages > 0 {
 		// Only check if there was activity to analyze.
 		t.Log("tier 2 analysis was empty despite bus activity")
@@ -2414,7 +2359,7 @@ func TestDoStatusPoll_WithNoActivity(t *testing.T) {
 	// Point AGENT_MSG_DB to a non-existent path so bus messages section is skipped.
 	t.Setenv("AGENT_MSG_DB", filepath.Join(t.TempDir(), "nonexistent.db"))
 
-	poller := New(store, p, &mockProvider{name: "sum"}, &mockProvider{name: "ana"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 	result, err := poller.doStatusPoll(context.Background())
 	if err != nil {
 		t.Fatalf("doStatusPoll: %v", err)
@@ -2435,21 +2380,17 @@ func TestDoPoll_NoActivity_SkipsLLM(t *testing.T) {
 
 	t.Setenv("AGENT_MSG_DB", filepath.Join(t.TempDir(), "nonexistent.db"))
 
-	summarizer := &mockProvider{name: "sum", response: "should not be called"}
-	analyzer := &mockProvider{name: "ana", response: "should not be called"}
+	completer := &mockCompleter{response: "should not be called"}
 
-	poller := New(store, p, summarizer, analyzer, nil)
+	poller := New(store, p, completer, nil)
 	result, err := poller.doPoll(context.Background())
 	if err != nil {
 		t.Fatalf("doPoll: %v", err)
 	}
 
 	// No activity means LLM calls should be skipped.
-	if summarizer.calls.Load() != 0 {
-		t.Error("summarizer should not be called with no activity")
-	}
-	if analyzer.calls.Load() != 0 {
-		t.Error("analyzer should not be called with no activity")
+	if completer.calls.Load() != 0 {
+		t.Error("completer should not be called with no activity")
 	}
 	if result.Tier1Summary != "No new activity." {
 		t.Errorf("Tier1Summary = %q", result.Tier1Summary)
@@ -2478,8 +2419,8 @@ func TestBulkAddTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	analyzer := &mockProvider{name: "mock"}
-	poller := New(store, p, nil, analyzer, nil)
+	analyzer := &mockCompleter{}
+	poller := New(store, p, analyzer, nil)
 
 	items := []ghpkg.ItemStatus{
 		{Number: 1, Title: "Issue 1", State: "open", ItemType: "issue", Labels: []string{"bug"}},
@@ -2518,8 +2459,8 @@ func TestBulkAddTrackedItems_NoneAdded(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	analyzer := &mockProvider{name: "mock"}
-	poller := New(store, p, nil, analyzer, nil)
+	analyzer := &mockCompleter{}
+	poller := New(store, p, analyzer, nil)
 
 	// Empty list — no items to add.
 	added, err := poller.BulkAddTrackedItems(context.Background(), nil, "owner", "repo")
@@ -2537,8 +2478,8 @@ func TestClearAndBulkAddTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	analyzer := &mockProvider{name: "mock"}
-	poller := New(store, p, nil, analyzer, nil)
+	analyzer := &mockCompleter{}
+	poller := New(store, p, analyzer, nil)
 
 	// First add some items.
 	items1 := []ghpkg.ItemStatus{
@@ -2574,8 +2515,8 @@ func TestUpdateTrackedItems(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	analyzer := &mockProvider{name: "mock"}
-	poller := New(store, p, nil, analyzer, nil)
+	analyzer := &mockCompleter{}
+	poller := New(store, p, analyzer, nil)
 
 	items := []ghpkg.ItemStatus{
 		{Number: 5, Title: "Test Issue", State: "open", ItemType: "issue"},
@@ -2595,8 +2536,8 @@ func TestRemoveTrackedItemByRef(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
-	analyzer := &mockProvider{name: "mock"}
-	poller := New(store, p, nil, analyzer, nil)
+	analyzer := &mockCompleter{}
+	poller := New(store, p, analyzer, nil)
 
 	// Add an item first.
 	_ = store.AddTrackedItem(&db.TrackedItem{
@@ -2638,15 +2579,15 @@ func TestRemoveTrackedItemByRef(t *testing.T) {
 func TestPollerAccessors(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	analyzer := &mockProvider{name: "analyzer-model"}
+	analyzer := &mockCompleter{}
 
-	poller := New(store, p, nil, analyzer, nil)
+	poller := New(store, p, analyzer, nil)
 
 	if poller.Project() != p {
 		t.Error("Project() should return the same project")
 	}
-	if poller.AnalyzerProvider() != analyzer {
-		t.Error("AnalyzerProvider() should return the analyzer provider")
+	if poller.Completer() != analyzer {
+		t.Error("Completer() should return the completer")
 	}
 	// Events() returns a read-only channel.
 	ch := poller.Events()
@@ -2660,7 +2601,7 @@ func TestPollerAccessors(t *testing.T) {
 func TestSetStatusInterval(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	poller := New(store, p, nil, &mockProvider{name: "mock"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 
 	poller.SetStatusInterval(5 * time.Minute)
 
@@ -2674,7 +2615,7 @@ func TestSetStatusInterval(t *testing.T) {
 func TestSummarize_WithWorktrees(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	poller := New(store, p, nil, &mockProvider{name: "mock"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 
 	result := &PollResult{NewWorktrees: 3}
 	s := poller.summarize(result)
@@ -2686,7 +2627,7 @@ func TestSummarize_WithWorktrees(t *testing.T) {
 func TestSummarize_WithTrackedItemChanges(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	poller := New(store, p, nil, &mockProvider{name: "mock"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 
 	result := &PollResult{
 		TrackedItemChanges: []TrackedItemChange{{Ref: "o/r#1", OldStatus: "open", NewStatus: "closed"}},
@@ -2700,7 +2641,7 @@ func TestSummarize_WithTrackedItemChanges(t *testing.T) {
 func TestSummarize_WithBusMessage(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	poller := New(store, p, nil, &mockProvider{name: "mock"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 
 	result := &PollResult{BusMessageSent: "[topic] hello"}
 	s := poller.summarize(result)
@@ -2714,7 +2655,7 @@ func TestSummarize_WithBusMessage(t *testing.T) {
 func TestSweepTrackedItems_EmptyList(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	poller := New(store, p, &mockProvider{name: "sum"}, &mockProvider{name: "ana"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 
 	results, summary := poller.sweepTrackedItems(context.Background(), nil, nil, nil)
 	if len(results) != 0 {
@@ -2785,7 +2726,7 @@ func TestBuildItemSweepPrompt_TruncatesLongComment(t *testing.T) {
 func TestIsPaused(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	poller := New(store, p, nil, &mockProvider{name: "mock"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 
 	if poller.IsPaused() {
 		t.Error("should not be paused initially")
@@ -2843,12 +2784,12 @@ func TestOnboard_TruncatesLongPollResponse(t *testing.T) {
 		Tier2Response: longResp,
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"truncation test","bus_message":{"topic":"test-project/onboarding","message":"Truncated"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "")
 	if err != nil {
 		t.Fatalf("Onboard: %v", err)
@@ -2872,12 +2813,12 @@ func TestBroadcast_WithConcernsContext(t *testing.T) {
 		Message:   "Schema drift detected",
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"broadcast with concerns","bus_message":{"topic":"test-project/coord","message":"Watch schema drift"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "Tell everyone about schema drift")
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
@@ -2910,12 +2851,12 @@ func TestOnboard_WithTopicsAndConcerns(t *testing.T) {
 		Message:   "New agent joined",
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"rich onboard","bus_message":{"topic":"test-project/onboarding","message":"Welcome"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "Focus on testing")
 	if err != nil {
 		t.Fatalf("Onboard: %v", err)
@@ -2942,12 +2883,12 @@ func TestBroadcast_WithReposContext(t *testing.T) {
 		ShortName: "test-repo",
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"repo context","bus_message":{"topic":"test-project/coord","message":"With repos"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "Update")
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)
@@ -2971,12 +2912,12 @@ func TestOnboard_WithReposContext(t *testing.T) {
 		ShortName: "onboard-repo",
 	})
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"repo onboard","bus_message":{"topic":"test-project/onboarding","message":"With repos"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Onboard(context.Background(), "")
 	if err != nil {
 		t.Fatalf("Onboard: %v", err)
@@ -3047,12 +2988,12 @@ func TestBroadcast_AnalysisWithNoBusMessage(t *testing.T) {
 	_, pub := openTestMsgDB(t)
 
 	// Response that's valid analysis JSON but has no bus_message and no bare topic/message.
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"All is well"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, err := poller.Broadcast(context.Background(), "Send update")
 	if err == nil {
 		t.Error("expected error when no publishable message")
@@ -3069,12 +3010,12 @@ func TestOnboard_AnalysisWithNoBusMessage(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"Welcome to the project"}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	_, err := poller.Onboard(context.Background(), "")
 	if err == nil {
 		t.Error("expected error when no publishable message")
@@ -3213,7 +3154,7 @@ func TestContextBudgetConstants(t *testing.T) {
 func TestRecordPollResult_WithBusMessage(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	poller := New(store, p, nil, &mockProvider{name: "mock"}, nil)
+	poller := New(store, p, &mockCompleter{}, nil)
 
 	result := &PollResult{
 		NewCommits:     3,
@@ -3249,12 +3190,12 @@ func TestBroadcast_EmitsBroadcastEvent(t *testing.T) {
 	p := createTestProject(t, store)
 	_, pub := openTestMsgDB(t)
 
-	analyzer := &mockProvider{
-		name:     "analyzer",
+	analyzer := &mockCompleter{
+
 		response: `{"analysis":"event test","bus_message":{"topic":"test-project/coord","message":"Test event"}}`,
 	}
 
-	poller := New(store, p, nil, analyzer, pub)
+	poller := New(store, p, analyzer, pub)
 	msg, err := poller.Broadcast(context.Background(), "Test")
 	if err != nil {
 		t.Fatalf("Broadcast: %v", err)

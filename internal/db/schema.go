@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 17
+const currentVersion = 18
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -288,6 +288,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 17 {
 		if err := migrateV17(db); err != nil {
 			return fmt.Errorf("apply migration v17: %w", err)
+		}
+	}
+
+	if version < 18 {
+		if err := migrateV18(db); err != nil {
+			return fmt.Errorf("apply migration v18: %w", err)
 		}
 	}
 
@@ -592,6 +598,13 @@ func migrateV17(db *sqlx.DB) error {
 		return fmt.Errorf("null-fill cost_usd: %w", err)
 	}
 	return nil
+}
+
+// migrateV18 clears deprecated LLM provider columns now that all LLM calls
+// go through the Claude Code CLI. Columns are kept for rollback safety.
+func migrateV18(db *sqlx.DB) error {
+	_, err := db.Exec(`UPDATE projects SET llm_provider = '', llm_model = '' WHERE llm_provider != '' OR llm_model != ''`)
+	return err
 }
 
 // DefaultDBPath returns the agent-minder database path, respecting MINDER_DB env var.

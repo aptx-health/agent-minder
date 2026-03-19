@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
-	"github.com/dustinlange/agent-minder/internal/llm"
 )
 
 // SweepResult holds the outcome of sweeping a single tracked item.
@@ -185,9 +185,9 @@ func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, 
 		return nil, ""
 	}
 
-	haikuModel := p.project.LLMSummarizerModel
-	if haikuModel == "" {
-		haikuModel = p.project.LLMModel
+	sweepModel := p.project.LLMSummarizerModel
+	if sweepModel == "" {
+		sweepModel = "haiku"
 	}
 
 	results := make([]SweepResult, len(items))
@@ -200,7 +200,7 @@ func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, 
 			defer wg.Done()
 			sem <- struct{}{}        // acquire
 			defer func() { <-sem }() // release
-			results[idx] = p.sweepOneItem(ctx, &items[idx], gh, haikuModel, repos)
+			results[idx] = p.sweepOneItem(ctx, &items[idx], gh, sweepModel, repos)
 		}(i)
 	}
 	wg.Wait()
@@ -229,7 +229,7 @@ func (p *Poller) sweepTrackedItems(ctx context.Context, items []db.TrackedItem, 
 }
 
 // sweepOneItem handles a single tracked item: fetch metadata, fetch content, git cross-ref, hash check, optional Haiku call.
-func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghpkg.Client, haikuModel string, repos []db.Repo) SweepResult {
+func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghpkg.Client, sweepModel string, repos []db.Repo) SweepResult {
 	result := SweepResult{Item: item, OldStatus: item.LastStatus}
 
 	// Step 1: Fetch metadata (status, title, labels).
@@ -294,29 +294,31 @@ func (p *Poller) sweepOneItem(ctx context.Context, item *db.TrackedItem, gh *ghp
 	// Step 3: Compute content hash (includes related commits so new commits invalidate cache).
 	newHash := computeContentHash(item.State, item.Labels, content.Body, content.Comments, commitHashes, item.IsDraft, item.ReviewState)
 
-	// Step 4: Hash comparison — only run Haiku if content changed or no cached hash.
+	// Step 4: Hash comparison — only run summarizer if content changed or no cached hash.
 	if newHash != item.ContentHash || item.ContentHash == "" {
-		// Run Haiku summarizer.
+		// Run summarizer via claude CLI.
 		prompt := buildItemSweepPrompt(item, content, relatedCommits)
 		sys := itemSweepSystemPrompt()
-		debugLog("llm call", "stage", "sweep", "step", "input", "component", "sweep_haiku", "model", haikuModel, "item", item.DisplayRef(),
+		sweepSchema := `{"type":"object","properties":{"objective":{"type":"string"},"progress":{"type":"string"}},"required":["objective","progress"]}`
+		debugLog("llm call", "stage", "sweep", "step", "input", "component", "sweep_haiku", "model", sweepModel, "item", item.DisplayRef(),
 			"system_prompt", sys, "user_prompt", prompt,
 			"est_system_tokens", estimateTokens(sys), "est_user_tokens", estimateTokens(prompt))
-		resp, err := p.summarizerProvider.Complete(ctx, &llm.Request{
-			Model:     haikuModel,
-			System:    sys,
-			Messages:  []llm.Message{{Role: "user", Content: prompt}},
-			MaxTokens: 256,
+		resp, err := p.completer.Complete(ctx, &claudecli.Request{
+			SystemPrompt: sys,
+			Prompt:       prompt,
+			Model:        sweepModel,
+			JSONSchema:   sweepSchema,
+			DisableTools: true,
 		})
 		if err != nil {
-			// Haiku failed — still update hash to prevent retry loop on same content.
-			result.Error = fmt.Errorf("haiku sweep %s: %w", item.DisplayRef(), err)
-			p.emit("error", fmt.Sprintf("haiku sweep for %s: %v", item.DisplayRef(), err), nil)
+			// Summarizer failed — still update hash to prevent retry loop on same content.
+			result.Error = fmt.Errorf("sweep %s: %w", item.DisplayRef(), err)
+			p.emit("error", fmt.Sprintf("sweep for %s: %v", item.DisplayRef(), err), nil)
 			item.ContentHash = newHash
 		} else {
-			debugLog("llm response", "stage", "sweep", "step", "output", "component", "sweep_haiku", "item", item.DisplayRef(), "response", resp.Content, "input_tokens", resp.InputToks, "output_tokens", resp.OutputToks)
+			debugLog("llm response", "stage", "sweep", "step", "output", "component", "sweep_haiku", "item", item.DisplayRef(), "response", resp.Content(), "input_tokens", resp.InputTokens, "output_tokens", resp.OutputTokens)
 			result.HaikuRan = true
-			parsed := parseItemSweep(resp.Content)
+			parsed := parseItemSweep(resp.Content())
 			if parsed != nil {
 				item.ObjectiveSummary = parsed.Objective
 				item.ProgressSummary = parsed.Progress

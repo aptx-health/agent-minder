@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
-	"github.com/dustinlange/agent-minder/internal/llm"
 	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
@@ -95,13 +95,13 @@ type slotState struct {
 
 // Supervisor manages concurrent autopilot agents working on GitHub issues.
 type Supervisor struct {
-	store    *db.Store
-	project  *db.Project
-	provider llm.Provider
-	repoDir  string // primary repo for worktree operations
-	owner    string
-	repo     string
-	ghToken  string
+	store     *db.Store
+	project   *db.Project
+	completer claudecli.Completer
+	repoDir   string // primary repo for worktree operations
+	owner     string
+	repo      string
+	ghToken   string
 
 	mu         sync.Mutex
 	slots      []*slotState // len == maxAgents; nil = idle
@@ -116,7 +116,7 @@ type Supervisor struct {
 }
 
 // New creates a new Supervisor.
-func New(store *db.Store, project *db.Project, provider llm.Provider, repoDir, owner, repo, ghToken string) *Supervisor {
+func New(store *db.Store, project *db.Project, completer claudecli.Completer, repoDir, owner, repo, ghToken string) *Supervisor {
 	maxAgents := project.AutopilotMaxAgents
 	if maxAgents < 1 {
 		maxAgents = 3
@@ -124,7 +124,7 @@ func New(store *db.Store, project *db.Project, provider llm.Provider, repoDir, o
 	return &Supervisor{
 		store:     store,
 		project:   project,
-		provider:  provider,
+		completer: completer,
 		repoDir:   repoDir,
 		owner:     owner,
 		repo:      repo,
@@ -1205,24 +1205,31 @@ Example response (where #99 is a manual task):
   {"name": "Maximum parallelism", "rationale": "All agent issues can start independently.", "graph": {"99": "manual", "42": [], "38": [], "15": []}}
 ]`, issueList.String(), guidanceSection)
 
-	messages := []llm.Message{{Role: "user", Content: prompt}}
+	depModel := s.project.LLMAnalyzerModel
+	if depModel == "" {
+		depModel = "opus"
+	}
 
 	var options []DepOption
-	var content string
 
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := s.provider.Complete(ctx, &llm.Request{
-			Model:       s.project.LLMAnalyzerModel,
-			System:      "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
-			Messages:    messages,
-			MaxTokens:   1536,
-			Temperature: 0,
+		promptText := prompt
+		if attempt > 0 {
+			// Retry with error feedback appended.
+			promptText = prompt + "\n\nYour previous response was not valid JSON. Please respond with ONLY the JSON array of 3 options, no text before or after."
+		}
+
+		resp, err := s.completer.Complete(ctx, &claudecli.Request{
+			SystemPrompt: "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
+			Prompt:       promptText,
+			Model:        depModel,
+			DisableTools: true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("LLM call: %w", err)
 		}
 
-		content = strings.TrimSpace(resp.Content)
+		content := strings.TrimSpace(resp.Content())
 		// Strip markdown fencing if present.
 		if strings.HasPrefix(content, "```") {
 			lines := strings.Split(content, "\n")
@@ -1245,10 +1252,6 @@ Example response (where #99 is a manual task):
 
 		if err := json.Unmarshal([]byte(content), &rawOptions); err != nil {
 			if attempt == 0 {
-				messages = append(messages,
-					llm.Message{Role: "assistant", Content: resp.Content},
-					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON array: %v\n\nPlease respond with ONLY the JSON array of 3 options, no text before or after.", err)},
-				)
 				continue
 			}
 			return nil, fmt.Errorf("parse dep options: %w", err)
@@ -2135,24 +2138,31 @@ Example response (where #99 is a manual task):
 ]`)
 
 	prompt := strings.Join(promptParts, "\n\n")
-	messages := []llm.Message{{Role: "user", Content: prompt}}
+
+	depModel := s.project.LLMAnalyzerModel
+	if depModel == "" {
+		depModel = "opus"
+	}
 
 	var options []DepOption
-	var content string
 
 	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := s.provider.Complete(ctx, &llm.Request{
-			Model:       s.project.LLMAnalyzerModel,
-			System:      "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
-			Messages:    messages,
-			MaxTokens:   1536,
-			Temperature: 0,
+		promptText := prompt
+		if attempt > 0 {
+			promptText = prompt + "\n\nYour previous response was not valid JSON. Please respond with ONLY the JSON array of 3 options, no text before or after."
+		}
+
+		resp, err := s.completer.Complete(ctx, &claudecli.Request{
+			SystemPrompt: "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation or preamble.",
+			Prompt:       promptText,
+			Model:        depModel,
+			DisableTools: true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("LLM call: %w", err)
 		}
 
-		content = strings.TrimSpace(resp.Content)
+		content := strings.TrimSpace(resp.Content())
 		// Strip markdown fencing if present.
 		if strings.HasPrefix(content, "```") {
 			lines := strings.Split(content, "\n")
@@ -2175,10 +2185,6 @@ Example response (where #99 is a manual task):
 
 		if err := json.Unmarshal([]byte(content), &rawOptions); err != nil {
 			if attempt == 0 {
-				messages = append(messages,
-					llm.Message{Role: "assistant", Content: resp.Content},
-					llm.Message{Role: "user", Content: fmt.Sprintf("That was not valid JSON array: %v\n\nPlease respond with ONLY the JSON array of 3 options, no text before or after.", err)},
-				)
 				continue
 			}
 			return nil, fmt.Errorf("parse dep options: %w", err)
