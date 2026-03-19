@@ -1565,11 +1565,19 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		// Remove in-progress label since the agent is done.
 		ghClient := ghpkg.NewClient(s.ghToken)
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
+		// If a PR was found despite failure, also add needs-review label.
+		if task.PRNumber > 0 {
+			_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+		}
 		// Reload task to get failure_reason populated by inspectOutcome.
 		if updated, err := s.store.GetAutopilotTasks(s.project.ID); err == nil {
 			for _, t := range updated {
 				if t.ID == task.ID {
-					s.emitEvent("failed", fmt.Sprintf("Agent failed on #%d (%s)", task.IssueNumber, t.FailureReason), task)
+					msg := fmt.Sprintf("Agent failed on #%d (%s)", task.IssueNumber, t.FailureReason)
+					if task.PRNumber > 0 {
+						msg += fmt.Sprintf(" — PR #%d found", task.PRNumber)
+					}
+					s.emitEvent("failed", msg, task)
 					break
 				}
 			}
@@ -1578,8 +1586,8 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
 	}
 
-	// Cleanup: remove worktree, delete branch if bailed or failed.
-	s.cleanup(task, status == "bailed" || status == "failed")
+	// Cleanup: remove worktree, delete branch if bailed or failed (but keep branch if PR exists).
+	s.cleanup(task, (status == "bailed" || status == "failed") && task.PRNumber == 0)
 }
 
 // checkReviewTasks checks if any tasks in "review" status have had their PRs merged.
@@ -1708,6 +1716,17 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
 			debugLog("inspectOutcome: classified as failed",
 				"issue", task.IssueNumber, "reason", reason)
+
+			// Check for PR even on failure — agent may have opened one before exhausting limits.
+			ghClient := ghpkg.NewClient(s.ghToken)
+			pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
+			if err == nil && pr != nil && pr.Number > 0 {
+				_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
+				task.PRNumber = pr.Number // Update in memory so caller sees it.
+				debugLog("inspectOutcome: failed task has PR",
+					"issue", task.IssueNumber, "pr", pr.Number)
+			}
+
 			return "failed"
 		}
 		if status == "warning" {

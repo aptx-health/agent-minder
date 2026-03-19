@@ -516,6 +516,10 @@ func (m *Model) rebuildAutopilotTaskContent() {
 			if t.PRNumber > 0 {
 				extra = fmt.Sprintf("PR #%d", t.PRNumber)
 			}
+		case "failed":
+			if t.PRNumber > 0 {
+				extra = fmt.Sprintf("w/PR #%d", t.PRNumber)
+			}
 		case "running":
 			if t.StartedAt != "" {
 				if started, err := time.Parse(time.RFC3339, t.StartedAt); err == nil {
@@ -643,9 +647,14 @@ func (m Model) renderTaskDetail() string {
 		b.WriteString("\n")
 	}
 
-	// PR number.
+	// PR number (with URL if owner/repo available).
 	if task.PRNumber > 0 {
-		b.WriteString(broadcastStyle().Render(fmt.Sprintf("  PR #%d", task.PRNumber)))
+		if task.Owner != "" && task.Repo != "" {
+			prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", task.Owner, task.Repo, task.PRNumber)
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  PR #%d (%s)", task.PRNumber, prURL)))
+		} else {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  PR #%d", task.PRNumber)))
+		}
 		b.WriteString("\n")
 	}
 
