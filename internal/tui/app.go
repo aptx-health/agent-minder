@@ -1013,6 +1013,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "r":
 			return m.confirmResumeTask()
+		case "b":
+			return m.confirmBumpAndResumeTask()
 		case "f":
 			return m.confirmRestartTask()
 		case "n", "esc":
@@ -1148,6 +1150,14 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, cmd
 	case "b":
+		// On autopilot tab, 'b' bumps limits for queued/failed/stopped tasks.
+		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
+			task := m.selectedAutopilotTask()
+			if task != nil && (task.Status == "queued" || task.Status == "failed" || task.Status == "stopped" || task.Status == "blocked") {
+				return m.bumpTaskLimits()
+			}
+			return m, nil
+		}
 		repos := m.poller.GitHubRepos()
 		if len(repos) == 0 {
 			m.trackStatus = "No GitHub repos enrolled"
@@ -2265,6 +2275,80 @@ func (m Model) confirmResumeTask() (tea.Model, tea.Cmd) {
 			Time:    time.Now(),
 			Type:    "started",
 			Summary: fmt.Sprintf("Resumed #%d in existing worktree", issueNum),
+		})
+	}
+}
+
+// confirmBumpAndResumeTask bumps the task limits by 1.5x, then resumes in existing worktree.
+func (m Model) confirmBumpAndResumeTask() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil || (task.Status != "failed" && task.Status != "stopped") {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+	m.autopilotMode = "running"
+
+	return m, func() tea.Msg {
+		newTurns, newBudget, err := sup.BumpTaskLimits(taskID)
+		if err != nil {
+			return autopilotEventMsg(autopilot.Event{
+				Time:    time.Now(),
+				Type:    "error",
+				Summary: fmt.Sprintf("Failed to bump limits for #%d: %v", issueNum, err),
+			})
+		}
+		if err := sup.ResumeTask(context.Background(), taskID); err != nil {
+			return autopilotEventMsg(autopilot.Event{
+				Time:    time.Now(),
+				Type:    "error",
+				Summary: fmt.Sprintf("Bumped limits but failed to resume #%d: %v", issueNum, err),
+			})
+		}
+		return autopilotEventMsg(autopilot.Event{
+			Time:    time.Now(),
+			Type:    "started",
+			Summary: fmt.Sprintf("Resumed #%d with bumped limits (%d turns, $%.2f)", issueNum, newTurns, newBudget),
+		})
+	}
+}
+
+// bumpTaskLimits bumps the limits for a queued/failed/stopped/blocked task by 1.5x.
+func (m Model) bumpTaskLimits() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil {
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+
+	return m, func() tea.Msg {
+		newTurns, newBudget, err := sup.BumpTaskLimits(taskID)
+		if err != nil {
+			return autopilotEventMsg(autopilot.Event{
+				Time:    time.Now(),
+				Type:    "error",
+				Summary: fmt.Sprintf("Failed to bump limits for #%d: %v", issueNum, err),
+			})
+		}
+		return autopilotEventMsg(autopilot.Event{
+			Time:    time.Now(),
+			Type:    "info",
+			Summary: fmt.Sprintf("Bumped #%d limits to %d turns, $%.2f", issueNum, newTurns, newBudget),
 		})
 	}
 }

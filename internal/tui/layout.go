@@ -596,6 +596,14 @@ func (m Model) renderTaskDetail() string {
 	fmt.Fprintf(&b, "  Status: %s%s", m.taskStatusDisplay(task.Status), taskFailureReasonSuffix(*task))
 	b.WriteString("\n")
 
+	// Resource limits (show effective limits; highlight if overridden).
+	effectiveTurns := task.EffectiveMaxTurns(m.project.AutopilotMaxTurns)
+	effectiveBudget := task.EffectiveMaxBudget(m.project.AutopilotMaxBudgetUSD)
+	if task.HasOverrides() {
+		b.WriteString(broadcastStyle().Render(fmt.Sprintf("  Limits: %d turns, $%.2f (custom)", effectiveTurns, effectiveBudget)))
+		b.WriteString("\n")
+	}
+
 	// Failure detail.
 	if task.Status == "failed" && task.FailureDetail != "" {
 		if m.failureDetailExpanded {
@@ -1983,6 +1991,8 @@ func (m Model) renderBottomBar() string {
 			task := m.selectedAutopilotTask()
 			issueNum := 0
 			cause := ""
+			currentTurns := m.project.AutopilotMaxTurns
+			currentBudget := m.project.AutopilotMaxBudgetUSD
 			if task != nil {
 				issueNum = task.IssueNumber
 				if task.FailureReason != "" {
@@ -1990,10 +2000,16 @@ func (m Model) renderBottomBar() string {
 				} else {
 					cause = task.Status
 				}
+				currentTurns = task.EffectiveMaxTurns(m.project.AutopilotMaxTurns)
+				currentBudget = task.EffectiveMaxBudget(m.project.AutopilotMaxBudgetUSD)
 			}
+			bumpTurns := int(float64(currentTurns) * 1.5)
+			bumpBudget := currentBudget * 1.5
 			b.WriteString(headerStyle().Render(fmt.Sprintf("  #%d recoverable (%s) ", issueNum, cause)))
 			b.WriteString(helpKeyStyle().Render("r"))
-			b.WriteString(helpStyle().Render(": resume • "))
+			b.WriteString(helpStyle().Render(fmt.Sprintf(": resume (%d turns, $%.2f) • ", currentTurns, currentBudget)))
+			b.WriteString(helpKeyStyle().Render("b"))
+			b.WriteString(helpStyle().Render(fmt.Sprintf(": bump (%d turns, $%.2f) • ", bumpTurns, bumpBudget)))
 			b.WriteString(helpKeyStyle().Render("f"))
 			b.WriteString(helpStyle().Render(": restart fresh • "))
 			b.WriteString(helpKeyStyle().Render("n"))
@@ -2224,6 +2240,7 @@ var (
 		{"A", "stop all agents"},
 		{"S", "stop selected"},
 		{"r", "restart/review selected"},
+		{"b", "bump task limits"},
 		{"c", "copy worktree path"},
 		{"+", "add slot"},
 		{"P", "pause/resume slots"},
