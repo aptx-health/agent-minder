@@ -532,6 +532,106 @@ permissions:
 	})
 }
 
+func TestRenderResumeTaskContext(t *testing.T) {
+	task := &db.AutopilotTask{
+		IssueNumber:   42,
+		IssueTitle:    "Add user authentication",
+		IssueBody:     "Implement OAuth2 login flow",
+		WorktreePath:  "/home/user/.agent-minder/worktrees/myproject/issue-42",
+		Branch:        "agent/issue-42",
+		FailureReason: "max_turns",
+		FailureDetail: "used 50 of 50 turns",
+	}
+
+	prompt := renderResumeTaskContext(task, "main", "myorg", "myrepo")
+
+	// Should contain resume header.
+	if !strings.Contains(prompt, "Resuming Previous Work") {
+		t.Error("should contain 'Resuming Previous Work' header")
+	}
+
+	// Should contain failure reason.
+	if !strings.Contains(prompt, "max_turns") {
+		t.Error("should contain failure reason")
+	}
+
+	// Should contain failure detail.
+	if !strings.Contains(prompt, "used 50 of 50 turns") {
+		t.Error("should contain failure detail")
+	}
+
+	// Should contain the standard task context.
+	if !strings.Contains(prompt, "#42") {
+		t.Error("should contain issue number from task context")
+	}
+	if !strings.Contains(prompt, "myorg/myrepo") {
+		t.Error("should contain repository from task context")
+	}
+	if !strings.Contains(prompt, "Fixes #42") {
+		t.Error("should contain commit fix reference from task context")
+	}
+}
+
+func TestRenderResumeTaskContextNoFailure(t *testing.T) {
+	// Stopped tasks may not have a failure reason.
+	task := &db.AutopilotTask{
+		IssueNumber:  10,
+		IssueTitle:   "Stopped task",
+		IssueBody:    "Some work",
+		WorktreePath: "/tmp/worktree",
+		Branch:       "agent/issue-10",
+	}
+
+	prompt := renderResumeTaskContext(task, "main", "org", "repo")
+
+	if !strings.Contains(prompt, "Resuming Previous Work") {
+		t.Error("should contain resume header")
+	}
+	// Should NOT contain failure reason line since there isn't one.
+	if strings.Contains(prompt, "Previous attempt ended due to") {
+		t.Error("should not contain failure reason when not set")
+	}
+}
+
+func TestBuildResumeClaudeArgs(t *testing.T) {
+	fakeHome := t.TempDir()
+	origHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return fakeHome, nil }
+	t.Cleanup(func() { userHomeDir = origHomeDir })
+
+	task := &db.AutopilotTask{
+		IssueNumber:   42,
+		IssueTitle:    "Test issue",
+		IssueBody:     "Body",
+		WorktreePath:  t.TempDir(),
+		Branch:        "agent/issue-42",
+		FailureReason: "max_budget",
+		FailureDetail: "spent $3.00 of $3.00 budget",
+	}
+
+	args := buildResumeClaudeArgs(task, "main", "org", "repo", 50, 3.00, defaultAllowedTools)
+	joined := strings.Join(args, " ")
+
+	// Should use --agent autopilot.
+	if args[0] != "--agent" || args[1] != "autopilot" {
+		t.Errorf("expected '--agent autopilot', got %q %q", args[0], args[1])
+	}
+
+	// Should include --resume flag.
+	if !strings.Contains(joined, "--resume") {
+		t.Error("should include --resume flag")
+	}
+
+	// Prompt should contain resume context.
+	prompt := args[len(args)-1]
+	if !strings.Contains(prompt, "Resuming Previous Work") {
+		t.Error("prompt should contain resume header")
+	}
+	if !strings.Contains(prompt, "max_budget") {
+		t.Error("prompt should contain failure reason")
+	}
+}
+
 func TestPrintPrompts(t *testing.T) {
 	if os.Getenv("PRINT_PROMPTS") == "" {
 		t.Skip("set PRINT_PROMPTS=1 to print rendered prompts")

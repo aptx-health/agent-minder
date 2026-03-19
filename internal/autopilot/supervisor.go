@@ -330,6 +330,63 @@ func (s *Supervisor) RestartTask(ctx context.Context, taskID int64) error {
 	return nil
 }
 
+// ResumeTask resumes a failed or stopped task in its existing worktree.
+// Unlike RestartTask which nukes the worktree and starts fresh, ResumeTask
+// preserves the prior work and launches the agent with a continuation prompt.
+func (s *Supervisor) ResumeTask(ctx context.Context, taskID int64) error {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return fmt.Errorf("task %d not found", taskID)
+	}
+	if task.Status != "failed" && task.Status != "stopped" {
+		return fmt.Errorf("task #%d has status %q — only failed or stopped tasks can be resumed", task.IssueNumber, task.Status)
+	}
+
+	// Validate worktree still exists on disk.
+	if task.WorktreePath == "" {
+		return fmt.Errorf("task #%d has no worktree path — use restart instead", task.IssueNumber)
+	}
+	if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
+		return fmt.Errorf("worktree for #%d no longer exists at %s — use restart instead", task.IssueNumber, task.WorktreePath)
+	}
+
+	// Find an idle slot.
+	s.mu.Lock()
+	idleSlot := -1
+	for i, slot := range s.slots {
+		if slot == nil {
+			idleSlot = i
+			break
+		}
+	}
+	s.mu.Unlock()
+	if idleSlot < 0 {
+		return fmt.Errorf("no idle slots available — wait for a running agent to finish")
+	}
+
+	// Reset failure fields and set to running, preserving worktree/branch/log.
+	if err := s.store.ResumeAutopilotTask(task.ID); err != nil {
+		return fmt.Errorf("resume task: %w", err)
+	}
+
+	s.emitEvent("started", fmt.Sprintf("Resuming task #%d in existing worktree", task.IssueNumber), task)
+
+	// Launch directly in the existing worktree with a continuation prompt.
+	s.resumeAgent(ctx, idleSlot, task)
+	return nil
+}
+
 // Pause stops new agents from being started while letting running ones finish.
 func (s *Supervisor) Pause() {
 	s.mu.Lock()
@@ -1396,6 +1453,176 @@ func (s *Supervisor) launchAgent(ctx context.Context, slotIdx int, task *db.Auto
 	go s.runAgent(slotCtx, slotIdx, task)
 }
 
+// resumeAgent launches an agent in an existing worktree with a continuation prompt.
+// Unlike launchAgent, it skips worktree creation and branch setup, reusing whatever
+// state exists from the prior attempt.
+func (s *Supervisor) resumeAgent(ctx context.Context, slotIdx int, task *db.AutopilotTask) {
+	// Create per-slot context so StopAgent can cancel just this agent.
+	slotCtx, slotCancel := context.WithCancel(ctx)
+
+	s.mu.Lock()
+	s.slots[slotIdx] = &slotState{
+		task:       task,
+		startedAt:  time.Now(),
+		cancelFunc: slotCancel,
+	}
+	s.mu.Unlock()
+
+	go s.runResumeAgent(slotCtx, slotIdx, task)
+}
+
+func (s *Supervisor) runResumeAgent(ctx context.Context, slotIdx int, task *db.AutopilotTask) {
+	defer func() {
+		s.mu.Lock()
+		s.slots[slotIdx] = nil
+		s.mu.Unlock()
+		// Re-evaluate blocked tasks and fill slots with newly unblocked work.
+		s.unblockSatisfiedTasks()
+		s.fillSlots(s.parentCtx)
+	}()
+
+	home, _ := os.UserHomeDir()
+
+	// Ensure agent log directory exists.
+	if err := os.MkdirAll(filepath.Join(home, ".agent-minder", "agents"), 0755); err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to create agents dir for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		return
+	}
+
+	s.emitEvent("started", fmt.Sprintf("Agent resumed on #%d: %s", task.IssueNumber, task.IssueTitle), task)
+
+	// Open log file (append to existing log).
+	logFile, err := os.OpenFile(task.AgentLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to open log for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		return
+	}
+	defer func() { _ = logFile.Close() }()
+
+	// Ensure an agent definition exists (repo → user → built-in fallback).
+	agentDefSource, err := ensureAgentDef(task.WorktreePath)
+	if err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to resolve agent definition for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		return
+	}
+	s.emitEvent("started", fmt.Sprintf("Agent def: %s", agentDefSource.Description()), task)
+
+	// Build claude command with resume prompt.
+	maxTurns := s.project.AutopilotMaxTurns
+	if maxTurns < 1 {
+		maxTurns = 50
+	}
+	maxBudget := s.project.AutopilotMaxBudgetUSD
+	if maxBudget <= 0 {
+		maxBudget = 3.00
+	}
+
+	allowedTools := resolveAllowedTools(s.repoDir)
+
+	// Get base branch.
+	baseBranch := s.project.AutopilotBaseBranch
+	if baseBranch == "" {
+		baseBranch, _ = gitpkg.DefaultBranch(s.repoDir)
+	}
+
+	args := buildResumeClaudeArgs(task, baseBranch, s.owner, s.repo, maxTurns, maxBudget, allowedTools)
+	debugLog("claude resume command",
+		"stage", "autopilot", "step", "resume",
+		"issue", task.IssueNumber,
+		"args", strings.Join(args[:len(args)-1], " "),
+		"workdir", task.WorktreePath,
+	)
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = task.WorktreePath
+	cmd.Stderr = logFile
+
+	// Set GITHUB_TOKEN for gh CLI calls within the agent.
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+
+	// Get stdout pipe for stream-json parsing.
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to get stdout pipe for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		return
+	}
+
+	s.mu.Lock()
+	if s.slots[slotIdx] != nil {
+		s.slots[slotIdx].cmd = cmd
+	}
+	s.mu.Unlock()
+
+	// Start the agent process.
+	if err := cmd.Start(); err != nil {
+		s.emitEvent("error", fmt.Sprintf("Failed to start agent for #%d: %v", task.IssueNumber, err), task)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "bailed")
+		return
+	}
+
+	// Scanner goroutine: reads stdout, writes to log, updates live status.
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanStream(stdout, logFile, slotIdx, s)
+	}()
+
+	// Wait for process to finish.
+	err = cmd.Wait()
+	<-scanDone
+
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+	}
+
+	// Check if this agent was stopped by the user.
+	s.mu.Lock()
+	stoppedByUser := s.slots[slotIdx] != nil && s.slots[slotIdx].stoppedByUser
+	s.mu.Unlock()
+
+	if stoppedByUser {
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "stopped")
+		s.emitEvent("stopped", fmt.Sprintf("Agent stopped by user on #%d", task.IssueNumber), task)
+		return
+	}
+
+	// Inspect outcome (same as normal run).
+	status := s.inspectOutcome(ctx, task, exitCode)
+	_ = s.store.UpdateAutopilotTaskStatus(task.ID, status)
+
+	switch status {
+	case "review":
+		ghClient := ghpkg.NewClient(s.ghToken)
+		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
+		_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+		s.emitEvent("completed", fmt.Sprintf("Agent completed #%d — PR opened, awaiting review & merge", task.IssueNumber), task)
+	case "failed":
+		ghClient := ghpkg.NewClient(s.ghToken)
+		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
+		if updated, err := s.store.GetAutopilotTasks(s.project.ID); err == nil {
+			for _, t := range updated {
+				if t.ID == task.ID {
+					s.emitEvent("failed", fmt.Sprintf("Agent failed on #%d (%s)", task.IssueNumber, t.FailureReason), task)
+					break
+				}
+			}
+		}
+	default:
+		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
+	}
+
+	// Retain worktree for failed/bailed (same as normal run).
+	if status == "review" {
+		s.cleanup(task, false)
+	}
+}
+
 func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.AutopilotTask) {
 	defer func() {
 		s.mu.Lock()
@@ -1783,6 +2010,23 @@ func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, max
 		"--max-turns", strconv.Itoa(maxTurns),
 		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
 		"--allowedTools", toCliAllowedTools(allowedTools),
+		"--", prompt,
+	}
+}
+
+// buildResumeClaudeArgs constructs the argument list for resuming a claude agent
+// in an existing worktree. Uses a continuation prompt instead of a fresh start prompt.
+func buildResumeClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, maxTurns int, maxBudget float64, allowedTools []string) []string {
+	prompt := renderResumeTaskContext(task, baseBranch, owner, repo)
+	return []string{
+		"--agent", "autopilot",
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--max-turns", strconv.Itoa(maxTurns),
+		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
+		"--allowedTools", toCliAllowedTools(allowedTools),
+		"--resume",
 		"--", prompt,
 	}
 }

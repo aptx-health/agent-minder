@@ -1551,8 +1551,64 @@ func TestAutopilot_RKey_CompletedMode(t *testing.T) {
 
 	result, _ := m.Update(keyPress('r'))
 	m = result.(Model)
-	if m.autopilotMode != "restart-confirm" {
-		t.Errorf("autopilotMode = %q, want %q after 'r' on failed task in completed mode", m.autopilotMode, "restart-confirm")
+	if m.autopilotMode != "resume-or-restart-confirm" {
+		t.Errorf("autopilotMode = %q, want %q after 'r' on failed task in completed mode", m.autopilotMode, "resume-or-restart-confirm")
+	}
+}
+
+func TestAutopilot_RKey_FailedTask_ResumeOrRestartConfirm(t *testing.T) {
+	m := testModel(t)
+	m.activeTab = tabAutopilot
+	m.autopilotMode = "running"
+	m.autopilotTasks = []db.AutopilotTask{
+		{IssueNumber: 42, Status: "failed", FailureReason: "max_turns"},
+	}
+	m.autopilotCursor = 0
+
+	result, _ := m.Update(keyPress('r'))
+	m = result.(Model)
+	if m.autopilotMode != "resume-or-restart-confirm" {
+		t.Errorf("autopilotMode = %q, want %q after 'r' on failed task", m.autopilotMode, "resume-or-restart-confirm")
+	}
+}
+
+func TestAutopilot_RKey_StoppedTask_ResumeOrRestartConfirm(t *testing.T) {
+	m := testModel(t)
+	m.activeTab = tabAutopilot
+	m.autopilotMode = "running"
+	m.autopilotTasks = []db.AutopilotTask{
+		{IssueNumber: 42, Status: "stopped"},
+	}
+	m.autopilotCursor = 0
+
+	result, _ := m.Update(keyPress('r'))
+	m = result.(Model)
+	if m.autopilotMode != "resume-or-restart-confirm" {
+		t.Errorf("autopilotMode = %q, want %q after 'r' on stopped task", m.autopilotMode, "resume-or-restart-confirm")
+	}
+}
+
+func TestAutopilot_ResumeOrRestart_NKey_Cancels(t *testing.T) {
+	m := testModel(t)
+	m.activeTab = tabAutopilot
+	m.autopilotMode = "resume-or-restart-confirm"
+
+	result, _ := m.Update(keyPress('n'))
+	m = result.(Model)
+	if m.autopilotMode != "running" {
+		t.Errorf("autopilotMode = %q, want %q after 'n' from resume-or-restart-confirm", m.autopilotMode, "running")
+	}
+}
+
+func TestAutopilot_ResumeOrRestart_EscKey_Cancels(t *testing.T) {
+	m := testModel(t)
+	m.activeTab = tabAutopilot
+	m.autopilotMode = "resume-or-restart-confirm"
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = result.(Model)
+	if m.autopilotMode != "running" {
+		t.Errorf("autopilotMode = %q, want %q after esc from resume-or-restart-confirm", m.autopilotMode, "running")
 	}
 }
 

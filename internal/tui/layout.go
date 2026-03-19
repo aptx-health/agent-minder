@@ -1595,7 +1595,8 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 		// Autopilot tab: slot section + task list header + VP + detail panel
 		isRunning := m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" ||
 			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" ||
-			m.autopilotMode == "review-confirm" || m.autopilotMode == "completed"
+			m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "review-confirm" ||
+			m.autopilotMode == "completed"
 		if isRunning {
 			// Slot section.
 			if m.autopilotSupervisor != nil {
@@ -1949,6 +1950,26 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(headerStyle().Render(fmt.Sprintf("  Restart agent on #%d? ", issueNum)))
 			b.WriteString(helpKeyStyle().Render("y"))
 			b.WriteString(helpStyle().Render(": restart • "))
+			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "resume-or-restart-confirm" {
+			task := m.selectedAutopilotTask()
+			issueNum := 0
+			cause := ""
+			if task != nil {
+				issueNum = task.IssueNumber
+				if task.FailureReason != "" {
+					cause = task.FailureReason
+				} else {
+					cause = task.Status
+				}
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  #%d recoverable (%s) ", issueNum, cause)))
+			b.WriteString(helpKeyStyle().Render("r"))
+			b.WriteString(helpStyle().Render(": resume • "))
+			b.WriteString(helpKeyStyle().Render("f"))
+			b.WriteString(helpStyle().Render(": restart fresh • "))
 			b.WriteString(helpKeyStyle().Render("n"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
