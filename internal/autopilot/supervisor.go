@@ -1215,6 +1215,21 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 		return
 	}
 
+	// Single fetch for all agents about to launch — avoids concurrent fetches
+	// racing on ref locks when multiple slots fill at once.
+	hasEmpty := false
+	for _, slot := range s.slots {
+		if slot == nil {
+			hasEmpty = true
+			break
+		}
+	}
+	if hasEmpty {
+		if err := gitpkg.Fetch(s.repoDir); err != nil {
+			s.emitEvent("warning", fmt.Sprintf("Fetch failed: %v (using cached refs)", err), nil)
+		}
+	}
+
 	for i, slot := range s.slots {
 		if slot != nil {
 			continue // Slot occupied.
@@ -1415,10 +1430,8 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		baseBranch, _ = gitpkg.DefaultBranch(s.repoDir)
 	}
 
-	// Fetch latest from origin so the worktree starts from the latest base branch.
-	if err := gitpkg.Fetch(s.repoDir); err != nil {
-		s.emitEvent("warning", fmt.Sprintf("Fetch failed for #%d: %v (using cached ref)", task.IssueNumber, err), task)
-	}
+	// Note: fetch is done once in fillSlots() before launching agents,
+	// not here, to avoid concurrent fetch races on the same repo.
 
 	// Create worktree from the latest remote base branch.
 	if err := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch, "origin/"+baseBranch); err != nil {
