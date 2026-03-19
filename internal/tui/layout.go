@@ -516,10 +516,6 @@ func (m *Model) rebuildAutopilotTaskContent() {
 			if t.PRNumber > 0 {
 				extra = fmt.Sprintf("PR #%d", t.PRNumber)
 			}
-		case "failed":
-			if t.PRNumber > 0 {
-				extra = fmt.Sprintf("w/PR #%d", t.PRNumber)
-			}
 		case "running":
 			if t.StartedAt != "" {
 				if started, err := time.Parse(time.RFC3339, t.StartedAt); err == nil {

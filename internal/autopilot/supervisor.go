@@ -1565,19 +1565,11 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		// Remove in-progress label since the agent is done.
 		ghClient := ghpkg.NewClient(s.ghToken)
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
-		// If a PR was found despite failure, also add needs-review label.
-		if task.PRNumber > 0 {
-			_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
-		}
 		// Reload task to get failure_reason populated by inspectOutcome.
 		if updated, err := s.store.GetAutopilotTasks(s.project.ID); err == nil {
 			for _, t := range updated {
 				if t.ID == task.ID {
-					msg := fmt.Sprintf("Agent failed on #%d (%s)", task.IssueNumber, t.FailureReason)
-					if task.PRNumber > 0 {
-						msg += fmt.Sprintf(" — PR #%d found", task.PRNumber)
-					}
-					s.emitEvent("failed", msg, task)
+					s.emitEvent("failed", fmt.Sprintf("Agent failed on #%d (%s)", task.IssueNumber, t.FailureReason), task)
 					break
 				}
 			}
@@ -1731,8 +1723,9 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			if err == nil && pr != nil && pr.Number > 0 {
 				_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
 				task.PRNumber = pr.Number // Update in memory so caller sees it.
-				debugLog("inspectOutcome: failed task has PR",
+				debugLog("inspectOutcome: failed task has PR, promoting to review",
 					"issue", task.IssueNumber, "pr", pr.Number)
+				return "review"
 			}
 
 			return "failed"

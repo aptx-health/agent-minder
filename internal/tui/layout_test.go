@@ -868,6 +868,78 @@ func TestComputeHeightBudget_AutopilotTab_NonRunning(t *testing.T) {
 	}
 }
 
+// --- renderTaskDetail PR URL tests ---
+
+func TestRenderTaskDetail_PRWithURL(t *testing.T) {
+	m := testModel(t)
+	m.width = 120
+	m.height = 40
+	m.autopilotTasks = []db.AutopilotTask{
+		{
+			IssueNumber: 42,
+			IssueTitle:  "Test issue",
+			Status:      "review",
+			PRNumber:    100,
+			Owner:       "myorg",
+			Repo:        "myrepo",
+		},
+	}
+	m.autopilotCursor = 0
+
+	result := m.renderTaskDetail()
+	if !strings.Contains(result, "PR #100") {
+		t.Error("renderTaskDetail should contain PR #100")
+	}
+	if !strings.Contains(result, "https://github.com/myorg/myrepo/pull/100") {
+		t.Error("renderTaskDetail should contain full PR URL when owner/repo available")
+	}
+}
+
+func TestRenderTaskDetail_PRWithoutOwnerRepo(t *testing.T) {
+	m := testModel(t)
+	m.width = 120
+	m.height = 40
+	m.autopilotTasks = []db.AutopilotTask{
+		{
+			IssueNumber: 42,
+			IssueTitle:  "Test issue",
+			Status:      "review",
+			PRNumber:    100,
+			Owner:       "",
+			Repo:        "",
+		},
+	}
+	m.autopilotCursor = 0
+
+	result := m.renderTaskDetail()
+	if !strings.Contains(result, "PR #100") {
+		t.Error("renderTaskDetail should contain PR #100")
+	}
+	if strings.Contains(result, "https://github.com") {
+		t.Error("renderTaskDetail should not contain URL when owner/repo missing")
+	}
+}
+
+func TestRenderTaskDetail_NoPR(t *testing.T) {
+	m := testModel(t)
+	m.width = 120
+	m.height = 40
+	m.autopilotTasks = []db.AutopilotTask{
+		{
+			IssueNumber: 42,
+			IssueTitle:  "Test issue",
+			Status:      "failed",
+			PRNumber:    0,
+		},
+	}
+	m.autopilotCursor = 0
+
+	result := m.renderTaskDetail()
+	if strings.Contains(result, "PR #") {
+		t.Error("renderTaskDetail should not contain PR reference when PRNumber is 0")
+	}
+}
+
 // --- renderAutopilotTab tests ---
 
 func TestRenderAutopilotTab_IdleState(t *testing.T) {
