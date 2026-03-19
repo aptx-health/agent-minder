@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -285,6 +286,41 @@ func BranchExists(dir, branch string) bool {
 		return true
 	}
 	return false
+}
+
+// DirDiskUsage returns the total disk usage of a directory in bytes.
+// Returns 0 if the directory does not exist or cannot be measured.
+func DirDiskUsage(path string) int64 {
+	var total int64
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		if !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
+// FormatBytes formats a byte count as a human-readable string (KB, MB, GB).
+func FormatBytes(b int64) string {
+	const (
+		kb = 1024
+		mb = kb * 1024
+		gb = mb * 1024
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.0f MB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.0f KB", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 // DefaultBranch returns the default branch name (main, master, etc.).

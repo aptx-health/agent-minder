@@ -330,6 +330,52 @@ func (s *Supervisor) RestartTask(ctx context.Context, taskID int64) error {
 	return nil
 }
 
+// DeleteWorktree removes the worktree and optionally the branch for a completed/failed/bailed task.
+// The task record stays in the DB; only the on-disk worktree is removed.
+// If deleteBranch is true, the local branch is also deleted.
+func (s *Supervisor) DeleteWorktree(_ context.Context, taskID int64, deleteBranch bool) error {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return fmt.Errorf("task %d not found", taskID)
+	}
+	if task.Status == "running" || task.Status == "queued" || task.Status == "blocked" {
+		return fmt.Errorf("task #%d has status %q — only completed, failed, bailed, or stopped tasks can have worktrees deleted", task.IssueNumber, task.Status)
+	}
+	if task.WorktreePath == "" {
+		return fmt.Errorf("task #%d has no worktree to delete", task.IssueNumber)
+	}
+
+	// Remove the worktree directory.
+	if err := gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath); err != nil {
+		// Best-effort: try direct removal if git command fails.
+		_ = os.RemoveAll(task.WorktreePath)
+	}
+
+	// Optionally delete the branch.
+	if deleteBranch && task.Branch != "" {
+		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
+	}
+
+	// Clear worktree path in DB so the task shows as cleaned up.
+	if err := s.store.ClearAutopilotTaskWorktree(task.ID); err != nil {
+		return fmt.Errorf("clear worktree path: %w", err)
+	}
+
+	s.emitEvent("info", fmt.Sprintf("Deleted worktree for #%d", task.IssueNumber), task)
+	return nil
+}
+
 // Pause stops new agents from being started while letting running ones finish.
 func (s *Supervisor) Pause() {
 	s.mu.Lock()
@@ -549,12 +595,14 @@ func (s *Supervisor) ApplyDepOption(ctx context.Context, opt DepOption) error {
 }
 
 // cleanOrphanedWorktrees removes worktrees left behind by interrupted agents.
-func (s *Supervisor) cleanOrphanedWorktrees() {
+// Returns the number of worktrees cleaned up.
+func (s *Supervisor) cleanOrphanedWorktrees() int {
 	worktreeBase := filepath.Join(os.Getenv("HOME"), ".agent-minder", "worktrees", s.project.Name)
 	entries, err := os.ReadDir(worktreeBase)
 	if err != nil {
-		return // directory may not exist
+		return 0 // directory may not exist
 	}
+	cleaned := 0
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -564,7 +612,12 @@ func (s *Supervisor) cleanOrphanedWorktrees() {
 			// Best-effort: try direct removal if git worktree remove fails.
 			_ = os.RemoveAll(path)
 		}
+		cleaned++
 	}
+	if cleaned > 0 {
+		s.emitEvent("info", fmt.Sprintf("Cleaning up %d retained worktrees from previous session", cleaned), nil)
+	}
+	return cleaned
 }
 
 // Launch starts filling slots with agents. Call after Prepare + user confirmation.
