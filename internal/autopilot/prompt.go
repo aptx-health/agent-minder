@@ -86,6 +86,8 @@ After exploring, decide:
 - Before pushing, rebase onto the latest base branch using the commands from your task context
 - If there are merge conflicts during rebase, attempt to resolve them
 - If you cannot resolve conflicts, abort the rebase (` + "`git rebase --abort`" + `), bail with a comment listing the conflicting files
+- After a successful rebase, re-run tests (` + "`go test ./...`" + `) and pre-commit checks to verify nothing broke from upstream changes
+- If tests fail after rebase, fix the issues and amend your commits before pushing
 - Push the branch
 - Open a draft PR targeting the base branch specified in your task context
 
