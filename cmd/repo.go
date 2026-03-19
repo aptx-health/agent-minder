@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -118,9 +119,42 @@ func runRepoEnroll(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Steps 3-4 (enrollment agent + validation) depend on future work.
-	fmt.Println("\nEnrollment agent not yet available.")
-	fmt.Println("The mechanical inventory above will be used as context when the enrollment agent is implemented.")
+	// Step 3: Create initial onboarding file with inventory (agent will fill in context + permissions).
+	f := onboarding.New(info.Inventory)
+	filePath := onboarding.FilePath(info.Path)
+	if err := onboarding.Write(filePath, f); err != nil {
+		return fmt.Errorf("writing initial onboarding file: %w", err)
+	}
+	fmt.Printf("\nCreated initial onboarding file: %s\n", filePath)
+
+	// Step 4: Launch onboarding agent.
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		fmt.Println("\nClaude CLI not found on PATH. Install it to run the onboarding agent.")
+		fmt.Println("The mechanical inventory has been saved. Re-run 'agent-minder repo enroll' after installing Claude CLI.")
+		return nil
+	}
+
+	prompt := buildEnrollmentPrompt(info, filePath, permFailures)
+	agentCmd := exec.Command(claudePath, "--agent", "onboarding", prompt)
+	agentCmd.Dir = info.Path
+	agentCmd.Stdin = os.Stdin
+	agentCmd.Stdout = os.Stdout
+	agentCmd.Stderr = os.Stderr
+
+	fmt.Println("\nLaunching onboarding agent...")
+	fmt.Println("The agent will ask you a few questions about your repository, then generate configuration files.")
+	fmt.Println()
+
+	if err := agentCmd.Run(); err != nil {
+		fmt.Printf("\nOnboarding agent exited with error: %v\n", err)
+		fmt.Println("The mechanical inventory has been saved. You can re-run 'agent-minder repo enroll' to try again.")
+		return nil
+	}
+
+	// Step 5: Post-agent validation.
+	fmt.Println()
+	printPostAgentSummary(info.Path)
 
 	return nil
 }
@@ -323,4 +357,78 @@ func checkMark(v bool) string {
 		return "yes"
 	}
 	return "no"
+}
+
+// buildEnrollmentPrompt constructs the initial prompt for the onboarding agent
+// with the mechanical inventory context.
+func buildEnrollmentPrompt(info *discovery.RepoInfo, onboardingPath string, permFailures []string) string {
+	var b strings.Builder
+
+	b.WriteString("## Mechanical Inventory\n\n")
+	fmt.Fprintf(&b, "Repo directory: %s\n", info.Path)
+	fmt.Fprintf(&b, "Onboarding file path: %s\n\n", onboardingPath)
+
+	inv := info.Inventory
+
+	writeList := func(label string, items []string) {
+		if len(items) > 0 {
+			fmt.Fprintf(&b, "- %s: %s\n", label, strings.Join(items, ", "))
+		}
+	}
+
+	writeList("Languages", inv.Languages)
+	writeList("Package managers", inv.PackageManagers)
+	writeList("Build files", inv.BuildFiles)
+	writeList("CI", inv.CI)
+
+	if inv.Tooling.Secrets != "" {
+		fmt.Fprintf(&b, "- Secrets manager: %s\n", inv.Tooling.Secrets)
+	}
+	if inv.Tooling.Process != "" {
+		fmt.Fprintf(&b, "- Process manager: %s\n", inv.Tooling.Process)
+	}
+	if inv.Tooling.Containers != "" {
+		fmt.Fprintf(&b, "- Containers: %s\n", inv.Tooling.Containers)
+	}
+	if len(inv.Tooling.Env) > 0 {
+		fmt.Fprintf(&b, "- Env management: %s\n", strings.Join(inv.Tooling.Env, ", "))
+	}
+
+	b.WriteString("\n### Existing Claude Code config\n\n")
+	fmt.Fprintf(&b, "- CLAUDE.md: %s\n", checkMark(inv.ExistingClaude.ClaudeMD))
+	fmt.Fprintf(&b, "- settings.json: %s\n", checkMark(inv.ExistingClaude.SettingsJSON))
+	fmt.Fprintf(&b, "- Agent definition: %s\n", checkMark(inv.ExistingClaude.AgentDef))
+
+	if len(permFailures) > 0 {
+		b.WriteString("\n### Prior agent permission failures\n\n")
+		for _, f := range permFailures {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+		b.WriteString("\nConsider adding permissions to cover these tool patterns.\n")
+	}
+
+	return b.String()
+}
+
+// printPostAgentSummary checks which artifacts the onboarding agent created
+// and prints a summary.
+func printPostAgentSummary(repoDir string) {
+	fmt.Println("Enrollment summary:")
+
+	artifacts := []struct {
+		label string
+		path  string
+	}{
+		{"Onboarding file", onboarding.FilePath(repoDir)},
+		{"Claude settings", filepath.Join(repoDir, ".claude", "settings.json")},
+		{"Autopilot agent", filepath.Join(repoDir, ".claude", "agents", "autopilot.md")},
+	}
+
+	for _, a := range artifacts {
+		if _, err := os.Stat(a.path); err == nil {
+			fmt.Printf("  ✓ %s: %s\n", a.label, a.path)
+		} else {
+			fmt.Printf("  - %s: not created\n", a.label)
+		}
+	}
 }
