@@ -10,17 +10,11 @@ import (
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
 
-// testModelWithProject builds a Model with the project inserted in the DB.
+// testLayoutModelWithProject builds a Model with the project inserted in the DB.
 // This is needed for tests that insert concerns or other FK-dependent rows.
-func testModelWithProject(t *testing.T) Model {
-	t.Helper()
-	store := testStore(t)
-	proj := testProject()
-	if err := store.CreateProject(proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	p := poller.New(store, proj, nil, nil, nil)
-	return New(proj, store, p)
+func testLayoutModelWithProject(t *testing.T) Model {
+	m, _ := testModelWithProject(t)
+	return m
 }
 
 // --- Pure function tests (table-driven) ---
@@ -401,7 +395,7 @@ func TestRenderConcerns_EmptyConcerns(t *testing.T) {
 }
 
 func TestRenderConcerns_ShowsConcernCount(t *testing.T) {
-	m := testModelWithProject(t)
+	m := testLayoutModelWithProject(t)
 	m.width = 120
 
 	// Insert concerns into the store.
@@ -416,7 +410,7 @@ func TestRenderConcerns_ShowsConcernCount(t *testing.T) {
 }
 
 func TestRenderConcerns_SeverityPrefixes(t *testing.T) {
-	m := testModelWithProject(t)
+	m := testLayoutModelWithProject(t)
 	m.width = 120
 
 	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "info concern", Severity: "info"})
@@ -436,7 +430,7 @@ func TestRenderConcerns_SeverityPrefixes(t *testing.T) {
 }
 
 func TestRenderConcerns_CapsAtFive(t *testing.T) {
-	m := testModelWithProject(t)
+	m := testLayoutModelWithProject(t)
 	m.width = 120
 
 	for i := 0; i < 8; i++ {
@@ -450,7 +444,7 @@ func TestRenderConcerns_CapsAtFive(t *testing.T) {
 }
 
 func TestRenderConcerns_ExpandedShowsAll(t *testing.T) {
-	m := testModelWithProject(t)
+	m := testLayoutModelWithProject(t)
 	m.width = 120
 	m.concernsExpanded = true
 
@@ -471,7 +465,7 @@ func TestRenderConcerns_ExpandedShowsAll(t *testing.T) {
 }
 
 func TestRenderConcerns_ToggleHint(t *testing.T) {
-	m := testModelWithProject(t)
+	m := testLayoutModelWithProject(t)
 	m.width = 120
 
 	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "test concern", Severity: "info"})
