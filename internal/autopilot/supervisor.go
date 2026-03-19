@@ -1703,6 +1703,11 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			"issue", task.IssueNumber, "error", err.Error())
 	}
 	if agentResult != nil {
+		// Persist agent cost regardless of outcome.
+		if agentResult.TotalCost > 0 {
+			_ = s.store.UpdateAutopilotTaskCost(task.ID, agentResult.TotalCost)
+		}
+
 		status, reason, detail := classifyOutcome(agentResult, s.project.AutopilotMaxTurns, s.project.AutopilotMaxBudgetUSD)
 		if status == "failed" {
 			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)

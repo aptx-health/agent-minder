@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 16
+const currentVersion = 17
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
 	completed_at   TEXT DEFAULT '',
 	failure_reason TEXT DEFAULT '',
 	failure_detail TEXT DEFAULT '',
+	cost_usd       REAL DEFAULT 0,
 	UNIQUE(project_id, issue_number)
 );
 
@@ -281,6 +282,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 16 {
 		if err := migrateV16(db); err != nil {
 			return fmt.Errorf("apply migration v16: %w", err)
+		}
+	}
+
+	if version < 17 {
+		if err := migrateV17(db); err != nil {
+			return fmt.Errorf("apply migration v17: %w", err)
 		}
 	}
 
@@ -572,6 +579,17 @@ func migrateV16(db *sqlx.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("%s: %w", stmt, err)
 		}
+	}
+	return nil
+}
+
+func migrateV17(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE autopilot_tasks ADD COLUMN cost_usd REAL DEFAULT 0`)
+	if err != nil {
+		return fmt.Errorf("add cost_usd: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE autopilot_tasks SET cost_usd = 0 WHERE cost_usd IS NULL`); err != nil {
+		return fmt.Errorf("null-fill cost_usd: %w", err)
 	}
 	return nil
 }
