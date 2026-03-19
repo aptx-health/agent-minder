@@ -5,7 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/dustinlange/agent-minder/internal/discovery"
+	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
 func TestCheckMark(t *testing.T) {
@@ -27,11 +31,22 @@ func TestDefaultAgentLogDir(t *testing.T) {
 	}
 }
 
-func TestRepoEnrollRunsOnRealRepo(t *testing.T) {
+func TestRepoEnrollCreatesOnboardingFile(t *testing.T) {
 	dir := setupGitRepo(t)
 
 	// Add a go.mod to make inventory interesting.
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-create the onboarding file so enroll hits the "already exists" path
+	// and doesn't try to launch the interactive agent.
+	onboardingDir := filepath.Join(dir, ".agent-minder")
+	if err := os.MkdirAll(onboardingDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	onboardingFile := filepath.Join(onboardingDir, "onboarding.yaml")
+	if err := os.WriteFile(onboardingFile, []byte("version: 1\nscanned_at: 2024-01-01T00:00:00Z\ninventory:\n  languages: [go]\nvalidation:\n  status: untested\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -42,6 +57,31 @@ func TestRepoEnrollRunsOnRealRepo(t *testing.T) {
 
 	if err := cmd.RunE(cmd, []string{dir}); err != nil {
 		t.Fatalf("runRepoEnroll: %v", err)
+	}
+}
+
+func TestRepoEnrollNoClaudeCLI(t *testing.T) {
+	dir := setupGitRepo(t)
+
+	// Create a temporary bin dir with only git (not claude) to simulate missing claude CLI.
+	fakeBin := t.TempDir()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal("git not found")
+	}
+	if err := os.Symlink(gitPath, filepath.Join(fakeBin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+
+	if err := runRepoEnroll(repoEnrollCmd, []string{dir}); err != nil {
+		t.Fatalf("runRepoEnroll: %v", err)
+	}
+
+	// Should have created the initial onboarding file even without claude.
+	onboardingPath := filepath.Join(dir, ".agent-minder", "onboarding.yaml")
+	if _, err := os.Stat(onboardingPath); os.IsNotExist(err) {
+		t.Error("expected onboarding file to be created")
 	}
 }
 
@@ -65,6 +105,41 @@ func TestRepoRefreshNoEnrollmentFile(t *testing.T) {
 	// Should not error, just report no enrollment file.
 	if err := cmd.RunE(cmd, []string{dir}); err != nil {
 		t.Fatalf("runRepoRefresh: %v", err)
+	}
+}
+
+func TestBuildEnrollmentPrompt(t *testing.T) {
+	info := &discovery.RepoInfo{
+		Path: "/tmp/test-repo",
+		Inventory: onboarding.Inventory{
+			Languages:       []string{"go", "typescript"},
+			PackageManagers: []string{"go-modules", "npm"},
+			BuildFiles:      []string{"Makefile", "package.json"},
+			CI:              []string{"github-actions"},
+			Tooling: onboarding.Tooling{
+				Secrets: "doppler",
+			},
+			ExistingClaude: onboarding.ExistingClaudeConfig{
+				ClaudeMD: true,
+			},
+		},
+	}
+
+	prompt := buildEnrollmentPrompt(info, "/tmp/test-repo/.agent-minder/onboarding.yaml", []string{"Bash(make lint)"})
+
+	// Check key content is present.
+	for _, want := range []string{
+		"go, typescript",
+		"go-modules, npm",
+		"doppler",
+		"CLAUDE.md: yes",
+		"settings.json: no",
+		"/tmp/test-repo",
+		"Bash(make lint)",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
 	}
 }
 
