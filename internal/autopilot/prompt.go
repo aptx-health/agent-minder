@@ -227,6 +227,29 @@ func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) s
 	return b.String()
 }
 
+// renderResumeTaskContext builds a continuation prompt for resuming work in an existing worktree.
+// It includes context about the prior failure and instructs the agent to pick up where it left off.
+func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "## Resuming Previous Work\n\n")
+	fmt.Fprintf(&b, "You are resuming work on issue #%d in an existing worktree.\n", task.IssueNumber)
+	if task.FailureReason != "" {
+		fmt.Fprintf(&b, "Previous attempt ended due to: **%s**", task.FailureReason)
+		if task.FailureDetail != "" {
+			fmt.Fprintf(&b, " (%s)", task.FailureDetail)
+		}
+		b.WriteString(".\n")
+	}
+	b.WriteString("\nThe worktree contains work from the prior attempt. Review what's been done, ")
+	b.WriteString("continue from where it left off, and open a PR when ready.\n\n")
+
+	// Include the standard task context.
+	b.WriteString(renderTaskContext(task, baseBranch, owner, repo))
+
+	return b.String()
+}
+
 // renderPrompt builds the agent prompt from the design doc template.
 // This is the legacy full-prompt path, kept for backward compatibility but no longer
 // used by buildClaudeArgs (which always uses --agent autopilot + renderTaskContext).

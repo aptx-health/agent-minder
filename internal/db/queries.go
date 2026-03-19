@@ -820,6 +820,19 @@ func (s *Store) ResetStaleAutopilotTasks(projectID int64) (int, error) {
 	return int(n), nil
 }
 
+// ResumeAutopilotTask sets a task back to running, preserving worktree/branch/log
+// but clearing failure fields and updating started_at. Used when resuming work in
+// an existing worktree rather than starting fresh.
+func (s *Store) ResumeAutopilotTask(id int64) error {
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks
+		SET status = 'running', started_at = datetime('now'), completed_at = '',
+		    failure_reason = '', failure_detail = ''
+		WHERE id = ?
+	`, id)
+	return err
+}
+
 // ClearAutopilotTaskWorktree clears the worktree_path for a task after cleanup.
 func (s *Store) ClearAutopilotTaskWorktree(id int64) error {
 	_, err := s.db.Exec(`UPDATE autopilot_tasks SET worktree_path = '' WHERE id = ?`, id)

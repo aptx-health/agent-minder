@@ -292,6 +292,162 @@ func TestRestartTask_Requeues(t *testing.T) {
 	}
 }
 
+func TestResumeTask_WrongStatus(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  20,
+		IssueTitle:   "Queued task",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	err := sup.ResumeTask(context.Background(), task.ID)
+	if err == nil {
+		t.Error("ResumeTask should fail for queued task")
+	}
+}
+
+func TestResumeTask_BailedRejected(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  21,
+		IssueTitle:   "Bailed task",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "bailed"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus: %v", err)
+	}
+
+	err := sup.ResumeTask(context.Background(), task.ID)
+	if err == nil {
+		t.Error("ResumeTask should fail for bailed task — use restart instead")
+	}
+}
+
+func TestResumeTask_NoWorktree(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  22,
+		IssueTitle:   "Failed task no worktree",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "failed"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus: %v", err)
+	}
+
+	// Task has no worktree_path — resume should fail.
+	err := sup.ResumeTask(context.Background(), task.ID)
+	if err == nil {
+		t.Error("ResumeTask should fail when worktree_path is empty")
+	}
+}
+
+func TestResumeTask_WorktreeNotOnDisk(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  23,
+		IssueTitle:   "Failed task missing worktree",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	// Set running with a worktree path that doesn't exist.
+	if err := store.UpdateAutopilotTaskRunning(task.ID, "/tmp/nonexistent-worktree-path", "agent/issue-23", "/tmp/log"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskRunning: %v", err)
+	}
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "failed"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus: %v", err)
+	}
+
+	err := sup.ResumeTask(context.Background(), task.ID)
+	if err == nil {
+		t.Error("ResumeTask should fail when worktree doesn't exist on disk")
+	}
+}
+
+func TestResumeTask_NoIdleSlots(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
+
+	// Create a temp dir to act as worktree.
+	worktreeDir := t.TempDir()
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  24,
+		IssueTitle:   "Failed task no slots",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+	if err := store.UpdateAutopilotTaskRunning(task.ID, worktreeDir, "agent/issue-24", "/tmp/log"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskRunning: %v", err)
+	}
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "failed"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus: %v", err)
+	}
+
+	// Fill all slots so none are available.
+	for i := range sup.slots {
+		sup.slots[i] = &slotState{task: task}
+	}
+
+	err := sup.ResumeTask(context.Background(), task.ID)
+	if err == nil {
+		t.Error("ResumeTask should fail when no idle slots available")
+	}
+}
+
+func TestResumeTask_NotFound(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "")
+
+	err := sup.ResumeTask(context.Background(), 99999)
+	if err == nil {
+		t.Error("ResumeTask should fail for nonexistent task")
+	}
+}
+
 func TestRestartTask_FailedRequeues(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
