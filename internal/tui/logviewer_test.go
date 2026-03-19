@@ -140,3 +140,162 @@ func TestDimTimestamp(t *testing.T) {
 		}
 	}
 }
+
+func TestDimTimestamp_ISOTimestampPreservesContent(t *testing.T) {
+	dimStyle := mutedStyle()
+	input := "2024-01-15T10:30:00Z some important log line"
+	result := dimTimestamp(input, dimStyle)
+
+	// The content after the timestamp should be preserved.
+	if !strings.Contains(result, "some important log line") {
+		t.Errorf("dimTimestamp() should preserve content after ISO timestamp, got: %q", result)
+	}
+}
+
+func TestDimTimestamp_BracketedTimestampPreservesContent(t *testing.T) {
+	dimStyle := mutedStyle()
+	input := "[10:30:00] log message here"
+	result := dimTimestamp(input, dimStyle)
+
+	if !strings.Contains(result, " log message here") {
+		t.Errorf("dimTimestamp() should preserve content after bracketed timestamp, got: %q", result)
+	}
+}
+
+func TestDimTimestamp_NoTimestampReturnsInput(t *testing.T) {
+	dimStyle := mutedStyle()
+	input := "plain text without any timestamp prefix"
+	result := dimTimestamp(input, dimStyle)
+
+	if result != input {
+		t.Errorf("dimTimestamp() with no timestamp should return input unchanged, got: %q", result)
+	}
+}
+
+func TestRenderPlainLog_ErrorKeywords(t *testing.T) {
+	// Test all error-like keywords that trigger error styling.
+	keywords := []string{"error", "ERROR", "panic", "PANIC", "fatal", "FATAL", "failed", "FAILED"}
+	for _, kw := range keywords {
+		content := "normal line\n" + kw + ": something went wrong\nafter"
+		result := renderPlainLog(content)
+		if !strings.Contains(result, "something went wrong") {
+			t.Errorf("renderPlainLog() should render line with keyword %q", kw)
+		}
+	}
+}
+
+func TestRenderPlainLog_EmptyContent(t *testing.T) {
+	result := renderPlainLog("")
+	if result == "" {
+		t.Error("renderPlainLog(\"\") should return at least a newline")
+	}
+}
+
+func TestRenderPlainLog_TimestampLines(t *testing.T) {
+	content := "2024-01-15T10:30:00Z normal log line\n[10:30:00] bracketed log line"
+	result := renderPlainLog(content)
+
+	if !strings.Contains(result, "normal log line") {
+		t.Error("renderPlainLog() should contain timestamp line content")
+	}
+	if !strings.Contains(result, "bracketed log line") {
+		t.Error("renderPlainLog() should contain bracketed timestamp content")
+	}
+}
+
+func TestRenderJSONL_EmptyContent(t *testing.T) {
+	result := renderJSONL("")
+	if result != "" {
+		t.Errorf("renderJSONL(\"\") = %q, want empty", result)
+	}
+}
+
+func TestRenderJSONL_NonErrorStopReason(t *testing.T) {
+	lines := []string{
+		`{"type":"result","num_turns":5,"total_cost_usd":0.10,"duration_ms":60000,"stop_reason":"max_turns"}`,
+	}
+	content := strings.Join(lines, "\n")
+	result := renderJSONL(content)
+
+	// Non-end_turn stop reasons should be shown in parentheses.
+	if !strings.Contains(result, "max_turns") {
+		t.Error("renderJSONL() should show non-end_turn stop reason")
+	}
+}
+
+func TestRenderJSONL_SystemInitSkipped(t *testing.T) {
+	lines := []string{
+		`{"type":"system","subtype":"init","session_id":"abc","tools":["Bash","Read"]}`,
+		`{"type":"system","subtype":"hook_started","hook_id":"123"}`,
+	}
+	content := strings.Join(lines, "\n")
+	result := renderJSONL(content)
+
+	// System init and hooks are silently skipped — result should be empty.
+	if strings.TrimSpace(result) != "" {
+		t.Errorf("renderJSONL() should skip system init/hooks, got: %q", result)
+	}
+}
+
+func TestRenderJSONL_ToolUseTruncation(t *testing.T) {
+	// Tool input longer than 80 chars should be truncated.
+	longInput := strings.Repeat("x", 100)
+	lines := []string{
+		`{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"tool_use","name":"Bash","input":{"command":"` + longInput + `"}}]}}`,
+	}
+	content := strings.Join(lines, "\n")
+	result := renderJSONL(content)
+
+	if !strings.Contains(result, "Bash") {
+		t.Error("renderJSONL() should show tool name")
+	}
+	if !strings.Contains(result, "...") {
+		t.Error("renderJSONL() should truncate long tool input with ...")
+	}
+}
+
+func TestRenderJSONL_TextTruncation(t *testing.T) {
+	// Text longer than 80 chars should be truncated.
+	longText := strings.Repeat("y", 100)
+	lines := []string{
+		`{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"` + longText + `"}]}}`,
+	}
+	content := strings.Join(lines, "\n")
+	result := renderJSONL(content)
+
+	if !strings.Contains(result, "...") {
+		t.Error("renderJSONL() should truncate long text with ...")
+	}
+}
+
+func TestIsJSONL_AllBlankLines(t *testing.T) {
+	if isJSONL("\n\n\n") {
+		t.Error("isJSONL with only blank lines should return false")
+	}
+}
+
+func TestFormatTimestamp_LongTimestamp(t *testing.T) {
+	// Timestamp longer than 8 chars that doesn't parse as RFC3339.
+	input := "some-weird-timestamp-format"
+	got := formatTimestamp(input)
+	// Should return first 8 chars as fallback.
+	if got != "some-wei" {
+		t.Errorf("formatTimestamp(%q) = %q, want %q", input, got, "some-wei")
+	}
+}
+
+func TestExtractLogToolInput_EmptyMap(t *testing.T) {
+	got := extractLogToolInput(map[string]any{})
+	// Empty map marshals to "{}", which is the JSON fallback.
+	if got != "{}" {
+		t.Errorf("extractLogToolInput(empty map) = %q, want %q", got, "{}")
+	}
+}
+
+func TestExtractLogToolInput_EmptyValues(t *testing.T) {
+	// Keys exist but with empty values — should fall back to JSON.
+	got := extractLogToolInput(map[string]any{"command": ""})
+	if got == "" {
+		t.Error("extractLogToolInput() with empty command should not return empty (should fallback to JSON)")
+	}
+}
