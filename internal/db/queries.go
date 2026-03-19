@@ -820,6 +820,12 @@ func (s *Store) ResetStaleAutopilotTasks(projectID int64) (int, error) {
 	return int(n), nil
 }
 
+// ClearAutopilotTaskWorktree clears the worktree_path for a task after cleanup.
+func (s *Store) ClearAutopilotTaskWorktree(id int64) error {
+	_, err := s.db.Exec(`UPDATE autopilot_tasks SET worktree_path = '' WHERE id = ?`, id)
+	return err
+}
+
 // ResetAutopilotTask resets a single task back to queued, clearing runtime fields.
 func (s *Store) ResetAutopilotTask(id int64) error {
 	_, err := s.db.Exec(`
