@@ -193,6 +193,23 @@ type AutopilotTask struct {
 	CompletedAt   string `db:"completed_at"`
 	FailureReason string `db:"failure_reason"` // permissions, max_turns, max_budget, error
 	FailureDetail string `db:"failure_detail"` // JSON or text with specifics
+
+	CostUSD float64 `db:"cost_usd"` // total cost in USD from agent result
+}
+
+// CostSummary holds aggregated cost data for a time period.
+type CostSummary struct {
+	TotalCost float64 `db:"total_cost"` // sum of cost_usd
+	TaskCount int     `db:"task_count"` // number of completed tasks
+}
+
+// TaskCostDetail holds per-task cost info for detailed breakdowns.
+type TaskCostDetail struct {
+	IssueNumber int     `db:"issue_number"`
+	IssueTitle  string  `db:"issue_title"`
+	Status      string  `db:"status"`
+	CostUSD     float64 `db:"cost_usd"`
+	CompletedAt string  `db:"completed_at"`
 }
 
 // RepoOnboarding represents a cached onboarding file for a repo.

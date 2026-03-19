@@ -1586,8 +1586,11 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
 	}
 
-	// Cleanup: remove worktree, delete branch if bailed or failed (but keep branch if PR exists).
-	s.cleanup(task, (status == "bailed" || status == "failed") && task.PRNumber == 0)
+	// Cleanup: remove worktree for review tasks (restored on demand later);
+	// retain worktree and branch for failed/bailed tasks so work can be recovered.
+	if status == "review" {
+		s.cleanup(task, false)
+	}
 }
 
 // checkReviewTasks checks if any tasks in "review" status have had their PRs merged.
@@ -1711,6 +1714,11 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			"issue", task.IssueNumber, "error", err.Error())
 	}
 	if agentResult != nil {
+		// Persist agent cost regardless of outcome.
+		if agentResult.TotalCost > 0 {
+			_ = s.store.UpdateAutopilotTaskCost(task.ID, agentResult.TotalCost)
+		}
+
 		status, reason, detail := classifyOutcome(agentResult, s.project.AutopilotMaxTurns, s.project.AutopilotMaxBudgetUSD)
 		if status == "failed" {
 			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
