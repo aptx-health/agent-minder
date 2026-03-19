@@ -645,14 +645,6 @@ func (m Model) renderTaskDetail() string {
 			b.WriteString(mutedStyle().Render(fmt.Sprintf("  Worktree: %s (removed)", task.WorktreePath)))
 			b.WriteString("\n")
 		}
-		// Show delete hint for terminal tasks with worktrees on disk.
-		canDelete := task.Status == "failed" || task.Status == "bailed" || task.Status == "stopped" || task.Status == "done" || task.Status == "review"
-		if canDelete {
-			if _, err := os.Stat(task.WorktreePath); err == nil {
-				b.WriteString(mutedStyle().Render("  [d: delete worktree]"))
-				b.WriteString("\n")
-			}
-		}
 	}
 
 	// Branch.
@@ -2030,18 +2022,6 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
-		} else if m.activeTab == tabAutopilot && m.autopilotMode == "delete-worktree-confirm" {
-			task := m.selectedAutopilotTask()
-			issueNum := 0
-			if task != nil {
-				issueNum = task.IssueNumber
-			}
-			b.WriteString(headerStyle().Render(fmt.Sprintf("  Delete worktree for #%d? ", issueNum)))
-			b.WriteString(helpKeyStyle().Render("y"))
-			b.WriteString(helpStyle().Render(": delete • "))
-			b.WriteString(helpKeyStyle().Render("n"))
-			b.WriteString(helpStyle().Render(": cancel"))
-			b.WriteString("\n")
 		} else if m.autopilotStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
 			b.WriteString("\n")
@@ -2114,14 +2094,12 @@ func (m Model) renderHelpBar() string {
 					condensed = append(condensed,
 						hint{"r", "restart"},
 						hint{"i", "detail"},
-						hint{"d", "del worktree"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
 				case "bailed", "stopped":
 					condensed = append(condensed,
 						hint{"r", "restart"},
-						hint{"d", "del worktree"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
@@ -2130,13 +2108,11 @@ func (m Model) renderHelpBar() string {
 				case "review":
 					condensed = append(condensed,
 						hint{"r", "review"},
-						hint{"d", "del worktree"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
 				case "done":
 					condensed = append(condensed,
-						hint{"d", "del worktree"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
@@ -2156,14 +2132,12 @@ func (m Model) renderHelpBar() string {
 				switch task.Status {
 				case "failed", "bailed", "stopped", "done":
 					condensed = append(condensed,
-						hint{"d", "del worktree"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
 				case "review":
 					condensed = append(condensed,
 						hint{"r", "review"},
-						hint{"d", "del worktree"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
@@ -2250,7 +2224,6 @@ var (
 		{"A", "stop all agents"},
 		{"S", "stop selected"},
 		{"r", "restart/review selected"},
-		{"d", "delete worktree"},
 		{"c", "copy worktree path"},
 		{"+", "add slot"},
 		{"P", "pause/resume slots"},

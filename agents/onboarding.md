@@ -69,7 +69,9 @@ permissions:
 ```
 
 Build the `allowed_tools` list using these rules:
+- **Format**: Use **spaces** inside `Bash()` patterns — e.g., `Bash(git *)`, `Bash(go build *)`. Do NOT use colons (`Bash(git:*)`) — the colon syntax silently fails to match commands in `settings.json` and `onboarding.yaml`. Colons are only valid for the CLI `--allowedTools` flag, and that conversion is handled automatically by `ToCliToolPattern()`.
 - Each entry is `Bash(<command> *)` where `<command>` comes from `tools_needed` and the build/test/lint commands
+- For multi-word commands, use spaces between all words: `Bash(go build *)`, `Bash(doppler run -- *)`
 - Always include `Bash(git *)` and `Bash(gh *)` — agents always need version control
 - Always include `Read`, `Edit`, `Write`, `Glob`, `Grep` — agents need file access
 - If a secrets manager is detected (e.g., doppler), include `Bash(doppler run -- *)` or the equivalent prefix
