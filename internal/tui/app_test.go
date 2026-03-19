@@ -59,12 +59,12 @@ func specialKey(code rune) tea.KeyPressMsg {
 
 // shiftTabKey creates a tea.KeyPressMsg for shift+tab.
 func shiftTabKey() tea.KeyPressMsg {
-	return tea.KeyPressMsg{Code: tea.KeyTab, Mod: 0x01} // ModShift = 1
+	return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
 }
 
 // ctrlCKey creates a tea.KeyPressMsg for ctrl+c.
 func ctrlCKey() tea.KeyPressMsg {
-	return tea.KeyPressMsg{Code: 'c', Mod: 0x04} // ModCtrl = 4
+	return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 }
 
 // --- Tests ---
@@ -654,7 +654,7 @@ func TestPollerEventMsg_CapsAt50(t *testing.T) {
 	m.height = 40
 
 	// Push 60 events.
-	for i := range 60 {
+	for range 60 {
 		evt := pollerEventMsg(poller.Event{
 			Time:    time.Now(),
 			Type:    "poll",
@@ -662,7 +662,6 @@ func TestPollerEventMsg_CapsAt50(t *testing.T) {
 		})
 		result, _ := m.Update(evt)
 		m = result.(Model)
-		_ = i
 	}
 
 	if len(m.events) != 50 {
@@ -889,15 +888,15 @@ func TestWindowResize_UpdatesDimensions(t *testing.T) {
 
 func TestSpinnerTick(t *testing.T) {
 	m := testModel(t)
+	m.polling = true // spinner ticks propagate when polling is active
 
-	// Sending a spinner.TickMsg should not panic and should return a command.
 	tickMsg := m.spinner.Tick()
 	result, cmd := m.Update(tickMsg)
 	m = result.(Model)
-	// Spinner tick should propagate (non-nil cmd for next tick).
-	_ = m
-	_ = cmd
-	// Just verify no panic occurred.
+	// Spinner tick should propagate (non-nil cmd for next tick) when polling.
+	if cmd == nil {
+		t.Error("spinner tick should return a non-nil command when polling is active")
+	}
 }
 
 // --- Broadcast mode escape clears status ---
