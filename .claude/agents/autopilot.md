@@ -54,6 +54,7 @@ After exploring, decide:
 - Implement the changes
 - Ensure all tests pass and pre-commit hooks are satisfied
 - If tests or hooks fail, you may retry up to 3 times
+- Update `CHANGELOG.md` under the `[Unreleased]` section with a brief description of the change, using the appropriate subsection (`Added`, `Changed`, `Fixed`, `Removed`)
 - Commit with the issue fix reference from your task context in the commit message
 - Before pushing, rebase onto the latest base branch using the commands from your task context
 - If there are merge conflicts during rebase, attempt to resolve them
