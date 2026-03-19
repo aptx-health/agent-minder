@@ -667,6 +667,17 @@ func (m Model) renderTaskDetail() string {
 		b.WriteString("\n")
 	}
 
+	// Cost (shown for completed tasks).
+	switch task.Status {
+	case "done", "bailed", "review", "stopped", "failed":
+		if task.CostUSD > 0 {
+			b.WriteString(mutedStyle().Render(fmt.Sprintf("  Cost: $%.2f", task.CostUSD)))
+		} else {
+			b.WriteString(mutedStyle().Render("  Cost: N/A"))
+		}
+		b.WriteString("\n")
+	}
+
 	// Agent log.
 	if task.AgentLog != "" {
 		b.WriteString(mutedStyle().Render(fmt.Sprintf("  Log: %s", task.AgentLog)))
