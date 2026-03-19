@@ -228,6 +228,7 @@ type Model struct {
 	autopilotSupervisor       *autopilot.Supervisor
 	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "add-slot-confirm", "completed"
 	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
+	autopilotModeBeforeDelete string // saved mode to restore on delete-worktree-confirm cancel
 	autopilotStatus           string
 	autopilotTotal            int
 	autopilotUnblocked        int
@@ -1038,6 +1039,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.autopilotMode == "delete-worktree-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "y", "enter":
+			return m.confirmDeleteWorktree()
+		case "n", "esc":
+			m.autopilotMode = m.autopilotModeBeforeDelete
+			return m, nil
+		}
+	}
 
 	switch msg.String() {
 	case "1":
@@ -1069,6 +1079,16 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	case "d":
+		// On autopilot tab during running/completed mode, 'd' deletes a task's worktree.
+		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
+			task := m.selectedAutopilotTask()
+			if task != nil && task.WorktreePath != "" &&
+				(task.Status == "failed" || task.Status == "bailed" || task.Status == "stopped" || task.Status == "done" || task.Status == "review") {
+				m.autopilotModeBeforeDelete = m.autopilotMode
+				m.autopilotMode = "delete-worktree-confirm"
+				return m, nil
+			}
+		}
 		m.warningBanner = ""
 		return m, nil
 	case "q", "ctrl+c":
@@ -2266,6 +2286,42 @@ func (m Model) confirmResumeTask() (tea.Model, tea.Cmd) {
 			Time:    time.Now(),
 			Type:    "started",
 			Summary: fmt.Sprintf("Resumed #%d in existing worktree", issueNum),
+		})
+	}
+}
+
+// confirmDeleteWorktree removes the worktree for the selected task after user confirms.
+func (m Model) confirmDeleteWorktree() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil || task.WorktreePath == "" {
+		m.autopilotMode = m.autopilotModeBeforeDelete
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = m.autopilotModeBeforeDelete
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+	// Delete branch for non-review tasks (review tasks may have PRs the user wants to keep).
+	deleteBranch := task.Status != "review"
+	m.autopilotMode = m.autopilotModeBeforeDelete
+
+	return m, func() tea.Msg {
+		if err := sup.DeleteWorktree(context.Background(), taskID, deleteBranch); err != nil {
+			return autopilotEventMsg(autopilot.Event{
+				Time:    time.Now(),
+				Type:    "error",
+				Summary: fmt.Sprintf("Failed to delete worktree for #%d: %v", issueNum, err),
+			})
+		}
+		return autopilotEventMsg(autopilot.Event{
+			Time:    time.Now(),
+			Type:    "info",
+			Summary: fmt.Sprintf("Deleted worktree for #%d", issueNum),
 		})
 	}
 }
