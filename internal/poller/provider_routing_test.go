@@ -5,26 +5,22 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/db"
-	"github.com/dustinlange/agent-minder/internal/llm"
 )
 
-// trackingProvider records every Complete call so we can verify routing.
-type trackingProvider struct {
-	name  string
+// trackingCompleter records every Complete call so we can verify routing.
+type trackingCompleter struct {
 	calls atomic.Int32
 }
 
-func (p *trackingProvider) Name() string { return p.name }
-
-func (p *trackingProvider) Complete(_ context.Context, _ *llm.Request) (*llm.Response, error) {
-	p.calls.Add(1)
-	return &llm.Response{Content: `{"analysis":"ok","concerns":[]}`}, nil
+func (c *trackingCompleter) Complete(_ context.Context, _ *claudecli.Request) (*claudecli.Response, error) {
+	c.calls.Add(1)
+	return &claudecli.Response{Result: `{"analysis":"ok","concerns":[]}`}, nil
 }
 
-func TestNewPollerSeparateProviders(t *testing.T) {
-	summ := &trackingProvider{name: "summarizer"}
-	anlz := &trackingProvider{name: "analyzer"}
+func TestNewPollerWithCompleter(t *testing.T) {
+	completer := &trackingCompleter{}
 
 	project := &db.Project{
 		Name:               "test",
@@ -32,31 +28,9 @@ func TestNewPollerSeparateProviders(t *testing.T) {
 		LLMAnalyzerModel:   "sonnet",
 	}
 
-	p := New(nil, project, summ, anlz, nil)
+	p := New(nil, project, completer, nil)
 
-	if p.summarizerProvider.Name() != "summarizer" {
-		t.Errorf("summarizerProvider.Name() = %q, want %q", p.summarizerProvider.Name(), "summarizer")
-	}
-	if p.analyzerProvider.Name() != "analyzer" {
-		t.Errorf("analyzerProvider.Name() = %q, want %q", p.analyzerProvider.Name(), "analyzer")
-	}
-	if p.AnalyzerProvider().Name() != "analyzer" {
-		t.Errorf("AnalyzerProvider() = %q, want %q", p.AnalyzerProvider().Name(), "analyzer")
-	}
-}
-
-func TestNewPollerSameProvider(t *testing.T) {
-	shared := &trackingProvider{name: "anthropic"}
-
-	project := &db.Project{
-		Name:               "test",
-		LLMSummarizerModel: "haiku",
-		LLMAnalyzerModel:   "sonnet",
-	}
-
-	p := New(nil, project, shared, shared, nil)
-
-	if p.summarizerProvider != p.analyzerProvider {
-		t.Error("expected same provider instance for both tiers")
+	if p.Completer() != completer {
+		t.Error("Completer() should return the completer passed to New()")
 	}
 }

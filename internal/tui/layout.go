@@ -1898,7 +1898,7 @@ func (m Model) renderBottomBar() string {
 		b.WriteString("\n\n")
 	default:
 		if m.pollConfirm {
-			b.WriteString(headerStyle().Render("  Run comprehensive analysis? (Requires LLM tokens)"))
+			b.WriteString(headerStyle().Render("  Run comprehensive analysis? (~1 min depending on complexity)"))
 			b.WriteString("\n")
 			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
 			b.WriteString("\n")

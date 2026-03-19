@@ -67,8 +67,24 @@ func parseAnalysis(raw string) *AnalysisResponse {
 }
 
 // parseJSON is a helper that unmarshals JSON into the given target.
+// It strips markdown code fences before parsing.
 func parseJSON(raw string, target interface{}) error {
-	if err := json.Unmarshal([]byte(raw), target); err != nil {
+	cleaned := strings.TrimSpace(raw)
+
+	// Strip markdown code fences.
+	if idx := strings.Index(cleaned, "```json"); idx >= 0 {
+		start := idx + len("```json")
+		if end := strings.Index(cleaned[start:], "```"); end >= 0 {
+			cleaned = strings.TrimSpace(cleaned[start : start+end])
+		}
+	} else if idx := strings.Index(cleaned, "```"); idx >= 0 {
+		start := idx + len("```")
+		if end := strings.Index(cleaned[start:], "```"); end >= 0 {
+			cleaned = strings.TrimSpace(cleaned[start : start+end])
+		}
+	}
+
+	if err := json.Unmarshal([]byte(cleaned), target); err != nil {
 		return fmt.Errorf("parse JSON: %w", err)
 	}
 	return nil
@@ -112,4 +128,3 @@ func reconcileConcerns(store *db.Store, projectID int64, existing []db.Concern, 
 
 	return result
 }
-
