@@ -929,6 +929,84 @@ func (s *Store) DeleteRepoOnboarding(repoID int64) error {
 	return err
 }
 
+// UpdateAutopilotTaskCost sets the cost_usd for an autopilot task.
+func (s *Store) UpdateAutopilotTaskCost(id int64, costUSD float64) error {
+	_, err := s.db.Exec(`UPDATE autopilot_tasks SET cost_usd = ? WHERE id = ?`, costUSD, id)
+	return err
+}
+
+// --- Cost Aggregation ---
+
+// DailyCost returns the aggregated cost for a project on a given date (YYYY-MM-DD).
+// Only includes tasks with terminal status (done, bailed, failed, stopped).
+func (s *Store) DailyCost(projectID int64, date string) (*CostSummary, error) {
+	var cs CostSummary
+	err := s.db.Get(&cs, `
+		SELECT COALESCE(SUM(cost_usd), 0) AS total_cost,
+		       COUNT(*) AS task_count
+		FROM autopilot_tasks
+		WHERE project_id = ?
+		  AND status IN ('done', 'bailed', 'failed', 'stopped')
+		  AND date(completed_at) = date(?)
+	`, projectID, date)
+	if err != nil {
+		return nil, fmt.Errorf("daily cost: %w", err)
+	}
+	return &cs, nil
+}
+
+// WeeklyCost returns the aggregated cost for a project in the 7-day window
+// ending on the given date (inclusive). Only includes terminal tasks.
+func (s *Store) WeeklyCost(projectID int64, endDate string) (*CostSummary, error) {
+	var cs CostSummary
+	err := s.db.Get(&cs, `
+		SELECT COALESCE(SUM(cost_usd), 0) AS total_cost,
+		       COUNT(*) AS task_count
+		FROM autopilot_tasks
+		WHERE project_id = ?
+		  AND status IN ('done', 'bailed', 'failed', 'stopped')
+		  AND date(completed_at) >= date(?, '-6 days')
+		  AND date(completed_at) <= date(?)
+	`, projectID, endDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("weekly cost: %w", err)
+	}
+	return &cs, nil
+}
+
+// OverallCost returns the aggregated cost for all terminal tasks in a project.
+func (s *Store) OverallCost(projectID int64) (*CostSummary, error) {
+	var cs CostSummary
+	err := s.db.Get(&cs, `
+		SELECT COALESCE(SUM(cost_usd), 0) AS total_cost,
+		       COUNT(*) AS task_count
+		FROM autopilot_tasks
+		WHERE project_id = ?
+		  AND status IN ('done', 'bailed', 'failed', 'stopped')
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("overall cost: %w", err)
+	}
+	return &cs, nil
+}
+
+// DailyTaskCosts returns per-task cost details for a project on a given date.
+func (s *Store) DailyTaskCosts(projectID int64, date string) ([]TaskCostDetail, error) {
+	var details []TaskCostDetail
+	err := s.db.Select(&details, `
+		SELECT issue_number, issue_title, status, cost_usd, completed_at
+		FROM autopilot_tasks
+		WHERE project_id = ?
+		  AND status IN ('done', 'bailed', 'failed', 'stopped')
+		  AND date(completed_at) = date(?)
+		ORDER BY completed_at DESC
+	`, projectID, date)
+	if err != nil {
+		return nil, fmt.Errorf("daily task costs: %w", err)
+	}
+	return details, nil
+}
+
 // LastPoll returns the most recent poll for a project, or nil if none.
 func (s *Store) LastPoll(projectID int64) (*Poll, error) {
 	polls, err := s.RecentPolls(projectID, 1)

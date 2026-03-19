@@ -1850,3 +1850,263 @@ func TestPerTierProviderColumns(t *testing.T) {
 		t.Errorf("after update LLMAnalyzerProvider = %q, want %q", got2.LLMAnalyzerProvider, "anthropic")
 	}
 }
+
+// --- Cost Aggregation Tests ---
+
+func createCostTestProject(t *testing.T, store *Store, name string) *Project {
+	t.Helper()
+	p := &Project{
+		Name:               name,
+		GoalType:           "feature",
+		GoalDescription:    "cost test",
+		RefreshIntervalSec: 300,
+		MessageTTLSec:      172800,
+		LLMProvider:        "anthropic",
+		LLMModel:           "claude-haiku-4-5",
+		LLMSummarizerModel: "claude-haiku-4-5",
+		LLMAnalyzerModel:   "claude-sonnet-4-6",
+	}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	return p
+}
+
+func createTaskWithCost(t *testing.T, store *Store, projectID int64, issueNum int, status string, cost float64, completedAt string) {
+	t.Helper()
+	task := &AutopilotTask{
+		ProjectID:    projectID,
+		IssueNumber:  issueNum,
+		IssueTitle:   fmt.Sprintf("Issue #%d", issueNum),
+		IssueBody:    "test",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+	// Set cost.
+	if err := store.UpdateAutopilotTaskCost(task.ID, cost); err != nil {
+		t.Fatalf("UpdateAutopilotTaskCost: %v", err)
+	}
+	// Set status and completed_at directly via SQL for test control.
+	if _, err := store.DB().Exec(`UPDATE autopilot_tasks SET status = ?, completed_at = ? WHERE id = ?`, status, completedAt, task.ID); err != nil {
+		t.Fatalf("set status+completed_at: %v", err)
+	}
+}
+
+func TestUpdateAutopilotTaskCost(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "cost-update")
+
+	task := &AutopilotTask{
+		ProjectID:    p.ID,
+		IssueNumber:  1,
+		IssueTitle:   "Test",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	// Initially zero.
+	tasks, _ := store.GetAutopilotTasks(p.ID)
+	if tasks[0].CostUSD != 0 {
+		t.Errorf("CostUSD = %f, want 0", tasks[0].CostUSD)
+	}
+
+	// Update cost.
+	if err := store.UpdateAutopilotTaskCost(task.ID, 1.25); err != nil {
+		t.Fatalf("UpdateAutopilotTaskCost: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].CostUSD != 1.25 {
+		t.Errorf("CostUSD = %f, want 1.25", tasks[0].CostUSD)
+	}
+}
+
+func TestDailyCost(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "daily-cost")
+
+	// Two tasks completed today, one yesterday.
+	createTaskWithCost(t, store, p.ID, 1, "done", 1.50, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 2, "bailed", 0.75, "2026-03-18 15:30:00")
+	createTaskWithCost(t, store, p.ID, 3, "done", 2.00, "2026-03-17 12:00:00")
+
+	// Daily cost for 2026-03-18.
+	cs, err := store.DailyCost(p.ID, "2026-03-18")
+	if err != nil {
+		t.Fatalf("DailyCost: %v", err)
+	}
+	if cs.TotalCost != 2.25 {
+		t.Errorf("TotalCost = %f, want 2.25", cs.TotalCost)
+	}
+	if cs.TaskCount != 2 {
+		t.Errorf("TaskCount = %d, want 2", cs.TaskCount)
+	}
+
+	// Daily cost for 2026-03-17.
+	cs, err = store.DailyCost(p.ID, "2026-03-17")
+	if err != nil {
+		t.Fatalf("DailyCost: %v", err)
+	}
+	if cs.TotalCost != 2.00 {
+		t.Errorf("TotalCost = %f, want 2.00", cs.TotalCost)
+	}
+	if cs.TaskCount != 1 {
+		t.Errorf("TaskCount = %d, want 1", cs.TaskCount)
+	}
+}
+
+func TestDailyCost_ExcludesQueuedAndRunning(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "daily-excl")
+
+	// A queued task and a running task should not count.
+	createTaskWithCost(t, store, p.ID, 1, "queued", 0.50, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 2, "running", 0.75, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 3, "done", 1.00, "2026-03-18 10:00:00")
+
+	cs, err := store.DailyCost(p.ID, "2026-03-18")
+	if err != nil {
+		t.Fatalf("DailyCost: %v", err)
+	}
+	if cs.TotalCost != 1.00 {
+		t.Errorf("TotalCost = %f, want 1.00 (only done task)", cs.TotalCost)
+	}
+	if cs.TaskCount != 1 {
+		t.Errorf("TaskCount = %d, want 1", cs.TaskCount)
+	}
+}
+
+func TestWeeklyCost(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "weekly-cost")
+
+	// Tasks across a week.
+	createTaskWithCost(t, store, p.ID, 1, "done", 1.00, "2026-03-18 10:00:00") // today (Wed)
+	createTaskWithCost(t, store, p.ID, 2, "done", 2.00, "2026-03-15 10:00:00") // Sun (within 7 days)
+	createTaskWithCost(t, store, p.ID, 3, "done", 3.00, "2026-03-12 10:00:00") // Thu (exactly 6 days ago from 18th)
+	createTaskWithCost(t, store, p.ID, 4, "done", 4.00, "2026-03-11 10:00:00") // Wed (7 days ago = outside)
+
+	// Weekly cost ending on 2026-03-18 (covers 03-12 through 03-18).
+	cs, err := store.WeeklyCost(p.ID, "2026-03-18")
+	if err != nil {
+		t.Fatalf("WeeklyCost: %v", err)
+	}
+	// Should include tasks 1, 2, 3 (1.00 + 2.00 + 3.00 = 6.00).
+	if cs.TotalCost != 6.00 {
+		t.Errorf("TotalCost = %f, want 6.00", cs.TotalCost)
+	}
+	if cs.TaskCount != 3 {
+		t.Errorf("TaskCount = %d, want 3", cs.TaskCount)
+	}
+}
+
+func TestOverallCost(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "overall-cost")
+
+	createTaskWithCost(t, store, p.ID, 1, "done", 1.50, "2026-01-15 10:00:00")
+	createTaskWithCost(t, store, p.ID, 2, "failed", 0.50, "2026-02-20 10:00:00")
+	createTaskWithCost(t, store, p.ID, 3, "done", 2.00, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 4, "queued", 0.00, "")  // queued: excluded
+	createTaskWithCost(t, store, p.ID, 5, "running", 0.00, "") // running: excluded
+
+	cs, err := store.OverallCost(p.ID)
+	if err != nil {
+		t.Fatalf("OverallCost: %v", err)
+	}
+	if cs.TotalCost != 4.00 {
+		t.Errorf("TotalCost = %f, want 4.00", cs.TotalCost)
+	}
+	if cs.TaskCount != 3 {
+		t.Errorf("TaskCount = %d, want 3", cs.TaskCount)
+	}
+}
+
+func TestOverallCost_EmptyProject(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "overall-empty")
+
+	cs, err := store.OverallCost(p.ID)
+	if err != nil {
+		t.Fatalf("OverallCost: %v", err)
+	}
+	if cs.TotalCost != 0 {
+		t.Errorf("TotalCost = %f, want 0", cs.TotalCost)
+	}
+	if cs.TaskCount != 0 {
+		t.Errorf("TaskCount = %d, want 0", cs.TaskCount)
+	}
+}
+
+func TestDailyTaskCosts(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "daily-details")
+
+	createTaskWithCost(t, store, p.ID, 10, "done", 1.50, "2026-03-18 09:00:00")
+	createTaskWithCost(t, store, p.ID, 20, "bailed", 0.25, "2026-03-18 14:00:00")
+	createTaskWithCost(t, store, p.ID, 30, "done", 3.00, "2026-03-17 12:00:00") // different day
+
+	details, err := store.DailyTaskCosts(p.ID, "2026-03-18")
+	if err != nil {
+		t.Fatalf("DailyTaskCosts: %v", err)
+	}
+	if len(details) != 2 {
+		t.Fatalf("got %d details, want 2", len(details))
+	}
+	// Should be ordered by completed_at DESC.
+	if details[0].IssueNumber != 20 {
+		t.Errorf("first detail issue = %d, want 20 (most recent)", details[0].IssueNumber)
+	}
+	if details[1].IssueNumber != 10 {
+		t.Errorf("second detail issue = %d, want 10", details[1].IssueNumber)
+	}
+	if details[0].CostUSD != 0.25 {
+		t.Errorf("detail[0].CostUSD = %f, want 0.25", details[0].CostUSD)
+	}
+}
+
+func TestCostAggregation_IsolatedByProject(t *testing.T) {
+	store := openTestDB(t)
+	p1 := createCostTestProject(t, store, "cost-iso-1")
+	p2 := createCostTestProject(t, store, "cost-iso-2")
+
+	createTaskWithCost(t, store, p1.ID, 1, "done", 5.00, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p2.ID, 1, "done", 3.00, "2026-03-18 10:00:00")
+
+	cs1, _ := store.OverallCost(p1.ID)
+	cs2, _ := store.OverallCost(p2.ID)
+
+	if cs1.TotalCost != 5.00 {
+		t.Errorf("p1 TotalCost = %f, want 5.00", cs1.TotalCost)
+	}
+	if cs2.TotalCost != 3.00 {
+		t.Errorf("p2 TotalCost = %f, want 3.00", cs2.TotalCost)
+	}
+}
+
+func TestCostAggregation_AllTerminalStatuses(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "cost-statuses")
+
+	// All terminal statuses should be included.
+	createTaskWithCost(t, store, p.ID, 1, "done", 1.00, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 2, "bailed", 0.50, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 3, "failed", 0.75, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 4, "stopped", 0.25, "2026-03-18 10:00:00")
+
+	cs, err := store.OverallCost(p.ID)
+	if err != nil {
+		t.Fatalf("OverallCost: %v", err)
+	}
+	if cs.TotalCost != 2.50 {
+		t.Errorf("TotalCost = %f, want 2.50", cs.TotalCost)
+	}
+	if cs.TaskCount != 4 {
+		t.Errorf("TaskCount = %d, want 4", cs.TaskCount)
+	}
+}
