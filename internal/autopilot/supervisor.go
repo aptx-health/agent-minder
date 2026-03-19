@@ -1769,6 +1769,18 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
 			debugLog("inspectOutcome: classified as failed",
 				"issue", task.IssueNumber, "reason", reason)
+
+			// Check for PR even on failure — agent may have opened one before exhausting limits.
+			ghClient := ghpkg.NewClient(s.ghToken)
+			pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
+			if err == nil && pr != nil && pr.Number > 0 {
+				_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
+				task.PRNumber = pr.Number // Update in memory so caller sees it.
+				debugLog("inspectOutcome: failed task has PR, promoting to review",
+					"issue", task.IssueNumber, "pr", pr.Number)
+				return "review"
+			}
+
 			return "failed"
 		}
 		if status == "warning" {

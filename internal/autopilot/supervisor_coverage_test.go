@@ -3850,6 +3850,189 @@ func TestApplyRebuildDepOption_UnblocksWhenSatisfied(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// inspectOutcome — failed with PR promotes to review
+// ---------------------------------------------------------------------------
+
+// TestInspectOutcome_FailedNoPR_StaysFailed verifies that when classifyOutcome
+// returns "failed" and no PR is found, inspectOutcome still returns "failed".
+// (The fake token causes FetchPRForBranch to fail, simulating no PR.)
+func TestInspectOutcome_FailedNoPR_StaysFailed(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotMaxTurns = 50
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "agent.log")
+	logContent := `{"type":"result","subtype":"success","is_error":false,"num_turns":50,"total_cost_usd":2.00,"result":"Done","permission_denials":[],"session_id":"abc"}
+`
+	if err := os.WriteFile(logPath, []byte(logContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Max turns no PR",
+		AgentLog:     logPath,
+		Branch:       "agent/issue-42",
+		Dependencies: "[]",
+		Status:       "running",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	status := sup.inspectOutcome(context.Background(), task, 0)
+	if status != "failed" {
+		t.Errorf("expected failed (no PR found), got %q", status)
+	}
+	if task.PRNumber != 0 {
+		t.Errorf("PRNumber should remain 0, got %d", task.PRNumber)
+	}
+}
+
+// TestInspectOutcome_BudgetNoPR_StaysFailed verifies budget exhaustion without PR stays failed.
+func TestInspectOutcome_BudgetNoPR_StaysFailed(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotMaxBudgetUSD = 3.00
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "agent.log")
+	logContent := `{"type":"result","subtype":"success","is_error":false,"num_turns":10,"total_cost_usd":2.90,"result":"Done","permission_denials":[],"session_id":"abc"}
+`
+	if err := os.WriteFile(logPath, []byte(logContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Budget no PR",
+		AgentLog:     logPath,
+		Branch:       "agent/issue-42",
+		Dependencies: "[]",
+		Status:       "running",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	status := sup.inspectOutcome(context.Background(), task, 0)
+	if status != "failed" {
+		t.Errorf("expected failed (no PR found), got %q", status)
+	}
+}
+
+// TestInspectOutcome_FailureReasonStoredOnFailed verifies failure_reason and
+// failure_detail are persisted even when the task stays as "failed" (no PR).
+func TestInspectOutcome_FailureReasonStoredOnFailed(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotMaxTurns = 20
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "agent.log")
+	logContent := `{"type":"result","subtype":"success","is_error":false,"num_turns":20,"total_cost_usd":1.00,"result":"Ran out of turns","permission_denials":[],"session_id":"abc"}
+`
+	if err := os.WriteFile(logPath, []byte(logContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  99,
+		IssueTitle:   "Failure reason test",
+		AgentLog:     logPath,
+		Branch:       "agent/issue-99",
+		Dependencies: "[]",
+		Status:       "running",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	status := sup.inspectOutcome(context.Background(), task, 0)
+	if status != "failed" {
+		t.Errorf("expected failed, got %q", status)
+	}
+
+	// Verify failure reason was stored in DB.
+	tasks, err := store.GetAutopilotTasks(project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ta := range tasks {
+		if ta.ID == task.ID {
+			if ta.FailureReason != "max_turns" {
+				t.Errorf("failure_reason = %q, want max_turns", ta.FailureReason)
+			}
+			if ta.FailureDetail == "" {
+				t.Error("failure_detail should not be empty")
+			}
+			return
+		}
+	}
+	t.Error("task not found in DB after inspectOutcome")
+}
+
+// ---------------------------------------------------------------------------
+// cleanup branch deletion logic
+// ---------------------------------------------------------------------------
+
+// TestCleanup_BailedDeletesBranch verifies that cleanup with deleteBranch=true
+// attempts branch deletion (bailed tasks with no PR).
+func TestCleanup_BailedDeletesBranch(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Bailed task",
+		WorktreePath: filepath.Join(t.TempDir(), "nonexistent-worktree"),
+		Branch:       "agent/issue-42",
+		Dependencies: "[]",
+		Status:       "bailed",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// cleanup should not panic even with non-existent paths.
+	// With status=bailed, deleteBranch is true.
+	sup.cleanup(task, true)
+}
+
+// TestCleanup_ReviewKeepsBranch verifies that review tasks do not delete branch.
+func TestCleanup_ReviewKeepsBranch(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/fake-repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Review task",
+		WorktreePath: filepath.Join(t.TempDir(), "nonexistent-worktree"),
+		Branch:       "agent/issue-42",
+		PRNumber:     100,
+		Dependencies: "[]",
+		Status:       "review",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// cleanup with deleteBranch=false (review status).
+	sup.cleanup(task, false)
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
