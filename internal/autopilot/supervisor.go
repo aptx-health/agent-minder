@@ -1578,8 +1578,11 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
 	}
 
-	// Cleanup: remove worktree, delete branch if bailed or failed.
-	s.cleanup(task, status == "bailed" || status == "failed")
+	// Cleanup: remove worktree for review tasks (restored on demand later);
+	// retain worktree and branch for failed/bailed tasks so work can be recovered.
+	if status == "review" {
+		s.cleanup(task, false)
+	}
 }
 
 // checkReviewTasks checks if any tasks in "review" status have had their PRs merged.

@@ -10,12 +10,7 @@ import (
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
 
-// testLayoutModelWithProject builds a Model with the project inserted in the DB.
-// This is needed for tests that insert concerns or other FK-dependent rows.
-func testLayoutModelWithProject(t *testing.T) Model {
-	m, _ := testModelWithProject(t)
-	return m
-}
+// testModelWithProject is defined in app_test.go — returns (Model, *db.Store).
 
 // --- Pure function tests (table-driven) ---
 
@@ -395,7 +390,7 @@ func TestRenderConcerns_EmptyConcerns(t *testing.T) {
 }
 
 func TestRenderConcerns_ShowsConcernCount(t *testing.T) {
-	m := testLayoutModelWithProject(t)
+	m, _ := testModelWithProject(t)
 	m.width = 120
 
 	// Insert concerns into the store.
@@ -410,7 +405,7 @@ func TestRenderConcerns_ShowsConcernCount(t *testing.T) {
 }
 
 func TestRenderConcerns_SeverityPrefixes(t *testing.T) {
-	m := testLayoutModelWithProject(t)
+	m, _ := testModelWithProject(t)
 	m.width = 120
 
 	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "info concern", Severity: "info"})
@@ -430,7 +425,7 @@ func TestRenderConcerns_SeverityPrefixes(t *testing.T) {
 }
 
 func TestRenderConcerns_CapsAtFive(t *testing.T) {
-	m := testLayoutModelWithProject(t)
+	m, _ := testModelWithProject(t)
 	m.width = 120
 
 	for i := 0; i < 8; i++ {
@@ -444,7 +439,7 @@ func TestRenderConcerns_CapsAtFive(t *testing.T) {
 }
 
 func TestRenderConcerns_ExpandedShowsAll(t *testing.T) {
-	m := testLayoutModelWithProject(t)
+	m, _ := testModelWithProject(t)
 	m.width = 120
 	m.concernsExpanded = true
 
@@ -465,7 +460,7 @@ func TestRenderConcerns_ExpandedShowsAll(t *testing.T) {
 }
 
 func TestRenderConcerns_ToggleHint(t *testing.T) {
-	m := testLayoutModelWithProject(t)
+	m, _ := testModelWithProject(t)
 	m.width = 120
 
 	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "test concern", Severity: "info"})
