@@ -10,6 +10,8 @@ var (
 )
 
 func main() {
-	cmd.SetVersionInfo(version, commit, date)
+	cmd.Version = version
+	cmd.Commit = commit
+	cmd.Date = date
 	cmd.Execute()
 }
