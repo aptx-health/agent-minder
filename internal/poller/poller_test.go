@@ -2397,22 +2397,6 @@ func TestDoPoll_NoActivity_SkipsLLM(t *testing.T) {
 	}
 }
 
-// --- parseGitHubRemote additional tests (augmenting tracked_test.go) ---
-
-func TestParseGitHubRemote_SSHNoGit(t *testing.T) {
-	owner, repo := parseGitHubRemote("git@github.com:org/repo")
-	if owner != "org" || repo != "repo" {
-		t.Errorf("got %s/%s", owner, repo)
-	}
-}
-
-func TestParseGitHubRemote_Whitespace(t *testing.T) {
-	owner, repo := parseGitHubRemote("  https://github.com/a/b.git  ")
-	if owner != "a" || repo != "b" {
-		t.Errorf("got %s/%s", owner, repo)
-	}
-}
-
 // --- BulkAddTrackedItems tests ---
 
 func TestBulkAddTrackedItems(t *testing.T) {

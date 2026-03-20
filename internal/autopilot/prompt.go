@@ -106,11 +106,11 @@ After exploring, decide:
 - **Permission failures**: If a tool call is denied, you may try 2-3 alternative approaches. If those are also denied, bail immediately — do not keep trying workarounds. Post a comment explaining which tools/permissions are needed.
 `
 
-// detectAgentDef probes the three-tier failover chain without writing anything.
+// DetectAgentDef probes the three-tier failover chain without writing anything.
 // Use this for read-only detection (e.g., at Prepare time to notify the user).
 // The dirPath should be either a repo dir or worktree path — both are checked
 // the same way for a .claude/agents/autopilot.md file.
-func detectAgentDef(dirPath string) AgentDefSource {
+func DetectAgentDef(dirPath string) AgentDefSource {
 	// Tier 1: Check repo/worktree-level.
 	repoPath := filepath.Join(dirPath, ".claude", "agents", "autopilot.md")
 	if _, err := os.Stat(repoPath); err == nil {
@@ -141,7 +141,7 @@ func detectAgentDef(dirPath string) AgentDefSource {
 // the worktree's .claude/agents/autopilot.md so Claude Code can read it from disk.
 // This is safe because worktrees are ephemeral and cleaned up after the agent exits.
 func ensureAgentDef(worktreePath string) (AgentDefSource, error) {
-	source := detectAgentDef(worktreePath)
+	source := DetectAgentDef(worktreePath)
 	if source != AgentDefBuiltIn {
 		return source, nil
 	}

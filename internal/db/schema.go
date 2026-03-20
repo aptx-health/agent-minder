@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 18
+const currentVersion = 19
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	autopilot_max_budget_usd REAL DEFAULT 3.00,
 	autopilot_skip_label   TEXT DEFAULT 'no-agent',
 	autopilot_base_branch  TEXT DEFAULT '',
+	is_deploy             INTEGER DEFAULT 0,
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -294,6 +295,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 18 {
 		if err := migrateV18(db); err != nil {
 			return fmt.Errorf("apply migration v18: %w", err)
+		}
+	}
+
+	if version < 19 {
+		if err := migrateV19(db); err != nil {
+			return fmt.Errorf("apply migration v19: %w", err)
 		}
 	}
 
@@ -605,6 +612,17 @@ func migrateV17(db *sqlx.DB) error {
 func migrateV18(db *sqlx.DB) error {
 	_, err := db.Exec(`UPDATE projects SET llm_provider = '', llm_model = '' WHERE llm_provider != '' OR llm_model != ''`)
 	return err
+}
+
+func migrateV19(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN is_deploy INTEGER DEFAULT 0`)
+	if err != nil {
+		return fmt.Errorf("add is_deploy: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE projects SET is_deploy = 0 WHERE is_deploy IS NULL`); err != nil {
+		return fmt.Errorf("null-fill is_deploy: %w", err)
+	}
+	return nil
 }
 
 // DefaultDBPath returns the agent-minder database path, respecting MINDER_DB env var.
