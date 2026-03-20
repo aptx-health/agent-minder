@@ -223,6 +223,15 @@ type RepoOnboarding struct {
 	ValidationStatus string `db:"validation_status"` // "pass", "fail", "untested"
 }
 
+// DepGraph represents a stored dependency graph for an autopilot session.
+type DepGraph struct {
+	ID         int64  `db:"id"`
+	ProjectID  int64  `db:"project_id"`
+	GraphJSON  string `db:"graph_json"`
+	OptionName string `db:"option_name"`
+	CreatedAt  string `db:"created_at"`
+}
+
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.
 func (p *Poll) LLMResponse() string {
 	if p.Tier2Response != "" {

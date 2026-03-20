@@ -1761,7 +1761,7 @@ func TestAutopilotPrepareResult_NoIssues(t *testing.T) {
 	sup := autopilot.New(m.store, m.project, nil, t.TempDir(), "owner", "repo", "fake-token")
 	m.autopilotSupervisor = sup
 
-	result, _ := m.Update(autopilotPrepareResultMsg{total: 0})
+	result, _ := m.Update(autopilotPrepareResultMsg{result: &autopilot.PrepareResult{}})
 	m = result.(Model)
 	if m.autopilotMode != "" {
 		t.Errorf("autopilotMode = %q, want empty when no issues found", m.autopilotMode)
@@ -1779,9 +1779,11 @@ func TestAutopilotPrepareResult_WithIssues(t *testing.T) {
 	m.activeTab = tabAutopilot
 
 	result, _ := m.Update(autopilotPrepareResultMsg{
-		total:    5,
-		options:  []autopilot.DepOption{{Unblocked: 3}},
-		agentDef: autopilot.AgentDefBuiltIn,
+		result: &autopilot.PrepareResult{
+			Total:    5,
+			Options:  []autopilot.DepOption{{Unblocked: 3}},
+			AgentDef: autopilot.AgentDefBuiltIn,
+		},
 	})
 	m = result.(Model)
 	if m.autopilotMode != "dep-select" {
