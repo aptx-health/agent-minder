@@ -13,6 +13,7 @@ import (
 type ItemStatus struct {
 	Number      int
 	Title       string
+	Body        string // issue/PR body text
 	State       string // "open", "closed", "merged"
 	Labels      []string
 	ItemType    string // "issue" or "pull_request"
@@ -73,6 +74,7 @@ func (c *Client) FetchItemWithHint(ctx context.Context, owner, repo string, numb
 			status := &ItemStatus{
 				Number:   number,
 				Title:    pr.GetTitle(),
+				Body:     pr.GetBody(),
 				ItemType: "pull_request",
 				Labels:   extractLabels(pr.Labels),
 				Draft:    pr.GetDraft(),
@@ -101,6 +103,7 @@ func (c *Client) FetchItemWithHint(ctx context.Context, owner, repo string, numb
 	return &ItemStatus{
 		Number:   number,
 		Title:    issue.GetTitle(),
+		Body:     issue.GetBody(),
 		State:    issue.GetState(),
 		ItemType: "issue",
 		Labels:   extractLabels(issue.Labels),

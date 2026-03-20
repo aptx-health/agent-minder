@@ -35,14 +35,14 @@ func (s *Store) CreateProject(p *Project) error {
 			idle_pause_sec, analyzer_focus,
 			autopilot_filter_type, autopilot_filter_value, autopilot_max_agents,
 			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label,
-			autopilot_base_branch)
+			autopilot_base_branch, is_deploy)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
 			:llm_summarizer_model, :llm_analyzer_model, :status_interval_sec, :analysis_interval_sec,
 			:idle_pause_sec, :analyzer_focus,
 			:autopilot_filter_type, :autopilot_filter_value, :autopilot_max_agents,
 			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label,
-			:autopilot_base_branch)
+			:autopilot_base_branch, :is_deploy)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -112,6 +112,45 @@ func (s *Store) UpdateProject(p *Project) error {
 		WHERE id = :id
 	`, p)
 	return err
+}
+
+// ListDeployProjects returns all deploy projects ordered by creation time (newest first).
+func (s *Store) ListDeployProjects() ([]Project, error) {
+	var projects []Project
+	if err := s.db.Select(&projects, "SELECT * FROM projects WHERE is_deploy = 1 ORDER BY created_at DESC"); err != nil {
+		return nil, fmt.Errorf("list deploy projects: %w", err)
+	}
+	return projects, nil
+}
+
+// IssuesInRunningDeploys returns a map of issue# → deploy project name for any issues
+// currently queued or running in a deploy project for the given owner/repo.
+func (s *Store) IssuesInRunningDeploys(owner, repo string, issues []int) (map[int]string, error) {
+	if len(issues) == 0 {
+		return nil, nil
+	}
+	result := make(map[int]string)
+	for _, issueNum := range issues {
+		var matches []struct {
+			ProjectName string `db:"name"`
+			IssueNumber int    `db:"issue_number"`
+		}
+		if err := s.db.Select(&matches, `
+			SELECT p.name, t.issue_number
+			FROM autopilot_tasks t
+			JOIN projects p ON p.id = t.project_id
+			WHERE p.is_deploy = 1
+			  AND t.owner = ? AND t.repo = ?
+			  AND t.issue_number = ?
+			  AND t.status IN ('queued', 'running')
+		`, owner, repo, issueNum); err != nil {
+			return nil, fmt.Errorf("check deploy issue %d: %w", issueNum, err)
+		}
+		for _, m := range matches {
+			result[m.IssueNumber] = m.ProjectName
+		}
+	}
+	return result, nil
 }
 
 // DeleteProject removes a project and all associated data (cascading).

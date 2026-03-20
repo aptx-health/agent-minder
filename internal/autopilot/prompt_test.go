@@ -407,7 +407,7 @@ func TestDetectAgentDef(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if source := detectAgentDef(dir); source != AgentDefRepo {
+		if source := DetectAgentDef(dir); source != AgentDefRepo {
 			t.Errorf("expected %q, got %q", AgentDefRepo, source)
 		}
 	})
@@ -423,7 +423,7 @@ func TestDetectAgentDef(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(fakeHome, ".claude")) })
 
-		if source := detectAgentDef(dir); source != AgentDefUser {
+		if source := DetectAgentDef(dir); source != AgentDefUser {
 			t.Errorf("expected %q, got %q", AgentDefUser, source)
 		}
 	})
@@ -431,14 +431,14 @@ func TestDetectAgentDef(t *testing.T) {
 	t.Run("detects built-in without writing", func(t *testing.T) {
 		dir := t.TempDir()
 
-		if source := detectAgentDef(dir); source != AgentDefBuiltIn {
+		if source := DetectAgentDef(dir); source != AgentDefBuiltIn {
 			t.Errorf("expected %q, got %q", AgentDefBuiltIn, source)
 		}
 
 		// Verify nothing was written.
 		path := filepath.Join(dir, ".claude", "agents", "autopilot.md")
 		if _, err := os.Stat(path); err == nil {
-			t.Error("detectAgentDef should not write files, but autopilot.md was created")
+			t.Error("DetectAgentDef should not write files, but autopilot.md was created")
 		}
 	})
 }

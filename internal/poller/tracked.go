@@ -28,7 +28,7 @@ func (p *Poller) GitHubRepos() []GitHubRepo {
 	var result []GitHubRepo
 	for _, r := range repos {
 		remote := gitpkg.RemoteURL(r.Path)
-		o, rp := parseGitHubRemote(remote)
+		o, rp := gitpkg.ParseGitHubRemote(remote)
 		if o == "" {
 			continue
 		}
@@ -141,39 +141,6 @@ func (p *Poller) DefaultOwnerRepo() (owner, repo string) {
 		return "", ""
 	}
 	return ghRepos[0].Owner, ghRepos[0].Repo
-}
-
-// parseGitHubRemote extracts owner/repo from a GitHub remote URL.
-// Handles HTTPS (https://github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git).
-func parseGitHubRemote(url string) (owner, repo string) {
-	url = strings.TrimSpace(url)
-	if url == "" {
-		return "", ""
-	}
-
-	// HTTPS: https://github.com/owner/repo.git
-	if strings.Contains(url, "github.com/") {
-		idx := strings.Index(url, "github.com/")
-		path := url[idx+len("github.com/"):]
-		path = strings.TrimSuffix(path, ".git")
-		parts := strings.SplitN(path, "/", 2)
-		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-			return parts[0], parts[1]
-		}
-	}
-
-	// SSH: git@github.com:owner/repo.git
-	if strings.Contains(url, "github.com:") {
-		idx := strings.Index(url, "github.com:")
-		path := url[idx+len("github.com:"):]
-		path = strings.TrimSuffix(path, ".git")
-		parts := strings.SplitN(path, "/", 2)
-		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-			return parts[0], parts[1]
-		}
-	}
-
-	return "", ""
 }
 
 // FetchItemStatus fetches the status of a GitHub item without adding it to tracking.

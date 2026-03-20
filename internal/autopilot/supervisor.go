@@ -140,6 +140,12 @@ func (s *Supervisor) Events() <-chan Event {
 	return s.events
 }
 
+// Done returns a channel that is closed when the supervisor finishes all work.
+// Returns nil if the supervisor has not been launched.
+func (s *Supervisor) Done() <-chan struct{} {
+	return s.done
+}
+
 // IsActive returns true if the supervisor has been launched and is running.
 func (s *Supervisor) IsActive() bool {
 	s.mu.Lock()
@@ -501,7 +507,7 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, o
 	}
 
 	// Detect which agent definition tier will be used.
-	agentDef = detectAgentDef(s.repoDir)
+	agentDef = DetectAgentDef(s.repoDir)
 
 	// Clean up any leftovers from a previous run.
 	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
@@ -729,6 +735,11 @@ func (s *Supervisor) Launch(ctx context.Context) {
 					s.fillSlots(ctx)
 				}
 			default:
+				// Refill slots on every iteration — handles externally re-queued
+				// tasks (e.g. restart from TUI viewer) that no other event covers.
+				if s.hasIdleSlot() {
+					s.fillSlots(ctx)
+				}
 			}
 
 			s.mu.Lock()
