@@ -87,15 +87,14 @@ func (c *CLICompleter) Complete(ctx context.Context, req *Request) (*Response, e
 		args = append(args, "--max-budget-usd", strconv.FormatFloat(req.MaxBudget, 'f', -1, 64))
 	}
 
-	// The prompt is the last positional argument.
-	args = append(args, req.Prompt)
-
 	bin := c.ClaudeBin
 	if bin == "" {
 		bin = "claude"
 	}
 
+	// Pass prompt via stdin — positional args break when --tools "" is used.
 	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Stdin = strings.NewReader(req.Prompt)
 	out, err := cmd.Output()
 	if err != nil {
 		// Try to extract stderr for better error messages.
