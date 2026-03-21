@@ -641,14 +641,19 @@ func (s *Supervisor) prepareFresh(ctx context.Context, guidance string, agentDef
 	}, nil
 }
 
-// ReprepareKeep transitions existing tasks per the status table, adds new tracked
-// items, and reuses the stored dep graph. New issues get no deps (queued immediately).
+// ReprepareKeep preserves all existing tasks and their deps, only resetting
+// stale running tasks (process is gone after restart). Discovers new tracked
+// items and optionally runs incremental dep analysis for them.
 func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) {
 	agentDef := DetectAgentDef(s.repoDir)
 
-	// Transition tasks: review/failed/bailed/stopped/running → manual; queued/blocked → cleared.
-	if err := s.store.TransitionAutopilotTasksForReprepare(s.project.ID); err != nil {
-		return nil, fmt.Errorf("transition tasks: %w", err)
+	// Only reset running tasks (stale — process is gone). Everything else stays.
+	reset, err := s.store.TransitionStaleRunningTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("reset stale running tasks: %w", err)
+	}
+	if reset > 0 {
+		s.emitEvent("info", fmt.Sprintf("Reset %d stale running tasks to queued", reset), nil)
 	}
 	s.cleanOrphanedWorktrees()
 
@@ -669,7 +674,6 @@ func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) 
 	if added > 0 {
 		options, err := s.BuildIncrementalDepOptions(ctx, allTasks, "")
 		if err != nil {
-			// Fallback: new tasks just get empty deps, which is fine.
 			s.emitEvent("warning", fmt.Sprintf("Incremental dep analysis failed: %v — new tasks queued without deps", err), nil)
 		} else if len(options) > 0 {
 			return &PrepareResult{
@@ -681,40 +685,31 @@ func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) 
 	}
 
 	// No new issues or incremental failed — go straight to confirm.
-	// Re-evaluate blocked status based on stored deps.
+	// Re-evaluate blocked status (some deps may have been satisfied since last run).
 	s.unblockSatisfiedTasks()
 
 	active := 0
+	var doneCount, manualCount int
 	for _, t := range allTasks {
 		if t.Status != "skipped" {
 			active++
 		}
+		if t.Status == "done" {
+			doneCount++
+		}
+		if t.Status == "manual" {
+			manualCount++
+		}
 	}
 
 	return &PrepareResult{
-		Total:    active,
-		Options:  nil, // no options needed — reusing stored graph
-		AgentDef: agentDef,
-		Existing: len(allTasks) - added,
-		HasGraph: true,
-		Done: func() int {
-			c := 0
-			for _, t := range allTasks {
-				if t.Status == "done" {
-					c++
-				}
-			}
-			return c
-		}(),
-		Manual: func() int {
-			c := 0
-			for _, t := range allTasks {
-				if t.Status == "manual" {
-					c++
-				}
-			}
-			return c
-		}(),
+		Total:     active,
+		Options:   nil,
+		AgentDef:  agentDef,
+		Existing:  len(allTasks) - added,
+		HasGraph:  true,
+		Done:      doneCount,
+		Manual:    manualCount,
 		NewIssues: added,
 	}, nil
 }

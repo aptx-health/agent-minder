@@ -2255,6 +2255,64 @@ func TestTransitionAutopilotTasksForReprepare(t *testing.T) {
 	}
 }
 
+func TestTransitionStaleRunningTasks(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "stale-test", GoalType: "feature", GoalDescription: "test"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create tasks with various statuses.
+	for num, status := range map[int]string{
+		1: "running", 2: "queued", 3: "blocked", 4: "manual", 5: "done", 6: "review",
+	} {
+		task := &AutopilotTask{
+			ProjectID:   p.ID,
+			IssueNumber: num,
+			IssueTitle:  fmt.Sprintf("Issue %d", num),
+			Status:      status,
+		}
+		if err := store.CreateAutopilotTask(task); err != nil {
+			t.Fatalf("CreateAutopilotTask #%d: %v", num, err)
+		}
+	}
+
+	n, err := store.TransitionStaleRunningTasks(p.ID)
+	if err != nil {
+		t.Fatalf("TransitionStaleRunningTasks: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("reset count = %d, want 1", n)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(p.ID)
+	taskMap := make(map[int]string)
+	for _, tk := range tasks {
+		taskMap[tk.IssueNumber] = tk.Status
+	}
+
+	// running → queued
+	if taskMap[1] != "queued" {
+		t.Errorf("task #1 (running) = %q, want queued", taskMap[1])
+	}
+	// Everything else unchanged.
+	if taskMap[2] != "queued" {
+		t.Errorf("task #2 (queued) = %q, want queued", taskMap[2])
+	}
+	if taskMap[3] != "blocked" {
+		t.Errorf("task #3 (blocked) = %q, want blocked", taskMap[3])
+	}
+	if taskMap[4] != "manual" {
+		t.Errorf("task #4 (manual) = %q, want manual", taskMap[4])
+	}
+	if taskMap[5] != "done" {
+		t.Errorf("task #5 (done) = %q, want done", taskMap[5])
+	}
+	if taskMap[6] != "review" {
+		t.Errorf("task #6 (review) = %q, want review", taskMap[6])
+	}
+}
+
 func TestMigrateV20_CreatesDepGraphTable(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 

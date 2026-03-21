@@ -699,7 +699,7 @@ func (s *Store) ClearNonTerminalAutopilotTasks(projectID int64) error {
 	return nil
 }
 
-// TransitionAutopilotTasksForReprepare transitions tasks for a re-prepare:
+// TransitionAutopilotTasksForReprepare transitions tasks for a full rebuild re-prepare:
 // review/failed/bailed/stopped/running → manual; done/manual/skipped unchanged; queued/blocked cleared.
 func (s *Store) TransitionAutopilotTasksForReprepare(projectID int64) error {
 	// Transition non-terminal active statuses to manual.
@@ -712,6 +712,22 @@ func (s *Store) TransitionAutopilotTasksForReprepare(projectID int64) error {
 	}
 	// Clear queued and blocked tasks (safe to regenerate).
 	return s.ClearNonTerminalAutopilotTasks(projectID)
+}
+
+// TransitionStaleRunningTasks resets only running tasks to queued (process is gone after restart).
+// All other statuses are preserved. Used by the "keep" reprepare flow.
+func (s *Store) TransitionStaleRunningTasks(projectID int64) (int, error) {
+	result, err := s.db.Exec(`
+		UPDATE autopilot_tasks
+		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
+		    started_at = '', completed_at = '', failure_reason = '', failure_detail = ''
+		WHERE project_id = ? AND status = 'running'
+	`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("transition stale running tasks: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
 }
 
 // --- Autopilot Tasks ---
