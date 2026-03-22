@@ -33,10 +33,10 @@ type broadcastResultMsg struct {
 	err   error
 }
 
-// userMsgResultMsg is sent when a user message post completes.
+// userMsgResultMsg is sent when the analyzer responds to a user query.
 type userMsgResultMsg struct {
-	topic string
-	err   error
+	response string
+	err      error
 }
 
 // onboardResultMsg is sent when an onboarding message generation completes.
@@ -187,11 +187,10 @@ type Model struct {
 	analysisExpanded bool // 'e' toggles 3-line vs proportional
 
 	// Tracked items (refreshed on poll results).
-	trackedItems     []db.TrackedItem
-	bailedIssues     map[int]bool   // issue numbers with bailed autopilot tasks
-	failedIssues     map[int]string // issue numbers with failed autopilot tasks → failure reason
-	trackedExpanded  bool           // 'x' toggles compact strip vs expanded list with titles
-	concernsExpanded bool           // 'c' toggles capped vs full concern display
+	trackedItems    []db.TrackedItem
+	bailedIssues    map[int]bool   // issue numbers with bailed autopilot tasks
+	failedIssues    map[int]string // issue numbers with failed autopilot tasks → failure reason
+	trackedExpanded bool           // 'x' toggles compact strip vs expanded list with titles
 
 	// Settings dialog.
 	settingsState  *settingsState
@@ -202,8 +201,9 @@ type Model struct {
 	worktrees     []db.WorktreeWithRepo
 
 	// Spinner for async operations.
-	spinner spinner.Model
-	polling bool // true while a manual poll is in progress
+	spinner    spinner.Model
+	polling    bool   // true while a manual poll is in progress
+	pollNotice string // dismissable notification after poll (e.g., "No new activity")
 
 	// Broadcast mode.
 	mode            string // "normal", "broadcast", "usermsg", or "onboard"
@@ -230,9 +230,6 @@ type Model struct {
 	// Filter mode (bulk add tracked items).
 	filterState  *filterState
 	filterStatus string
-
-	// Poll confirm (R key).
-	pollConfirm bool
 
 	// Autopilot.
 	autopilotSupervisor       *autopilot.Supervisor
@@ -357,6 +354,17 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		autopilotTaskVP:  apVP,
 		lastUserInput:    time.Now(),
 	}
+
+	// Restore last analysis from DB so it's visible on restart.
+	if polls, err := store.RecentPolls(project.ID, 10); err == nil {
+		for _, poll := range polls {
+			if poll.Tier2Response != "" {
+				m.lastPoll = &poller.PollResult{Tier2Analysis: poll.Tier2Response}
+				break
+			}
+		}
+	}
+
 	m.applyTextareaTheme()
 	return m
 }
@@ -471,8 +479,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.polling = true
 		}
 		if event.PollResult != nil {
+			// No new activity: show notice, keep existing analysis, don't update lastPoll analysis.
+			if event.PollResult.NoNewActivity {
+				m.polling = false
+				m.pollNotice = "No new activity since last analysis"
+				m.refreshTrackedItems()
+				m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
+				m.rebuildEventLogContent()
+				m.resizeViewports()
+				return m, tea.Batch(listenForEvents(m.poller), tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+					return clearPollNoticeMsg{}
+				}))
+			}
+			// Preserve existing analysis when a status-only poll has no new analysis.
+			if event.PollResult.Tier2Analysis == "" && m.lastPoll != nil && m.lastPoll.Tier2Analysis != "" {
+				event.PollResult.Tier2Analysis = m.lastPoll.Tier2Analysis
+			}
 			m.lastPoll = event.PollResult
 			m.polling = false
+			m.pollNotice = ""
 			m.refreshTrackedItems()
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
 			// Flag new analysis if user is on Ops tab and this was an analysis result.
@@ -504,17 +529,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case userMsgResultMsg:
 		if msg.err != nil {
 			m.userMsgStatus = fmt.Sprintf("Error: %v", msg.err)
-		} else {
-			m.userMsgStatus = fmt.Sprintf("Posted to %s", msg.topic)
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearUserMsgStatusMsg{}
+			})
 		}
-		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-			return clearUserMsgStatusMsg{}
-		})
+		// Success: update analysis viewport with response and switch to Analysis tab.
+		m.userMsgStatus = ""
+		m.mode = "normal"
+		m.lastPoll = &poller.PollResult{Tier2Analysis: msg.response}
+		m.activeTab = tabAnalysis
+		m.analysisHasNew = false
+		m.rebuildAnalysisContent()
+		m.resizeViewports()
+		return m, nil
 
 	case clearUserMsgStatusMsg:
 		m.userMsgStatus = ""
 		m.mode = "normal"
 		m.resizeViewports()
+		return m, nil
+
+	case clearPollNoticeMsg:
+		m.pollNotice = ""
 		return m, nil
 
 	case onboardResultMsg:
@@ -979,30 +1015,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 type clearBroadcastStatusMsg struct{}
 type clearOnboardStatusMsg struct{}
 type clearRebuildDepsStatusMsg struct{}
+type clearPollNoticeMsg struct{}
 type clearFilterStatusMsg struct{}
 type clearSettingsStatusMsg struct{}
 
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Poll confirm mode: confirm before expensive comprehensive analysis.
-	if m.pollConfirm {
-		switch msg.String() {
-		case "enter":
-			m.pollConfirm = false
-			m.activeTab = tabAnalysis
-			m.analysisHasNew = false
-			m.resizeViewports()
-			p := m.poller
-			return m, func() tea.Msg {
-				p.PollNow(context.Background())
-				return nil
-			}
-		case "esc":
-			m.pollConfirm = false
-			return m, nil
-		}
-		return m, nil
-	}
-	// Autopilot confirm modes: only intercept enter/esc when on tab 3.
+	// Autopilot confirm modes: only intercept y/n/esc when on tab 3.
 	// Tab switching keys always pass through so users can browse freely.
 	if m.autopilotMode == "scan-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
@@ -1235,14 +1253,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		m.polling = true
+		m.activeTab = tabAnalysis
+		m.analysisHasNew = false
+		m.resizeViewports()
 		p := m.poller
-		return m, func() tea.Msg {
-			p.StatusNow(context.Background())
+		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+			p.PollNow(context.Background())
 			return nil
-		}
-	case "R":
-		m.pollConfirm = true
-		return m, nil
+		})
 	case "e":
 		if m.activeTab == tabAnalysis {
 			m.analysisExpanded = !m.analysisExpanded
@@ -1495,11 +1514,6 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "c":
-		if m.activeTab == tabAnalysis {
-			m.concernsExpanded = !m.concernsExpanded
-			m.resizeViewports()
-			return m, nil
-		}
 		if m.activeTab != tabAutopilot || (m.autopilotMode != "running" && m.autopilotMode != "completed") {
 			return m, nil
 		}
@@ -1650,15 +1664,15 @@ func (m Model) updateUserMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.userMsgInput.Blur()
 			return m, nil
 		}
-		m.userMsgStatus = "Posting..."
+		m.userMsgStatus = "Asking..."
 		m.userMsgInput.Blur()
 		p := m.poller
 		return m, func() tea.Msg {
-			err := p.PostUserMessage(context.Background(), value)
+			response, err := p.QueryAnalyzer(context.Background(), value)
 			if err != nil {
 				return userMsgResultMsg{err: err}
 			}
-			return userMsgResultMsg{topic: p.Project().Name + "/coord"}
+			return userMsgResultMsg{response: response}
 		}
 	}
 

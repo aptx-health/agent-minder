@@ -3,13 +3,14 @@ package db
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/dustinlange/agent-minder/internal/sqliteutil"
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 21
+const currentVersion = 22
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	autopilot_skip_label   TEXT DEFAULT 'no-agent',
 	autopilot_base_branch  TEXT DEFAULT '',
 	is_deploy             INTEGER DEFAULT 0,
+	analyzer_session_id   TEXT DEFAULT '',
 	created_at            TEXT DEFAULT (datetime('now'))
 );
 
@@ -324,6 +326,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 21 {
 		if err := migrateV21(db); err != nil {
 			return fmt.Errorf("apply migration v21: %w", err)
+		}
+	}
+
+	if version < 22 {
+		if err := migrateV22(db); err != nil {
+			return fmt.Errorf("apply migration v22: %w", err)
 		}
 	}
 
@@ -674,6 +682,19 @@ func migrateV21(db *sqlx.DB) error {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("%s: %w", stmt, err)
 		}
+	}
+	return nil
+}
+
+func migrateV22(db *sqlx.DB) error {
+	// ALTER TABLE ADD COLUMN will fail if the column already exists (e.g., fresh DB
+	// created with schemaV1 that already includes it). Ignore "duplicate column" errors.
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN analyzer_session_id TEXT DEFAULT ''`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("add analyzer_session_id: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE projects SET analyzer_session_id = '' WHERE analyzer_session_id IS NULL`); err != nil {
+		return fmt.Errorf("null-fill analyzer_session_id: %w", err)
 	}
 	return nil
 }

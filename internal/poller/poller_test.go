@@ -147,135 +147,6 @@ func TestPollResult_LLMResponse_BothEmpty(t *testing.T) {
 	}
 }
 
-// --- reconcileConcerns tests ---
-
-func TestReconcileConcerns_NoExistingNoneDesired(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	result := reconcileConcerns(store, p.ID, nil, nil)
-	if len(result) != 0 {
-		t.Errorf("expected 0 concerns, got %d", len(result))
-	}
-}
-
-func TestReconcileConcerns_AddsNewConcerns(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	desired := []AnalysisConcern{
-		{Severity: "warning", Message: "Schema drift detected"},
-		{Severity: "info", Message: "Low test coverage"},
-	}
-
-	result := reconcileConcerns(store, p.ID, nil, desired)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 concerns, got %d", len(result))
-	}
-	if !strings.Contains(result[0], "[warning]") || !strings.Contains(result[0], "Schema drift") {
-		t.Errorf("result[0] = %q", result[0])
-	}
-	if !strings.Contains(result[1], "[info]") || !strings.Contains(result[1], "Low test coverage") {
-		t.Errorf("result[1] = %q", result[1])
-	}
-
-	// Verify they're in the DB.
-	active, err := store.ActiveConcerns(p.ID)
-	if err != nil {
-		t.Fatalf("ActiveConcerns: %v", err)
-	}
-	if len(active) != 2 {
-		t.Errorf("expected 2 active concerns in DB, got %d", len(active))
-	}
-}
-
-func TestReconcileConcerns_ResolvesOldAddsNew(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	// Insert an existing concern.
-	err := store.AddConcern(&db.Concern{
-		ProjectID: p.ID,
-		Severity:  "warning",
-		Message:   "Old concern",
-	})
-	if err != nil {
-		t.Fatalf("AddConcern: %v", err)
-	}
-
-	existing, _ := store.ActiveConcerns(p.ID)
-	if len(existing) != 1 {
-		t.Fatalf("expected 1 existing concern, got %d", len(existing))
-	}
-
-	// Reconcile with new desired concerns (old one should be resolved).
-	desired := []AnalysisConcern{
-		{Severity: "danger", Message: "New critical concern"},
-	}
-	result := reconcileConcerns(store, p.ID, existing, desired)
-
-	if len(result) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(result))
-	}
-	if !strings.Contains(result[0], "[danger]") {
-		t.Errorf("result[0] = %q, expected danger severity", result[0])
-	}
-
-	// The old concern should be resolved.
-	active, _ := store.ActiveConcerns(p.ID)
-	if len(active) != 1 {
-		t.Errorf("expected 1 active concern after reconciliation, got %d", len(active))
-	}
-	if active[0].Message != "New critical concern" {
-		t.Errorf("active concern = %q, want %q", active[0].Message, "New critical concern")
-	}
-}
-
-func TestReconcileConcerns_ResolvesAllWhenNoDesired(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	// Insert existing concerns.
-	_ = store.AddConcern(&db.Concern{ProjectID: p.ID, Severity: "warning", Message: "Concern A"})
-	_ = store.AddConcern(&db.Concern{ProjectID: p.ID, Severity: "info", Message: "Concern B"})
-
-	existing, _ := store.ActiveConcerns(p.ID)
-	result := reconcileConcerns(store, p.ID, existing, nil)
-
-	if len(result) != 0 {
-		t.Errorf("expected 0 results, got %d: %v", len(result), result)
-	}
-	active, _ := store.ActiveConcerns(p.ID)
-	if len(active) != 0 {
-		t.Errorf("expected 0 active concerns after resolving all, got %d", len(active))
-	}
-}
-
-func TestReconcileConcerns_SeverityNormalization(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	desired := []AnalysisConcern{
-		{Severity: "critical", Message: "Normalized to danger"},
-		{Severity: "warn", Message: "Normalized to warning"},
-		{Severity: "whatever", Message: "Normalized to info"},
-	}
-
-	result := reconcileConcerns(store, p.ID, nil, desired)
-	if len(result) != 3 {
-		t.Fatalf("expected 3 concerns, got %d", len(result))
-	}
-	if !strings.Contains(result[0], "[danger]") {
-		t.Errorf("critical not normalized to danger: %q", result[0])
-	}
-	if !strings.Contains(result[1], "[warning]") {
-		t.Errorf("warn not normalized to warning: %q", result[1])
-	}
-	if !strings.Contains(result[2], "[info]") {
-		t.Errorf("unknown not normalized to info: %q", result[2])
-	}
-}
-
 // --- parseAnalysis additional edge cases ---
 
 func TestParseAnalysis_JsonWithMultipleConcerns(t *testing.T) {
@@ -559,7 +430,6 @@ func TestRecordPollResult(t *testing.T) {
 		Tier1Summary:   "git activity detected",
 		Tier2Analysis:  "everything stable",
 		BusMessageSent: "[proj/coord] update",
-		Concerns:       []string{"[warning] schema drift"},
 	}
 
 	poller.recordPollResult(result)
@@ -586,9 +456,6 @@ func TestRecordPollResult(t *testing.T) {
 	}
 	if poll.BusMessageSent != "[proj/coord] update" {
 		t.Errorf("BusMessageSent = %q", poll.BusMessageSent)
-	}
-	if poll.ConcernsRaised != 1 {
-		t.Errorf("ConcernsRaised = %d, want 1", poll.ConcernsRaised)
 	}
 }
 
@@ -626,7 +493,7 @@ func TestBuildAnalysisPrompt_BasicStructure(t *testing.T) {
 		gitSummary: "git summary",
 		msgSummary: "bus summary",
 	}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil)
 
 	if !strings.Contains(prompt, "Project: test-project") {
 		t.Error("missing project name")
@@ -646,30 +513,8 @@ func TestBuildAnalysisPrompt_BasicStructure(t *testing.T) {
 	if !strings.Contains(prompt, "bus summary") {
 		t.Error("missing bus summary content")
 	}
-	if !strings.Contains(prompt, "Active Concerns") {
-		t.Error("missing concerns section")
-	}
-	if !strings.Contains(prompt, "Analyze the above") {
-		t.Error("missing analysis instruction")
-	}
-}
-
-func TestBuildAnalysisPrompt_WithConcerns(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	poller := New(store, p, nil, nil)
-	concerns := []db.Concern{
-		{Severity: "warning", Message: "Test concern", CreatedAt: "2025-01-01 00:00:00"},
-	}
-	gathered := &gatherResult{result: &PollResult{}}
-	prompt := poller.buildAnalysisPrompt(gathered, concerns, nil, nil)
-
-	if !strings.Contains(prompt, "[warning]") {
-		t.Error("missing concern severity")
-	}
-	if !strings.Contains(prompt, "Test concern") {
-		t.Error("missing concern message")
+	if !strings.Contains(prompt, "Current time:") {
+		t.Error("missing current time prefix")
 	}
 }
 
@@ -689,7 +534,7 @@ func TestBuildAnalysisPrompt_WithTrackedItems(t *testing.T) {
 		},
 	}
 	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil)
 
 	if !strings.Contains(prompt, "Tracked Issues/PRs") {
 		t.Error("missing tracked items section")
@@ -718,7 +563,7 @@ func TestBuildAnalysisPrompt_WithAutopilotTags(t *testing.T) {
 		{Owner: "org", Repo: "repo", IssueNumber: 42, Status: "running"},
 	}
 	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, autopilotTasks)
+	prompt := poller.buildAnalysisPrompt(gathered, nil, autopilotTasks)
 
 	if !strings.Contains(prompt, "[autopilot:running]") {
 		t.Error("expected autopilot:running tag")
@@ -737,7 +582,7 @@ func TestBuildAnalysisPrompt_WithCompletedItems(t *testing.T) {
 		{Owner: "org", Repo: "repo", Number: 10, ItemType: "issue", Title: "Done task", FinalStatus: "Closd", Summary: "Task completed."},
 	}
 	gathered := &gatherResult{result: &PollResult{}}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, completed, nil)
+	prompt := poller.buildAnalysisPrompt(gathered, completed, nil)
 
 	if !strings.Contains(prompt, "Recently Completed Work") {
 		t.Error("missing completed items section")
@@ -756,26 +601,13 @@ func TestBuildAnalysisPrompt_NoGitOrBus(t *testing.T) {
 
 	poller := New(store, p, nil, nil)
 	gathered := &gatherResult{result: &PollResult{}}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil)
 
 	if strings.Contains(prompt, "Git Activity") {
 		t.Error("should not have git section when empty")
 	}
 	if strings.Contains(prompt, "Message Bus Activity") {
 		t.Error("should not have bus section when empty")
-	}
-}
-
-func TestBuildAnalysisPrompt_NoConcerns(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	poller := New(store, p, nil, nil)
-	gathered := &gatherResult{result: &PollResult{}}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
-
-	if !strings.Contains(prompt, "No active concerns") {
-		t.Error("expected 'No active concerns' message")
 	}
 }
 
@@ -789,7 +621,7 @@ func TestBuildAnalysisPrompt_AutopilotDepGraph(t *testing.T) {
 	})
 
 	gathered := &gatherResult{result: &PollResult{}}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil)
 
 	if !strings.Contains(prompt, "Autopilot Dependency Graph") {
 		t.Error("expected dep graph in prompt")
@@ -818,7 +650,7 @@ func TestBuildAnalysisPrompt_WithPRDetails(t *testing.T) {
 		},
 	}
 	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil, nil)
+	prompt := poller.buildAnalysisPrompt(gathered, nil, nil)
 
 	if !strings.Contains(prompt, "[PR]") {
 		t.Error("expected PR type tag")
@@ -1213,72 +1045,41 @@ func TestOnboard_NonPublishableResponse(t *testing.T) {
 	}
 }
 
-// --- PostUserMessage tests ---
+// --- QueryAnalyzer tests ---
 
-func TestPostUserMessage_NilPublisher(t *testing.T) {
+func TestQueryAnalyzer_NoSession(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
 	poller := New(store, p, nil, nil)
-	err := poller.PostUserMessage(context.Background(), "hello")
+	_, err := poller.QueryAnalyzer(context.Background(), "hello")
 
 	if err == nil {
-		t.Fatal("expected error for nil publisher")
+		t.Fatal("expected error for no session")
 	}
-	if !strings.Contains(err.Error(), "not available") {
-		t.Errorf("error = %v, expected 'not available'", err)
+	if !strings.Contains(err.Error(), "no analyzer session") {
+		t.Errorf("error = %v, expected 'no analyzer session'", err)
 	}
 }
 
-func TestPostUserMessage_Success(t *testing.T) {
+func TestQueryAnalyzer_Success(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
-	msgConn, pub := openTestMsgDB(t)
+	p.AnalyzerSessionID = "test-session-123"
+	_ = store.UpdateAnalyzerSessionID(p.ID, "test-session-123")
 
-	poller := New(store, p, nil, pub)
-	err := poller.PostUserMessage(context.Background(), "hello from user")
+	completer := &mockCompleter{
+		response: "Here's what I know about the project...",
+	}
+
+	poller := New(store, p, completer, nil)
+	response, err := poller.QueryAnalyzer(context.Background(), "what's the status?")
 
 	if err != nil {
-		t.Fatalf("PostUserMessage: %v", err)
+		t.Fatalf("QueryAnalyzer: %v", err)
 	}
-
-	// Verify the message was published with correct topic and sender.
-	var topic, sender, message string
-	row := msgConn.QueryRow("SELECT topic, sender, message FROM messages LIMIT 1")
-	if err := row.Scan(&topic, &sender, &message); err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	expectedTopic := "test-project/coord"
-	if topic != expectedTopic {
-		t.Errorf("topic = %q, want %q", topic, expectedTopic)
-	}
-	expectedSender := "user@test-project/minder"
-	if sender != expectedSender {
-		t.Errorf("sender = %q, want %q", sender, expectedSender)
-	}
-	if message != "hello from user" {
-		t.Errorf("message = %q", message)
-	}
-}
-
-func TestPostUserMessage_EmitsEvent(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-	_, pub := openTestMsgDB(t)
-
-	poller := New(store, p, nil, pub)
-	_ = poller.PostUserMessage(context.Background(), "test")
-
-	select {
-	case ev := <-poller.Events():
-		if ev.Type != "user" {
-			t.Errorf("event type = %q, want %q", ev.Type, "user")
-		}
-		if !strings.Contains(ev.Summary, "test-project/coord") {
-			t.Errorf("summary = %q, expected topic reference", ev.Summary)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("timeout waiting for user event")
+	if response != "Here's what I know about the project..." {
+		t.Errorf("response = %q", response)
 	}
 }
 
@@ -1452,7 +1253,7 @@ func TestPollNow_EmptyProject(t *testing.T) {
 	store := openTestDB(t)
 	proj := createTestProject(t, store)
 
-	analyzer := &mockCompleter{response: `{"analysis":"All quiet","concerns":[]}`}
+	analyzer := &mockCompleter{response: "All quiet, no new activity."}
 
 	poller := New(store, proj, analyzer, nil)
 	poller.PollNow(context.Background())
@@ -1475,16 +1276,16 @@ func TestPollNow_EmptyProject(t *testing.T) {
 	if pollResult == nil {
 		t.Fatal("expected poll result event")
 	}
-	// No repos = no commits = no LLM calls = skip.
+	// No repos = no commits.
 	if pollResult.NewCommits != 0 {
 		t.Errorf("NewCommits = %d, want 0", pollResult.NewCommits)
 	}
-	if pollResult.Tier1Summary != "No new activity." {
-		t.Errorf("Tier1Summary = %q", pollResult.Tier1Summary)
-	}
-	// No LLM calls should have been made.
+	// No activity = no analyzer call.
 	if analyzer.calls.Load() != 0 {
 		t.Errorf("completer calls = %d, want 0", analyzer.calls.Load())
+	}
+	if !pollResult.NoNewActivity {
+		t.Error("expected NoNewActivity to be true")
 	}
 }
 
@@ -1544,7 +1345,7 @@ func TestPollNow_EmitsPollingAndPollEvents(t *testing.T) {
 	store := openTestDB(t)
 	proj := createTestProject(t, store)
 
-	poller := New(store, proj, nil, nil)
+	poller := New(store, proj, &mockCompleter{response: "All quiet."}, nil)
 	poller.PollNow(context.Background())
 
 	events := make([]string, 0)
@@ -1686,52 +1487,6 @@ func TestPoller_StartStop(t *testing.T) {
 		// Good.
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop() timed out")
-	}
-}
-
-// --- Multiple reconciliation cycles ---
-
-func TestReconcileConcerns_MultipleCycles(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-
-	// Cycle 1: Add two concerns.
-	desired1 := []AnalysisConcern{
-		{Severity: "warning", Message: "Concern A"},
-		{Severity: "info", Message: "Concern B"},
-	}
-	result1 := reconcileConcerns(store, p.ID, nil, desired1)
-	if len(result1) != 2 {
-		t.Fatalf("cycle 1: expected 2, got %d", len(result1))
-	}
-
-	// Cycle 2: Replace with one different concern.
-	active, _ := store.ActiveConcerns(p.ID)
-	desired2 := []AnalysisConcern{
-		{Severity: "danger", Message: "Concern C"},
-	}
-	result2 := reconcileConcerns(store, p.ID, active, desired2)
-	if len(result2) != 1 {
-		t.Fatalf("cycle 2: expected 1, got %d", len(result2))
-	}
-	if !strings.Contains(result2[0], "Concern C") {
-		t.Errorf("cycle 2: unexpected concern: %q", result2[0])
-	}
-
-	// Verify DB state.
-	active2, _ := store.ActiveConcerns(p.ID)
-	if len(active2) != 1 {
-		t.Errorf("expected 1 active after cycle 2, got %d", len(active2))
-	}
-
-	// Cycle 3: Clear all.
-	result3 := reconcileConcerns(store, p.ID, active2, nil)
-	if len(result3) != 0 {
-		t.Errorf("cycle 3: expected 0, got %d", len(result3))
-	}
-	active3, _ := store.ActiveConcerns(p.ID)
-	if len(active3) != 0 {
-		t.Errorf("expected 0 active after cycle 3, got %d", len(active3))
 	}
 }
 
@@ -2374,13 +2129,13 @@ func TestDoStatusPoll_WithNoActivity(t *testing.T) {
 	}
 }
 
-func TestDoPoll_NoActivity_SkipsLLM(t *testing.T) {
+func TestDoPoll_NoActivity_SkipsAnalyzer(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
 	t.Setenv("AGENT_MSG_DB", filepath.Join(t.TempDir(), "nonexistent.db"))
 
-	completer := &mockCompleter{response: "should not be called"}
+	completer := &mockCompleter{response: "No new activity to report."}
 
 	poller := New(store, p, completer, nil)
 	result, err := poller.doPoll(context.Background())
@@ -2388,12 +2143,12 @@ func TestDoPoll_NoActivity_SkipsLLM(t *testing.T) {
 		t.Fatalf("doPoll: %v", err)
 	}
 
-	// No activity means LLM calls should be skipped.
+	// No activity = no analyzer call.
 	if completer.calls.Load() != 0 {
-		t.Error("completer should not be called with no activity")
+		t.Errorf("completer calls = %d, want 0", completer.calls.Load())
 	}
-	if result.Tier1Summary != "No new activity." {
-		t.Errorf("Tier1Summary = %q", result.Tier1Summary)
+	if !result.NoNewActivity {
+		t.Error("expected NoNewActivity to be true")
 	}
 }
 
@@ -3146,7 +2901,6 @@ func TestRecordPollResult_WithBusMessage(t *testing.T) {
 		Tier1Summary:   "3 commits, 2 messages",
 		Tier2Analysis:  "All stable",
 		BusMessageSent: "[test/coord] Update",
-		Concerns:       []string{"[info] Test concern"},
 	}
 
 	poller.recordPollResult(result)
@@ -3161,9 +2915,6 @@ func TestRecordPollResult_WithBusMessage(t *testing.T) {
 	}
 	if polls[0].BusMessageSent != "[test/coord] Update" {
 		t.Errorf("BusMessageSent = %q", polls[0].BusMessageSent)
-	}
-	if polls[0].ConcernsRaised != 1 {
-		t.Errorf("ConcernsRaised = %d, want 1", polls[0].ConcernsRaised)
 	}
 }
 

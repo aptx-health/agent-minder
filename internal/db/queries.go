@@ -153,6 +153,12 @@ func (s *Store) IssuesInRunningDeploys(owner, repo string, issues []int) (map[in
 	return result, nil
 }
 
+// UpdateAnalyzerSessionID sets the persistent analyzer session ID for a project.
+func (s *Store) UpdateAnalyzerSessionID(projectID int64, sessionID string) error {
+	_, err := s.db.Exec(`UPDATE projects SET analyzer_session_id = ? WHERE id = ?`, sessionID, projectID)
+	return err
+}
+
 // DeleteProject removes a project and all associated data (cascading).
 func (s *Store) DeleteProject(id int64) error {
 	_, err := s.db.Exec("DELETE FROM projects WHERE id = ?", id)

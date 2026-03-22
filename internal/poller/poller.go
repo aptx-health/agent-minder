@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
@@ -121,9 +123,9 @@ type PollResult struct {
 	Tier1Summary       string
 	Tier2Analysis      string
 	BusMessageSent     string
-	Concerns           []string
 	Duration           time.Duration
 	StatusOnly         bool // true for status-only polls (no LLM analysis)
+	NoNewActivity      bool // true when manual poll found nothing new
 }
 
 // LLMResponse returns the best available response for display.
@@ -463,22 +465,40 @@ Write a clear, actionable onboarding briefing. Be concise but thorough — this 
 	return nil, fmt.Errorf("LLM did not produce a publishable onboarding message")
 }
 
-// PostUserMessage publishes a verbatim user message to the bus without LLM processing.
-// The sender is "user@<minder-identity>" so doPoll picks it up as bus activity.
-func (p *Poller) PostUserMessage(ctx context.Context, message string) error {
-	if p.publisher == nil {
-		return fmt.Errorf("bus publishing not available")
+// QueryAnalyzer sends a user message to the persistent analyzer session and returns
+// the response text. Requires an existing session (run analysis first via PollNow).
+func (p *Poller) QueryAnalyzer(ctx context.Context, message string) (string, error) {
+	if p.project.AnalyzerSessionID == "" {
+		return "", fmt.Errorf("no analyzer session — run analysis first (R)")
 	}
 
-	topic := p.project.Name + "/coord"
-	sender := "user@" + p.project.MinderIdentity
-
-	if err := p.publisher.Publish(topic, sender, message); err != nil {
-		return fmt.Errorf("publishing user message: %w", err)
+	analyzerModel := p.project.LLMAnalyzerModel
+	if analyzerModel == "" {
+		analyzerModel = "sonnet"
 	}
 
-	p.emit("user", fmt.Sprintf("Posted to %s", topic), nil)
-	return nil
+	prompt := fmt.Sprintf("Current time: %s\n\n%s", time.Now().Format("2006-01-02 15:04:05"), message)
+
+	debugLog("llm call", "stage", "query", "step", "input", "component", "analyzer", "model", analyzerModel,
+		"user_prompt", prompt, "resume_session", p.project.AnalyzerSessionID)
+
+	resp, err := p.completer.Complete(ctx, &claudecli.Request{
+		Prompt:          prompt,
+		Model:           analyzerModel,
+		ResumeSessionID: p.project.AnalyzerSessionID,
+	})
+	if err != nil {
+		// Session may have expired — clear and report.
+		debugLog("llm error", "stage", "query", "step", "error", "component", "analyzer", "error", err.Error())
+		p.project.AnalyzerSessionID = ""
+		_ = p.store.UpdateAnalyzerSessionID(p.project.ID, "")
+		return "", fmt.Errorf("analyzer session expired, run analysis again (R): %w", err)
+	}
+
+	debugLog("llm response", "stage", "query", "step", "output", "component", "analyzer",
+		"response", resp.Result, "input_tokens", resp.InputTokens, "output_tokens", resp.OutputTokens)
+
+	return resp.Result, nil
 }
 
 func (p *Poller) run(ctx context.Context) {
@@ -769,23 +789,6 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 
 	result := gathered.result
 
-	// If nothing happened, skip LLM calls.
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates {
-		result.Duration = time.Since(start)
-		result.Tier1Summary = "No new activity."
-		debugLog("poll skip", "stage", "gather", "step", "skip", "project", p.project.Name)
-		return result, nil
-	}
-
-	// Get active concerns for context.
-	concerns, _ := p.store.ActiveConcerns(p.project.ID)
-
-	// --- Single consolidated analysis call (replaces tier 1 + tier 2) ---
-	analyzerModel := p.project.LLMAnalyzerModel
-	if analyzerModel == "" {
-		analyzerModel = "sonnet"
-	}
-
 	// Build a summary of raw data for the record.
 	var tier1Parts []string
 	if gathered.gitSummary != "" {
@@ -798,9 +801,23 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 		tier1Parts = append(tier1Parts, "Tracked item status changes: "+gathered.trackedChanges)
 	}
 	if len(tier1Parts) == 0 {
-		tier1Parts = append(tier1Parts, "Activity detected but no summaries produced.")
+		tier1Parts = append(tier1Parts, "No new activity.")
 	}
 	result.Tier1Summary = strings.Join(tier1Parts, "\n\n")
+
+	// Skip analyzer if there's nothing new.
+	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates {
+		result.NoNewActivity = true
+		result.Duration = time.Since(start)
+		debugLog("poll skip", "stage", "analysis", "step", "skip", "reason", "no new activity")
+		return result, nil
+	}
+
+	// --- Persistent analyzer session ---
+	analyzerModel := p.project.LLMAnalyzerModel
+	if analyzerModel == "" {
+		analyzerModel = "sonnet"
+	}
 
 	// Fetch recently completed items for progress context.
 	ttl := p.project.MessageTTLSec
@@ -815,49 +832,81 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	// Fetch autopilot tasks to tag tracked items as autopilot-managed vs manual.
 	autopilotTasks, _ := p.store.GetAutopilotTasks(p.project.ID)
 
-	// Build a combined prompt with raw data (no separate tier 1 summarization).
-	analysisPrompt := p.buildAnalysisPrompt(gathered, concerns, completedItems, autopilotTasks)
-	analysisSystem := analysisSystemPrompt(p.project.Name, p.project.AnalyzerFocus)
+	// Build the user prompt with raw data.
+	analysisPrompt := p.buildAnalysisPrompt(gathered, completedItems, autopilotTasks)
 
-	analysisSchema := `{"type":"object","properties":{"analysis":{"type":"string"},"concerns":{"type":"array","items":{"type":"object","properties":{"severity":{"type":"string","enum":["info","warning","danger"]},"message":{"type":"string"}},"required":["severity","message"]}},"bus_message":{"type":"object","properties":{"topic":{"type":"string"},"message":{"type":"string"}},"required":["topic","message"]}},"required":["analysis","concerns"]}`
+	var req *claudecli.Request
+	if p.project.AnalyzerSessionID == "" {
+		// First call: create a new session with system prompt.
+		sessionID := uuid.New().String()
+		analysisSystem := analysisSystemPrompt(p.project.Name, p.project.AnalyzerFocus)
 
-	debugLog("llm call", "stage", "analysis", "step", "input", "component", "analyzer", "model", analyzerModel,
-		"system_prompt", analysisSystem, "user_prompt", analysisPrompt,
-		"est_system_tokens", estimateTokens(analysisSystem), "est_user_tokens", estimateTokens(analysisPrompt))
+		debugLog("llm call", "stage", "analysis", "step", "input", "component", "analyzer", "model", analyzerModel,
+			"system_prompt", analysisSystem, "user_prompt", analysisPrompt,
+			"session_id", sessionID, "new_session", true)
 
-	analysisResp, err := p.completer.Complete(ctx, &claudecli.Request{
-		SystemPrompt: analysisSystem,
-		Prompt:       analysisPrompt,
-		Model:        analyzerModel,
-		JSONSchema:   analysisSchema,
-	})
-	if err != nil {
-		debugLog("llm error", "stage", "analysis", "step", "error", "component", "analyzer", "error", err.Error())
-		result.Duration = time.Since(start)
-		// Analysis failed but we still have raw data — usable.
-		p.recordPollResult(result)
-		return result, nil
-	}
+		req = &claudecli.Request{
+			SystemPrompt: analysisSystem,
+			Prompt:       analysisPrompt,
+			Model:        analyzerModel,
+			SessionID:    sessionID,
+		}
+	} else {
+		// Resume existing session.
+		debugLog("llm call", "stage", "analysis", "step", "input", "component", "analyzer", "model", analyzerModel,
+			"user_prompt", analysisPrompt, "resume_session", p.project.AnalyzerSessionID)
 
-	debugLog("llm response", "stage", "analysis", "step", "output", "component", "analyzer", "response", analysisResp.Content(), "input_tokens", analysisResp.InputTokens, "output_tokens", analysisResp.OutputTokens)
-
-	// Parse structured analysis response.
-	analysis := parseAnalysis(analysisResp.Content())
-	result.Tier2Analysis = analysis.Analysis
-
-	// Publish bus message if the analyzer decided one is warranted.
-	if analysis.BusMessage != nil && p.publisher != nil {
-		topic := analysis.BusMessage.Topic
-		msg := analysis.BusMessage.Message
-		if err := p.publisher.Publish(topic, p.project.MinderIdentity, msg); err == nil {
-			result.BusMessageSent = fmt.Sprintf("[%s] %s", topic, msg)
-			debugLog("bus publish", "stage", "publish", "step", "complete", "topic", topic)
+		req = &claudecli.Request{
+			Prompt:          analysisPrompt,
+			Model:           analyzerModel,
+			ResumeSessionID: p.project.AnalyzerSessionID,
 		}
 	}
 
-	// Reconcile concerns: the analyzer returns the full desired list.
-	result.Concerns = reconcileConcerns(p.store, p.project.ID, concerns, analysis.Concerns)
-	debugLog("concerns reconciled", "stage", "reconcile", "step", "complete", "active", len(result.Concerns), "previous", len(concerns))
+	analysisResp, err := p.completer.Complete(ctx, req)
+	if err != nil {
+		debugLog("llm error", "stage", "analysis", "step", "error", "component", "analyzer", "error", err.Error())
+
+		// If resuming failed, try a fresh session (session may have expired).
+		if p.project.AnalyzerSessionID != "" {
+			debugLog("session recovery", "stage", "analysis", "step", "retry", "component", "analyzer")
+			p.project.AnalyzerSessionID = ""
+			_ = p.store.UpdateAnalyzerSessionID(p.project.ID, "")
+
+			sessionID := uuid.New().String()
+			analysisSystem := analysisSystemPrompt(p.project.Name, p.project.AnalyzerFocus)
+			req = &claudecli.Request{
+				SystemPrompt: analysisSystem,
+				Prompt:       analysisPrompt,
+				Model:        analyzerModel,
+				SessionID:    sessionID,
+			}
+			analysisResp, err = p.completer.Complete(ctx, req)
+			if err != nil {
+				debugLog("llm error", "stage", "analysis", "step", "error", "component", "analyzer", "error", err.Error())
+				result.Duration = time.Since(start)
+				p.recordPollResult(result)
+				return result, nil
+			}
+		} else {
+			result.Duration = time.Since(start)
+			p.recordPollResult(result)
+			return result, nil
+		}
+	}
+
+	// Store the session ID from the response.
+	if analysisResp.SessionID != "" && analysisResp.SessionID != p.project.AnalyzerSessionID {
+		p.project.AnalyzerSessionID = analysisResp.SessionID
+		_ = p.store.UpdateAnalyzerSessionID(p.project.ID, analysisResp.SessionID)
+		debugLog("session stored", "stage", "analysis", "step", "complete", "session_id", analysisResp.SessionID)
+	}
+
+	debugLog("llm response", "stage", "analysis", "step", "output", "component", "analyzer",
+		"response", analysisResp.Result, "input_tokens", analysisResp.InputTokens, "output_tokens", analysisResp.OutputTokens)
+
+	// Response is markdown text, stored directly.
+	result.Tier2Analysis = analysisResp.Result
 
 	result.Duration = time.Since(start)
 	debugLog("poll complete", "stage", "gather", "step", "complete", "project", p.project.Name, "duration_ms", result.Duration.Milliseconds(), "commits", result.NewCommits, "messages", result.NewMessages)
@@ -870,7 +919,6 @@ func (p *Poller) recordPollResult(result *PollResult) {
 		ProjectID:      p.project.ID,
 		NewCommits:     result.NewCommits,
 		NewMessages:    result.NewMessages,
-		ConcernsRaised: len(result.Concerns),
 		LLMResponseRaw: result.LLMResponse(),
 		Tier1Response:  result.Tier1Summary,
 		Tier2Response:  result.Tier2Analysis,
@@ -881,36 +929,35 @@ func (p *Poller) recordPollResult(result *PollResult) {
 // --- Combined Analysis System Prompt ---
 
 func analysisSystemPrompt(projectName, analyzerFocus string) string {
-	base := fmt.Sprintf(`You are an AI project analyzer for %q. You receive raw git commits, bus messages, and tracked item data. Summarize and analyze them into a structured assessment.
+	base := fmt.Sprintf(`You are the project analyst for %q. You maintain situational awareness across this project's repos, issues, PRs, and autopilot agents.
 
-## Output rules
+You'll receive periodic updates with the latest project state. Between updates, you remember what you've seen — use that continuity to track trends, notice changes, and give the operator useful briefings.
 
-analysis: Clear, actionable 2-4 sentence status update synthesizing all inputs. Summarize what happened (git activity, bus messages) and assess project state.
+Keep responses concise (TUI viewport, ~20-30 lines). Use markdown for structure. Focus on:
+- What changed since the last update
+- What needs the operator's attention (reviews, manual tasks, blockers)
+- Dependency graph progress and what's coming next
+- Cross-repo coordination needs
 
-concerns: Return the FULL currently-valid list. Reconcile each existing concern against current evidence:
-- Drop or rewrite concerns contradicted by new data (e.g., branch now has PR, item merged).
-- Never carry forward verbatim if facts changed. Remove fully resolved; rewrite partially resolved.
-- Severity: info (awareness), warning (monitor), danger (blocking/critical).
-- 1-2 sentences each. Don't flag closed/merged items. Recently completed work = forward progress.
+## Formatting rules
+Your output renders in a narrow terminal viewport (~100 chars wide). Follow these rules:
+- Use headers (##, ###), bold, bullets, and inline code freely
+- NEVER use markdown tables — they break in the narrow viewport. Use bulleted lists instead
+- Keep lines short. Prefer multiple short bullets over long paragraphs
 
-bus_message: Only when genuinely actionable for other agents (breaking changes, blockers). Omit for most polls.
-
-## Evidence rules
-- Newer evidence supersedes older. Don't raise concerns from stale bus messages.
-- Git commits = strongest signal of active work. Only claim "actively worked on" with direct evidence.
-- Base all claims on provided data only.
+When the operator asks questions, answer from your accumulated context.
 
 ## Work tracking context
-- The project owner routinely clears completed work from tracking. A smaller tracked items list indicates progress, not stagnation. Never raise velocity concerns based on shrinking item counts.
+- The project owner routinely clears completed work from tracking. A smaller tracked items list indicates progress, not stagnation.
 - Items tagged [autopilot] have an explicit dependency graph and execution plan. Do not raise velocity concerns about queued autopilot tasks — they are intentionally waiting on dependencies.
 - Items tagged [manual] are not managed by autopilot and may need human attention.
-- When a dependency graph is present, use it to reason about blockers and ordering. Queued tasks waiting on running tasks are working as intended.`, projectName)
+- When a dependency graph is present, use it to reason about blockers and ordering.`, projectName)
 
 	focus := analyzerFocus
 	if focus == "" {
 		focus = DefaultAnalyzerFocus
 	}
-	base += fmt.Sprintf("\n\n## Analyzer Focus\nThe user has configured the following focus for your analysis. This shapes how you interpret data, what you pay attention to, and how you communicate:\n\n%s", focus)
+	base += fmt.Sprintf("\n\n## Analyzer Focus\n%s", focus)
 
 	return base
 }
@@ -919,7 +966,7 @@ bus_message: Only when genuinely actionable for other agents (breaking changes, 
 // It reflects the analyzer's built-in engineering coordinator persona.
 const DefaultAnalyzerFocus = `Focus on cross-repo coordination and engineering progress. Be concise, evidence-based, and actionable. Prioritize blockers and coordination needs. Use direct, professional language.`
 
-func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, concerns []db.Concern, completedItems []db.CompletedItem, autopilotTasks []db.AutopilotTask) string {
+func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, completedItems []db.CompletedItem, autopilotTasks []db.AutopilotTask) string {
 	trackedItems := gathered.trackedItems
 
 	// Build lookup of autopilot-managed issues: owner/repo#number → status.
@@ -931,6 +978,7 @@ func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, concerns []db.Conce
 
 	var b strings.Builder
 
+	fmt.Fprintf(&b, "Current time: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 	fmt.Fprintf(&b, "## Project Context\n")
 	fmt.Fprintf(&b, "Project: %s\n", p.project.Name)
 	fmt.Fprintf(&b, "Goal: %s — %s\n\n", p.project.GoalType, p.project.GoalDescription)
@@ -984,7 +1032,6 @@ func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, concerns []db.Conce
 
 	if len(completedItems) > 0 {
 		b.WriteString("## Recently Completed Work\n")
-		b.WriteString("Items are routinely archived after completion. A shrinking tracked items list indicates progress, not stagnation.\n")
 		displayedCompleted, completedOverflow := truncateSlice(completedItems, MaxCompletedItemsForTier2)
 		for _, ci := range displayedCompleted {
 			typeTag := "issue"
@@ -1013,18 +1060,6 @@ func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, concerns []db.Conce
 		}
 	}
 
-	b.WriteString("## Active Concerns\n")
-	if len(concerns) > 0 {
-		b.WriteString("Review and return the updated full list. Remove resolved ones, adjust severity/wording as needed, add new ones.\n")
-		for _, c := range concerns {
-			fmt.Fprintf(&b, "- [%s] (since %s) %s\n", c.Severity, c.CreatedAt, c.Message)
-		}
-	} else {
-		b.WriteString("No active concerns. Add any if warranted by the activity.\n")
-	}
-	b.WriteString("\n")
-
-	b.WriteString("Analyze the above and respond with JSON.")
 	return b.String()
 }
 

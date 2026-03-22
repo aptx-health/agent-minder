@@ -480,70 +480,21 @@ func TestModeTransition_StopAutopilotRequiresTab3(t *testing.T) {
 	}
 }
 
-// --- Poll confirm ---
+// --- 'r' key (full analysis) ---
 
-func TestPollConfirm_RKey(t *testing.T) {
+func TestPollNow_RKey(t *testing.T) {
 	m := testModel(t)
-
-	// 'R' (uppercase) should set pollConfirm.
-	result, _ := m.Update(keyPress('R'))
+	m.activeTab = tabOperations
+	result, cmd := m.Update(keyPress('r'))
 	m = result.(Model)
-	if !m.pollConfirm {
-		t.Error("pollConfirm should be true after 'R'")
-	}
-
-	// 'esc' should cancel.
-	result, _ = m.Update(specialKey(tea.KeyEscape))
-	m = result.(Model)
-	if m.pollConfirm {
-		t.Error("pollConfirm should be false after esc")
-	}
-}
-
-func TestPollConfirm_EscCancels(t *testing.T) {
-	m := testModel(t)
-
-	result, _ := m.Update(keyPress('R'))
-	m = result.(Model)
-	if !m.pollConfirm {
-		t.Fatal("pollConfirm should be true")
-	}
-
-	result, _ = m.Update(specialKey(tea.KeyEscape))
-	m = result.(Model)
-	if m.pollConfirm {
-		t.Error("pollConfirm should be false after esc")
-	}
-}
-
-func TestPollConfirm_YConfirms(t *testing.T) {
-	m := testModel(t)
-
-	result, _ := m.Update(keyPress('R'))
-	m = result.(Model)
-
-	result, cmd := m.Update(specialKey(tea.KeyEnter))
-	m = result.(Model)
-	if m.pollConfirm {
-		t.Error("pollConfirm should be false after enter")
+	if !m.polling {
+		t.Error("polling should be true after 'r'")
 	}
 	if m.activeTab != tabAnalysis {
 		t.Errorf("activeTab = %d, want %d (should switch to Analysis)", m.activeTab, tabAnalysis)
 	}
 	if cmd == nil {
-		t.Error("enter confirm should return a non-nil command (poll)")
-	}
-}
-
-// --- 'r' key (status check) ---
-
-func TestStatusNow_RKey(t *testing.T) {
-	m := testModel(t)
-	// On non-autopilot tab, 'r' triggers a status check.
-	m.activeTab = tabOperations
-	_, cmd := m.Update(keyPress('r'))
-	if cmd == nil {
-		t.Error("'r' should return a non-nil command (StatusNow)")
+		t.Error("'r' should return a non-nil command (PollNow)")
 	}
 }
 
@@ -619,25 +570,6 @@ func TestTrackedExpand_NonOpsTabNoOp(t *testing.T) {
 	m = result.(Model)
 	if m.trackedExpanded {
 		t.Error("trackedExpanded should remain false on non-Ops tab")
-	}
-}
-
-// --- Concerns expand toggle ---
-
-func TestConcernsExpand_AnalysisTab(t *testing.T) {
-	m := testModel(t)
-	m.activeTab = tabAnalysis
-
-	result, _ := m.Update(keyPress('c'))
-	m = result.(Model)
-	if !m.concernsExpanded {
-		t.Error("concernsExpanded should be true after 'c' on Analysis tab")
-	}
-
-	result, _ = m.Update(keyPress('c'))
-	m = result.(Model)
-	if m.concernsExpanded {
-		t.Error("concernsExpanded should be false after second 'c'")
 	}
 }
 
@@ -781,11 +713,22 @@ func TestBroadcastResultMsg_Error(t *testing.T) {
 func TestUserMsgResultMsg_Success(t *testing.T) {
 	m := testModel(t)
 	m.mode = "usermsg"
+	m.width = 120
+	m.height = 40
 
-	result, _ := m.Update(userMsgResultMsg{topic: "test/coord"})
+	result, _ := m.Update(userMsgResultMsg{response: "Here's the status..."})
 	m = result.(Model)
-	if m.userMsgStatus != "Posted to test/coord" {
-		t.Errorf("userMsgStatus = %q, want %q", m.userMsgStatus, "Posted to test/coord")
+	if m.userMsgStatus != "" {
+		t.Errorf("userMsgStatus = %q, want empty on success", m.userMsgStatus)
+	}
+	if m.activeTab != tabAnalysis {
+		t.Errorf("activeTab = %d, want %d (tabAnalysis)", m.activeTab, tabAnalysis)
+	}
+	if m.lastPoll == nil || m.lastPoll.Tier2Analysis != "Here's the status..." {
+		t.Error("expected lastPoll to contain analyzer response")
+	}
+	if m.mode != "normal" {
+		t.Errorf("mode = %q, want normal", m.mode)
 	}
 }
 
