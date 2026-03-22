@@ -1005,7 +1005,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Autopilot confirm modes: only intercept y/n/esc when on tab 3.
+	// Autopilot confirm modes: only intercept enter/esc when on tab 3.
 	// Tab switching keys always pass through so users can browse freely.
 	if m.autopilotMode == "scan-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {

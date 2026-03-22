@@ -2031,9 +2031,9 @@ func (m Model) renderBottomBar() string {
 				issueNum = task.IssueNumber
 			}
 			b.WriteString(warningStyle().Render(fmt.Sprintf("  ⚠ Stop agent on #%d? ", issueNum)))
-			b.WriteString(helpKeyStyle().Render("y"))
+			b.WriteString(helpKeyStyle().Render("enter"))
 			b.WriteString(helpStyle().Render(": stop • "))
-			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "restart-confirm" {
@@ -2043,9 +2043,9 @@ func (m Model) renderBottomBar() string {
 				issueNum = task.IssueNumber
 			}
 			b.WriteString(headerStyle().Render(fmt.Sprintf("  Restart agent on #%d? ", issueNum)))
-			b.WriteString(helpKeyStyle().Render("y"))
+			b.WriteString(helpKeyStyle().Render("enter"))
 			b.WriteString(helpStyle().Render(": restart • "))
-			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "resume-or-restart-confirm" {
@@ -2073,7 +2073,7 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpStyle().Render(fmt.Sprintf(": bump (%d turns, $%.2f) • ", bumpTurns, bumpBudget)))
 			b.WriteString(helpKeyStyle().Render("f"))
 			b.WriteString(helpStyle().Render(": restart fresh • "))
-			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "add-slot-confirm" {
@@ -2082,9 +2082,9 @@ func (m Model) renderBottomBar() string {
 				currentSlots = len(m.autopilotSupervisor.SlotStatus())
 			}
 			b.WriteString(headerStyle().Render(fmt.Sprintf("  Add slot? Currently %d. ", currentSlots)))
-			b.WriteString(helpKeyStyle().Render("y"))
+			b.WriteString(helpKeyStyle().Render("enter"))
 			b.WriteString(helpStyle().Render(": add • "))
-			b.WriteString(helpKeyStyle().Render("n"))
+			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "review-confirm" {
