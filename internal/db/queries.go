@@ -1063,6 +1063,16 @@ func (s *Store) DeleteRepoOnboarding(repoID int64) error {
 	return err
 }
 
+// UpdateAutopilotTaskOverrides sets the per-task max_turns and max_budget overrides.
+// Pass nil to clear an override (revert to project default).
+func (s *Store) UpdateAutopilotTaskOverrides(id int64, maxTurns *int, maxBudget *float64) error {
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks SET max_turns_override = ?, max_budget_override = ?
+		WHERE id = ?
+	`, maxTurns, maxBudget, id)
+	return err
+}
+
 // UpdateAutopilotTaskCost sets the cost_usd for an autopilot task.
 func (s *Store) UpdateAutopilotTaskCost(id int64, costUSD float64) error {
 	_, err := s.db.Exec(`UPDATE autopilot_tasks SET cost_usd = ? WHERE id = ?`, costUSD, id)

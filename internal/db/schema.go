@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 20
+const currentVersion = 21
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -132,7 +132,9 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
 	completed_at   TEXT DEFAULT '',
 	failure_reason TEXT DEFAULT '',
 	failure_detail TEXT DEFAULT '',
-	cost_usd       REAL DEFAULT 0,
+	cost_usd              REAL DEFAULT 0,
+	max_turns_override    INTEGER,
+	max_budget_override   REAL,
 	UNIQUE(project_id, issue_number)
 );
 
@@ -316,6 +318,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 20 {
 		if err := migrateV20(db); err != nil {
 			return fmt.Errorf("apply migration v20: %w", err)
+		}
+	}
+
+	if version < 21 {
+		if err := migrateV21(db); err != nil {
+			return fmt.Errorf("apply migration v21: %w", err)
 		}
 	}
 
@@ -653,6 +661,19 @@ func migrateV20(db *sqlx.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("create autopilot_dep_graphs table: %w", err)
+	}
+	return nil
+}
+
+func migrateV21(db *sqlx.DB) error {
+	stmts := []string{
+		`ALTER TABLE autopilot_tasks ADD COLUMN max_turns_override INTEGER`,
+		`ALTER TABLE autopilot_tasks ADD COLUMN max_budget_override REAL`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
 	}
 	return nil
 }

@@ -406,6 +406,38 @@ func (s *Supervisor) ResumeTask(ctx context.Context, taskID int64) error {
 	return nil
 }
 
+// BumpTaskLimits applies 1.5x resource overrides to a task.
+// Uses the task's current effective limits (override or project default) as the base.
+func (s *Supervisor) BumpTaskLimits(taskID int64) (newTurns int, newBudget float64, err error) {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return 0, 0, fmt.Errorf("task %d not found", taskID)
+	}
+
+	baseTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
+	baseBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
+
+	newTurns = int(float64(baseTurns) * 1.5)
+	newBudget = baseBudget * 1.5
+
+	if err := s.store.UpdateAutopilotTaskOverrides(task.ID, &newTurns, &newBudget); err != nil {
+		return 0, 0, fmt.Errorf("update overrides: %w", err)
+	}
+
+	return newTurns, newBudget, nil
+}
+
 // DeleteWorktree removes the worktree and optionally the branch for a completed/failed/bailed task.
 // The task record stays in the DB; only the on-disk worktree is removed.
 // If deleteBranch is true, the local branch is also deleted.
@@ -2150,15 +2182,9 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		"worktree", task.WorktreePath,
 	)
 
-	// Build claude command.
-	maxTurns := s.project.AutopilotMaxTurns
-	if maxTurns < 1 {
-		maxTurns = 50
-	}
-	maxBudget := s.project.AutopilotMaxBudgetUSD
-	if maxBudget <= 0 {
-		maxBudget = 3.00
-	}
+	// Build claude command — use per-task overrides if set, else project defaults.
+	maxTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
+	maxBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
 
 	allowedTools := resolveAllowedTools(s.repoDir)
 	if !isResume {
@@ -2411,7 +2437,9 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			_ = s.store.UpdateAutopilotTaskCost(task.ID, agentResult.TotalCost)
 		}
 
-		status, reason, detail := classifyOutcome(agentResult, s.project.AutopilotMaxTurns, s.project.AutopilotMaxBudgetUSD)
+		effectiveTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
+		effectiveBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
+		status, reason, detail := classifyOutcome(agentResult, effectiveTurns, effectiveBudget)
 		if status == "failed" {
 			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
 			debugLog("inspectOutcome: classified as failed",

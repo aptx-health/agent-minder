@@ -196,6 +196,38 @@ type AutopilotTask struct {
 	FailureDetail string `db:"failure_detail"` // JSON or text with specifics
 
 	CostUSD float64 `db:"cost_usd"` // total cost in USD from agent result
+
+	MaxTurnsOverride  *int     `db:"max_turns_override"`  // per-task turns override (nil = use project default)
+	MaxBudgetOverride *float64 `db:"max_budget_override"` // per-task budget override (nil = use project default)
+}
+
+// EffectiveMaxTurns returns the per-task max turns override if set,
+// otherwise the project default. Falls back to 50 if both are zero.
+func (t *AutopilotTask) EffectiveMaxTurns(projectDefault int) int {
+	if t.MaxTurnsOverride != nil {
+		return *t.MaxTurnsOverride
+	}
+	if projectDefault < 1 {
+		return 50
+	}
+	return projectDefault
+}
+
+// EffectiveMaxBudget returns the per-task budget override if set,
+// otherwise the project default. Falls back to 3.00 if both are zero.
+func (t *AutopilotTask) EffectiveMaxBudget(projectDefault float64) float64 {
+	if t.MaxBudgetOverride != nil {
+		return *t.MaxBudgetOverride
+	}
+	if projectDefault <= 0 {
+		return 3.00
+	}
+	return projectDefault
+}
+
+// HasOverrides returns true if the task has any per-task resource overrides set.
+func (t *AutopilotTask) HasOverrides() bool {
+	return t.MaxTurnsOverride != nil || t.MaxBudgetOverride != nil
 }
 
 // CostSummary holds aggregated cost data for a time period.
