@@ -72,12 +72,6 @@ func TestIntegrationAnalysisPipeline(t *testing.T) {
 	if result.BusMessageSent != "" {
 		fmt.Printf("\n--- Bus Message Sent ---\n%s\n", result.BusMessageSent)
 	}
-	if len(result.Concerns) > 0 {
-		fmt.Printf("\n--- Concerns ---\n")
-		for _, c := range result.Concerns {
-			fmt.Printf("  %s\n", c)
-		}
-	}
 
 	// Basic assertions.
 	if result.Tier1Summary == "" {

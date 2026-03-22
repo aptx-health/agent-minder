@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -377,108 +376,6 @@ func TestRenderTabBar_NewIndicator(t *testing.T) {
 	}
 }
 
-// --- renderConcerns tests ---
-
-func TestRenderConcerns_EmptyConcerns(t *testing.T) {
-	m := testModel(t)
-	m.width = 120
-
-	result := m.renderConcerns()
-	if result != "" {
-		t.Errorf("renderConcerns() with no concerns should return empty string, got: %q", result)
-	}
-}
-
-func TestRenderConcerns_ShowsConcernCount(t *testing.T) {
-	m, _ := testModelWithProject(t)
-	m.width = 120
-
-	// Insert concerns into the store.
-	for i := 0; i < 3; i++ {
-		_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: fmt.Sprintf("concern-%d", i), Severity: "warning"})
-	}
-
-	result := m.renderConcerns()
-	if !strings.Contains(result, "Active Concerns (3)") {
-		t.Errorf("renderConcerns() should contain count, got: %q", result)
-	}
-}
-
-func TestRenderConcerns_SeverityPrefixes(t *testing.T) {
-	m, _ := testModelWithProject(t)
-	m.width = 120
-
-	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "info concern", Severity: "info"})
-	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "warning concern", Severity: "warning"})
-	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "danger concern", Severity: "danger"})
-
-	result := m.renderConcerns()
-	if !strings.Contains(result, "INFO") {
-		t.Error("renderConcerns() should contain INFO prefix")
-	}
-	if !strings.Contains(result, "WARN") {
-		t.Error("renderConcerns() should contain WARN prefix")
-	}
-	if !strings.Contains(result, "DANGER") {
-		t.Error("renderConcerns() should contain DANGER prefix")
-	}
-}
-
-func TestRenderConcerns_CapsAtFive(t *testing.T) {
-	m, _ := testModelWithProject(t)
-	m.width = 120
-
-	for i := 0; i < 8; i++ {
-		_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: fmt.Sprintf("concern-%d is a test concern", i), Severity: "info"})
-	}
-
-	result := m.renderConcerns()
-	if !strings.Contains(result, "+3 more") {
-		t.Errorf("renderConcerns() with 8 concerns should show '+3 more', got: %q", result)
-	}
-}
-
-func TestRenderConcerns_ExpandedShowsAll(t *testing.T) {
-	m, _ := testModelWithProject(t)
-	m.width = 120
-	m.concernsExpanded = true
-
-	for i := 0; i < 8; i++ {
-		_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: fmt.Sprintf("concern-%d", i), Severity: "info"})
-	}
-
-	result := m.renderConcerns()
-	if strings.Contains(result, "more") {
-		t.Error("renderConcerns() with expanded=true should not show '+N more'")
-	}
-	// All 8 concerns should be present.
-	for i := 0; i < 8; i++ {
-		if !strings.Contains(result, fmt.Sprintf("concern-%d", i)) {
-			t.Errorf("renderConcerns() expanded should contain concern-%d", i)
-		}
-	}
-}
-
-func TestRenderConcerns_ToggleHint(t *testing.T) {
-	m, _ := testModelWithProject(t)
-	m.width = 120
-
-	_ = m.store.AddConcern(&db.Concern{ProjectID: m.project.ID, Message: "test concern", Severity: "info"})
-
-	// Not expanded: shows [c: expand]
-	result := m.renderConcerns()
-	if !strings.Contains(result, "c: expand") {
-		t.Error("renderConcerns() should show 'c: expand' when not expanded")
-	}
-
-	// Expanded: shows [c: collapse]
-	m.concernsExpanded = true
-	result = m.renderConcerns()
-	if !strings.Contains(result, "c: collapse") {
-		t.Error("renderConcerns() should show 'c: collapse' when expanded")
-	}
-}
-
 // --- renderTrackedStrip tests ---
 
 func TestRenderTrackedStrip_EmptyState(t *testing.T) {
@@ -645,18 +542,6 @@ func TestRenderBottomBar_SettingsMode(t *testing.T) {
 	// Should contain navigation hints.
 	if !strings.Contains(result, "esc") {
 		t.Error("renderBottomBar() in settings mode should contain esc hint")
-	}
-}
-
-func TestRenderBottomBar_PollConfirm(t *testing.T) {
-	m := testModel(t)
-	m.width = 120
-	m.height = 40
-	m.pollConfirm = true
-
-	result := m.renderBottomBar()
-	if !strings.Contains(result, "analysis") {
-		t.Error("renderBottomBar() with pollConfirm should mention analysis")
 	}
 }
 
@@ -1026,7 +911,7 @@ func TestRenderAnalysisTab_NoAnalysis(t *testing.T) {
 	m.height = 40
 
 	result := m.renderAnalysisTab()
-	if !strings.Contains(result, "Press R to run analysis") {
+	if !strings.Contains(result, "Press r to run analysis") {
 		t.Error("renderAnalysisTab() with no analysis should show call to action")
 	}
 }

@@ -154,17 +154,10 @@ func (m Model) hasAnalysis() bool {
 func (m Model) renderAnalysisTab() string {
 	var b strings.Builder
 
-	// Active concerns.
-	concerns := m.renderConcerns()
-	if concerns != "" {
-		b.WriteString(concerns)
-		b.WriteString("\n")
-	}
-
 	if !m.hasAnalysis() {
 		// Prominent call-to-action when no analysis exists yet.
 		b.WriteString("\n")
-		b.WriteString(headerStyle().Render("  Press R to run analysis"))
+		b.WriteString(headerStyle().Render("  Press r to run analysis"))
 		b.WriteString("\n\n")
 		b.WriteString(mutedStyle().Render("  Analysis uses the LLM to review recent activity, identify"))
 		b.WriteString("\n")
@@ -182,10 +175,14 @@ func (m Model) renderAnalysisTab() string {
 	b.WriteString("  ")
 	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
 	b.WriteString("  ")
-	b.WriteString(mutedStyle().Render("[R: rerun]"))
+	b.WriteString(mutedStyle().Render("[r: rerun]"))
 	if m.lastPoll != nil {
 		b.WriteString("  ")
 		b.WriteString(mutedStyle().Render(m.lastPoll.Duration.Round(time.Millisecond).String()))
+	}
+	if m.pollNotice != "" {
+		b.WriteString("  ")
+		b.WriteString(lipgloss.NewStyle().Foreground(currentTheme().Warning).Render(m.pollNotice))
 	}
 	b.WriteString("\n")
 	b.WriteString(m.analysisVP.View())
@@ -1277,71 +1274,6 @@ func (m Model) renderHeader() string {
 	return b.String()
 }
 
-// renderConcerns returns wrapped concerns, capped at maxConcernLines total.
-// If the wrapped output exceeds the cap, concerns are truncated to fit.
-// When concernsExpanded is true, all concerns are shown without caps.
-func (m Model) renderConcerns() string {
-	concerns, _ := m.store.ActiveConcerns(m.project.ID)
-	if len(concerns) == 0 {
-		return ""
-	}
-
-	const maxConcernLines = 8
-	maxConcerns := 5
-
-	var b strings.Builder
-	toggleHint := "[c: expand]"
-	if m.concernsExpanded {
-		toggleHint = "[c: collapse]"
-	}
-	b.WriteString(headerStyle().Render(fmt.Sprintf("Active Concerns (%d)", len(concerns))))
-	b.WriteString(" ")
-	b.WriteString(mutedStyle().Render(toggleHint))
-	b.WriteString("\n")
-
-	shown := concerns
-	if !m.concernsExpanded && len(shown) > maxConcerns {
-		shown = shown[:maxConcerns]
-	}
-
-	// Render each concern with wrapping, tracking total lines used.
-	linesUsed := 0
-	concertsShown := 0
-	for _, c := range shown {
-		prefix := "INFO"
-		style := concernInfoStyle()
-		switch c.Severity {
-		case "warning":
-			style = concernWarningStyle()
-			prefix = "WARN"
-		case "danger":
-			style = concernDangerStyle()
-			prefix = "DANGER"
-		}
-		rendered := style.Width(m.width - 2).Render(fmt.Sprintf("  [%s] %s", prefix, c.Message))
-		lineCount := strings.Count(rendered, "\n") + 1
-
-		if !m.concernsExpanded && linesUsed+lineCount > maxConcernLines && concertsShown > 0 {
-			remaining := len(concerns) - concertsShown
-			b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more", remaining)))
-			b.WriteString("\n")
-			return b.String()
-		}
-
-		b.WriteString(rendered)
-		b.WriteString("\n")
-		linesUsed += lineCount
-		concertsShown++
-	}
-
-	if !m.concernsExpanded && len(concerns) > maxConcerns {
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("  ... +%d more", len(concerns)-maxConcerns)))
-		b.WriteString("\n")
-	}
-
-	return b.String()
-}
-
 // renderTrackedStrip returns a compact tracked items display.
 // Shows status tag and dot per item, wrapping to multiple lines for >5 items.
 // When trackedExpanded is true, shows one item per line with title.
@@ -1573,7 +1505,8 @@ func (m *Model) rebuildAnalysisContent() {
 		b.WriteString(broadcastStyle().Render(fmt.Sprintf("  >> Bus: %s", m.lastPoll.BusMessageSent)))
 		b.WriteString("\n")
 	}
-	b.WriteString(llmResponseStyle().Width(m.width - 2).Render(response))
+
+	b.WriteString(renderMarkdown(response, m.width))
 	m.analysisVP.SetContent(b.String())
 }
 
@@ -1631,13 +1564,7 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 		autopilotTaskH = 2
 
 	case tabAnalysis:
-		// Analysis tab: concerns + analysis header + VP + poll summary
-		concernContent := m.renderConcerns()
-		if concernContent != "" {
-			fixed += strings.Count(concernContent, "\n")
-			fixed += 1
-		}
-
+		// Analysis tab: analysis header + VP + poll summary
 		fixed += 1 // analysis header
 		fixed += 2 // blank lines around VP
 		fixed += 1 // poll summary line
@@ -1938,12 +1865,7 @@ func (m Model) renderBottomBar() string {
 		}
 		b.WriteString("\n\n")
 	default:
-		if m.pollConfirm {
-			b.WriteString(headerStyle().Render("  Run comprehensive analysis? (~1 min depending on complexity)"))
-			b.WriteString("\n")
-			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
-			b.WriteString("\n")
-		} else if m.activeTab == tabAutopilot && m.autopilotMode == "scan-confirm" {
+		if m.activeTab == tabAutopilot && m.autopilotMode == "scan-confirm" {
 			if m.polling {
 				b.WriteString("  ")
 				b.WriteString(m.spinner.View())
@@ -2138,7 +2060,7 @@ func (m Model) renderHelpBar() string {
 	case tabAnalysis:
 		condensed = []hint{
 			{"1/2/3", "tabs"},
-			{"R", "analyze"},
+			{"r", "analyze"},
 			{"b", "batch track"},
 			{"u", "user msg"},
 			{"m", "broadcast"},
@@ -2282,9 +2204,8 @@ var (
 	}
 
 	analysisHints = []helpHint{
-		{"R", "run analysis"},
+		{"r", "run analysis"},
 		{"e", "expand analysis"},
-		{"c", "expand concerns"},
 		{"u", "user message"},
 		{"m", "broadcast"},
 		{"o", "onboarding"},

@@ -19,13 +19,15 @@ type Completer interface {
 
 // Request describes a single claude -p invocation.
 type Request struct {
-	SystemPrompt string  // --system-prompt
-	Prompt       string  // positional prompt text
-	Model        string  // --model (e.g. "haiku", "sonnet", "opus", or full model ID)
-	JSONSchema   string  // --json-schema for structured output
-	Tools        string  // "" to disable tools (--tools ""), omit for default
-	DisableTools bool    // explicit flag to pass --tools ""
-	MaxBudget    float64 // --max-budget-usd
+	SystemPrompt    string  // --system-prompt
+	Prompt          string  // positional prompt text
+	Model           string  // --model (e.g. "haiku", "sonnet", "opus", or full model ID)
+	JSONSchema      string  // --json-schema for structured output
+	Tools           string  // "" to disable tools (--tools ""), omit for default
+	DisableTools    bool    // explicit flag to pass --tools ""
+	MaxBudget       float64 // --max-budget-usd
+	SessionID       string  // --session-id (start new session with this ID)
+	ResumeSessionID string  // --resume (continue existing session, skips system prompt)
 }
 
 // Response holds the parsed output from claude -p --output-format json.
@@ -69,8 +71,16 @@ func NewCLICompleter() *CLICompleter {
 func (c *CLICompleter) Complete(ctx context.Context, req *Request) (*Response, error) {
 	args := []string{"-p", "--output-format", "json"}
 
-	if req.SystemPrompt != "" {
-		args = append(args, "--system-prompt", req.SystemPrompt)
+	if req.ResumeSessionID != "" {
+		args = append(args, "--resume", req.ResumeSessionID)
+		// Skip system prompt when resuming — session already has it.
+	} else {
+		if req.SystemPrompt != "" {
+			args = append(args, "--system-prompt", req.SystemPrompt)
+		}
+		if req.SessionID != "" {
+			args = append(args, "--session-id", req.SessionID)
+		}
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)

@@ -174,22 +174,6 @@ func statusPausedStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Warning).Bold(true)
 }
 
-func concernWarningStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(currentTheme().Warning)
-}
-
-func concernDangerStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(currentTheme().Error).Bold(true)
-}
-
-func concernInfoStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(currentTheme().Muted)
-}
-
-func llmResponseStyle() lipgloss.Style {
-	return lipgloss.NewStyle().PaddingLeft(2).Foreground(currentTheme().LLMText)
-}
-
 func mutedStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Muted)
 }

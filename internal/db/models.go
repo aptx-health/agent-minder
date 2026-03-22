@@ -34,6 +34,7 @@ type Project struct {
 	AutopilotSkipLabel    string  `db:"autopilot_skip_label"`
 	AutopilotBaseBranch   string  `db:"autopilot_base_branch"`
 	IsDeploy              bool    `db:"is_deploy"`
+	AnalyzerSessionID     string  `db:"analyzer_session_id"`
 	CreatedAt             string  `db:"created_at"`
 }
 
