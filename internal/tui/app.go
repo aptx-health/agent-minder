@@ -103,10 +103,20 @@ type clearTrackStatusMsg struct{}
 
 // autopilotPrepareResultMsg is sent when autopilot issue fetch completes.
 type autopilotPrepareResultMsg struct {
-	total    int
-	options  []autopilot.DepOption
-	agentDef autopilot.AgentDefSource
-	err      error
+	result *autopilot.PrepareResult
+	err    error
+}
+
+// reprepareKeepResultMsg is sent when a "keep" reprepare completes.
+type reprepareKeepResultMsg struct {
+	result *autopilot.PrepareResult
+	err    error
+}
+
+// reprepareRebuildResultMsg is sent when a "rebuild" reprepare completes.
+type reprepareRebuildResultMsg struct {
+	result *autopilot.PrepareResult
+	err    error
 }
 
 // autopilotEventMsg wraps an autopilot supervisor event.
@@ -226,8 +236,9 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor       *autopilot.Supervisor
-	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "add-slot-confirm", "completed"
+	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "add-slot-confirm", "completed", "reprepare-choice"
 	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
+	autopilotPrepareResult    *autopilot.PrepareResult
 	autopilotStatus           string
 	autopilotTotal            int
 	autopilotUnblocked        int
@@ -679,7 +690,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return clearAutopilotStatusMsg{}
 			})
 		}
-		if msg.total == 0 {
+		r := msg.result
+		if r.Total == 0 && r.Existing == 0 {
 			m.autopilotStatus = "No issues found matching filter"
 			m.autopilotMode = ""
 			m.autopilotSupervisor = nil
@@ -687,28 +699,104 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return clearAutopilotStatusMsg{}
 			})
 		}
-		m.autopilotTotal = msg.total
-		m.autopilotDepOptions = msg.options
+		// If existing tasks found, offer keep/rebuild choice.
+		if r.HasGraph || r.Existing > 0 {
+			m.autopilotTotal = r.Total
+			m.autopilotPrepareResult = r
+			m.autopilotMode = "reprepare-choice"
+			m.autopilotStatus = fmt.Sprintf("Agent definition: %s", r.AgentDef.Description())
+			m.rebuildAutopilotTaskContent()
+			if m.activeTab != tabAutopilot {
+				m.autopilotHasNew = true
+			}
+			return m, tea.Tick(8*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		// Fresh prepare — go to dep-select.
+		m.autopilotTotal = r.Total
+		m.autopilotDepOptions = r.Options
 		m.autopilotDepSelection = 0
-		if len(msg.options) > 0 {
-			m.autopilotUnblocked = msg.options[0].Unblocked
+		if len(r.Options) > 0 {
+			m.autopilotUnblocked = r.Options[0].Unblocked
 		}
 		m.autopilotMode = "dep-select"
-		m.autopilotStatus = fmt.Sprintf("Agent definition: %s", msg.agentDef.Description())
-		m.rebuildAutopilotTaskContent() // populate task list for dep graph display
+		m.autopilotStatus = fmt.Sprintf("Agent definition: %s", r.AgentDef.Description())
+		m.rebuildAutopilotTaskContent()
 		if m.activeTab != tabAutopilot {
 			m.autopilotHasNew = true
 		}
-		// Add agent def source to event log so it's visible after status clears.
 		m.events = append(m.events, poller.Event{
 			Time:    time.Now(),
 			Type:    "autopilot",
-			Summary: fmt.Sprintf("[info] Agent definition: %s", msg.agentDef.Description()),
+			Summary: fmt.Sprintf("[info] Agent definition: %s", r.AgentDef.Description()),
 		})
 		m.rebuildEventLogContent()
 		return m, tea.Tick(8*time.Second, func(t time.Time) tea.Msg {
 			return clearAutopilotStatusMsg{}
 		})
+
+	case reprepareKeepResultMsg:
+		m.polling = false
+		if msg.err != nil {
+			m.autopilotStatus = fmt.Sprintf("Error: %v", msg.err)
+			m.autopilotMode = ""
+			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		r := msg.result
+		if r.Total == 0 {
+			m.autopilotStatus = "No tasks remain"
+			m.autopilotMode = ""
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		// If incremental options came back, show dep-select for new issues.
+		if len(r.Options) > 0 {
+			m.autopilotTotal = r.Total
+			m.autopilotDepOptions = r.Options
+			m.autopilotDepSelection = 0
+			m.autopilotUnblocked = r.Options[0].Unblocked
+			m.autopilotMode = "dep-select"
+			m.rebuildAutopilotTaskContent()
+			return m, nil
+		}
+		// No new issues — go straight to confirm.
+		m.autopilotTotal = r.Total
+		unblockedTasks, _ := m.store.QueuedUnblockedTasks(m.project.ID)
+		m.autopilotUnblocked = len(unblockedTasks)
+		m.autopilotMode = "confirm"
+		m.rebuildAutopilotTaskContent()
+		return m, nil
+
+	case reprepareRebuildResultMsg:
+		m.polling = false
+		if msg.err != nil {
+			m.autopilotStatus = fmt.Sprintf("Error: %v", msg.err)
+			m.autopilotMode = ""
+			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		r := msg.result
+		if r.Total == 0 {
+			m.autopilotStatus = "No tasks remain"
+			m.autopilotMode = ""
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
+		m.autopilotTotal = r.Total
+		m.autopilotDepOptions = r.Options
+		m.autopilotDepSelection = 0
+		if len(r.Options) > 0 {
+			m.autopilotUnblocked = r.Options[0].Unblocked
+		}
+		m.autopilotMode = "dep-select"
+		m.rebuildAutopilotTaskContent()
+		return m, nil
 
 	case autopilotEventMsg:
 		event := autopilot.Event(msg)
@@ -926,6 +1014,52 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.autopilotMode = ""
 			m.autopilotSupervisor = nil
 			m.autopilotStatus = ""
+			return m, nil
+		case "G":
+			m.mode = "dep-guidance"
+			m.rebuildDepsStatus = ""
+			m.rebuildDepsInput.Reset()
+			if m.width > 4 {
+				m.rebuildDepsInput.SetWidth(m.width - 4)
+			}
+			m.resizeViewports()
+			return m, m.rebuildDepsInput.Focus()
+		}
+	}
+	if m.autopilotMode == "reprepare-choice" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "k":
+			// Keep existing graph, add new issues only.
+			sup := m.autopilotSupervisor
+			if sup == nil {
+				m.autopilotMode = ""
+				return m, nil
+			}
+			m.autopilotStatus = "Keeping existing graph..."
+			m.polling = true
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				result, err := sup.ReprepareKeep(context.Background())
+				return reprepareKeepResultMsg{result: result, err: err}
+			})
+		case "r":
+			// Rebuild full graph.
+			sup := m.autopilotSupervisor
+			if sup == nil {
+				m.autopilotMode = ""
+				return m, nil
+			}
+			m.autopilotStatus = "Rebuilding dependency graph..."
+			m.polling = true
+			guidance := m.autopilotDepGuidance
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				result, err := sup.ReprepareRebuild(context.Background(), guidance)
+				return reprepareRebuildResultMsg{result: result, err: err}
+			})
+		case "esc", "n":
+			m.autopilotMode = ""
+			m.autopilotSupervisor = nil
+			m.autopilotStatus = ""
+			m.autopilotPrepareResult = nil
 			return m, nil
 		case "G":
 			m.mode = "dep-guidance"
@@ -1981,20 +2115,23 @@ func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 		})
 	}
 
-	// Check prerequisites: need tracked issues.
-	trackedItems, _ := m.store.GetTrackedItems(m.project.ID)
-	hasOpenIssue := false
-	for _, item := range trackedItems {
-		if item.ItemType == "issue" && item.State == "open" {
-			hasOpenIssue = true
-			break
+	// Check prerequisites: need tracked issues or existing tasks.
+	existingTasks, _ := m.store.GetAutopilotTasks(m.project.ID)
+	if len(existingTasks) == 0 {
+		trackedItems, _ := m.store.GetTrackedItems(m.project.ID)
+		hasOpenIssue := false
+		for _, item := range trackedItems {
+			if item.ItemType == "issue" && item.State == "open" {
+				hasOpenIssue = true
+				break
+			}
 		}
-	}
-	if !hasOpenIssue {
-		m.autopilotStatus = "No open issues tracked — use 'i' or 'f' to track issues first"
-		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
-			return clearAutopilotStatusMsg{}
-		})
+		if !hasOpenIssue {
+			m.autopilotStatus = "No open issues tracked — use 'i' or 'f' to track issues first"
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearAutopilotStatusMsg{}
+			})
+		}
 	}
 
 	ghRepos := m.poller.GitHubRepos()
@@ -2047,8 +2184,8 @@ func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
 	guidance := m.autopilotDepGuidance
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-		total, options, agentDef, err := sup.Prepare(context.Background(), guidance)
-		return autopilotPrepareResultMsg{total: total, options: options, agentDef: agentDef, err: err}
+		result, err := sup.Prepare(context.Background(), guidance)
+		return autopilotPrepareResultMsg{result: result, err: err}
 	})
 }
 

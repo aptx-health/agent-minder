@@ -2110,3 +2110,251 @@ func TestCostAggregation_AllTerminalStatuses(t *testing.T) {
 		t.Errorf("TaskCount = %d, want 4", cs.TaskCount)
 	}
 }
+
+// --- Dep Graph CRUD ---
+
+func TestDepGraphCRUD(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "depgraph-test", GoalType: "feature", GoalDescription: "test"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Initially no graph.
+	dg, err := store.GetDepGraph(p.ID)
+	if err != nil {
+		t.Fatalf("GetDepGraph: %v", err)
+	}
+	if dg != nil {
+		t.Fatal("expected nil dep graph initially")
+	}
+
+	// Save a graph.
+	if err := store.SaveDepGraph(p.ID, `{"42":[],"38":[42]}`, "Conservative"); err != nil {
+		t.Fatalf("SaveDepGraph: %v", err)
+	}
+	dg, err = store.GetDepGraph(p.ID)
+	if err != nil {
+		t.Fatalf("GetDepGraph after save: %v", err)
+	}
+	if dg == nil {
+		t.Fatal("expected non-nil dep graph after save")
+	}
+	if dg.GraphJSON != `{"42":[],"38":[42]}` {
+		t.Errorf("GraphJSON = %q, want %q", dg.GraphJSON, `{"42":[],"38":[42]}`)
+	}
+	if dg.OptionName != "Conservative" {
+		t.Errorf("OptionName = %q, want %q", dg.OptionName, "Conservative")
+	}
+
+	// Upsert overwrites.
+	if err := store.SaveDepGraph(p.ID, `{"42":[],"38":[]}`, "Parallel"); err != nil {
+		t.Fatalf("SaveDepGraph upsert: %v", err)
+	}
+	dg, err = store.GetDepGraph(p.ID)
+	if err != nil {
+		t.Fatalf("GetDepGraph after upsert: %v", err)
+	}
+	if dg.OptionName != "Parallel" {
+		t.Errorf("OptionName after upsert = %q, want %q", dg.OptionName, "Parallel")
+	}
+
+	// Delete.
+	if err := store.DeleteDepGraph(p.ID); err != nil {
+		t.Fatalf("DeleteDepGraph: %v", err)
+	}
+	dg, err = store.GetDepGraph(p.ID)
+	if err != nil {
+		t.Fatalf("GetDepGraph after delete: %v", err)
+	}
+	if dg != nil {
+		t.Fatal("expected nil dep graph after delete")
+	}
+}
+
+func TestTransitionAutopilotTasksForReprepare(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "transition-test", GoalType: "feature", GoalDescription: "test"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create tasks with various statuses.
+	statuses := map[int]string{
+		1: "done",
+		2: "review",
+		3: "failed",
+		4: "bailed",
+		5: "stopped",
+		6: "running",
+		7: "queued",
+		8: "blocked",
+		9: "manual",
+	}
+	for num, status := range statuses {
+		task := &AutopilotTask{
+			ProjectID:   p.ID,
+			IssueNumber: num,
+			IssueTitle:  fmt.Sprintf("Issue %d", num),
+			Status:      status,
+		}
+		if err := store.CreateAutopilotTask(task); err != nil {
+			t.Fatalf("CreateAutopilotTask #%d: %v", num, err)
+		}
+	}
+
+	if err := store.TransitionAutopilotTasksForReprepare(p.ID); err != nil {
+		t.Fatalf("TransitionAutopilotTasksForReprepare: %v", err)
+	}
+
+	tasks, err := store.GetAutopilotTasks(p.ID)
+	if err != nil {
+		t.Fatalf("GetAutopilotTasks: %v", err)
+	}
+
+	taskMap := make(map[int]string)
+	for _, t := range tasks {
+		taskMap[t.IssueNumber] = t.Status
+	}
+
+	// done → done
+	if taskMap[1] != "done" {
+		t.Errorf("task #1 (done) = %q, want done", taskMap[1])
+	}
+	// review → manual
+	if taskMap[2] != "manual" {
+		t.Errorf("task #2 (review) = %q, want manual", taskMap[2])
+	}
+	// failed → manual
+	if taskMap[3] != "manual" {
+		t.Errorf("task #3 (failed) = %q, want manual", taskMap[3])
+	}
+	// bailed → manual
+	if taskMap[4] != "manual" {
+		t.Errorf("task #4 (bailed) = %q, want manual", taskMap[4])
+	}
+	// stopped → manual
+	if taskMap[5] != "manual" {
+		t.Errorf("task #5 (stopped) = %q, want manual", taskMap[5])
+	}
+	// running → manual
+	if taskMap[6] != "manual" {
+		t.Errorf("task #6 (running) = %q, want manual", taskMap[6])
+	}
+	// queued → cleared (should not exist)
+	if _, ok := taskMap[7]; ok {
+		t.Errorf("task #7 (queued) should have been deleted, got %q", taskMap[7])
+	}
+	// blocked → cleared (should not exist)
+	if _, ok := taskMap[8]; ok {
+		t.Errorf("task #8 (blocked) should have been deleted, got %q", taskMap[8])
+	}
+	// manual → manual
+	if taskMap[9] != "manual" {
+		t.Errorf("task #9 (manual) = %q, want manual", taskMap[9])
+	}
+}
+
+func TestTransitionStaleRunningTasks(t *testing.T) {
+	store := openTestDB(t)
+	p := &Project{Name: "stale-test", GoalType: "feature", GoalDescription: "test"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	// Create tasks with various statuses.
+	for num, status := range map[int]string{
+		1: "running", 2: "queued", 3: "blocked", 4: "manual", 5: "done", 6: "review",
+	} {
+		task := &AutopilotTask{
+			ProjectID:   p.ID,
+			IssueNumber: num,
+			IssueTitle:  fmt.Sprintf("Issue %d", num),
+			Status:      status,
+		}
+		if err := store.CreateAutopilotTask(task); err != nil {
+			t.Fatalf("CreateAutopilotTask #%d: %v", num, err)
+		}
+	}
+
+	n, err := store.TransitionStaleRunningTasks(p.ID)
+	if err != nil {
+		t.Fatalf("TransitionStaleRunningTasks: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("reset count = %d, want 1", n)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(p.ID)
+	taskMap := make(map[int]string)
+	for _, tk := range tasks {
+		taskMap[tk.IssueNumber] = tk.Status
+	}
+
+	// running → queued
+	if taskMap[1] != "queued" {
+		t.Errorf("task #1 (running) = %q, want queued", taskMap[1])
+	}
+	// Everything else unchanged.
+	if taskMap[2] != "queued" {
+		t.Errorf("task #2 (queued) = %q, want queued", taskMap[2])
+	}
+	if taskMap[3] != "blocked" {
+		t.Errorf("task #3 (blocked) = %q, want blocked", taskMap[3])
+	}
+	if taskMap[4] != "manual" {
+		t.Errorf("task #4 (manual) = %q, want manual", taskMap[4])
+	}
+	if taskMap[5] != "done" {
+		t.Errorf("task #5 (done) = %q, want done", taskMap[5])
+	}
+	if taskMap[6] != "review" {
+		t.Errorf("task #6 (review) = %q, want review", taskMap[6])
+	}
+}
+
+func TestMigrateV20_CreatesDepGraphTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Create a v19 database.
+	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	// Apply schemaV1 but set version to 19.
+	if _, err := conn.Exec(schemaV1); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+	// Drop the dep_graphs table that schemaV1 now creates.
+	if _, err := conn.Exec("DROP TABLE IF EXISTS autopilot_dep_graphs"); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	if _, err := conn.Exec("INSERT INTO schema_version (version) VALUES (19)"); err != nil {
+		t.Fatalf("set version: %v", err)
+	}
+	_ = conn.Close()
+
+	// Re-open with Open() which will run migrations.
+	conn2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open with migration: %v", err)
+	}
+	defer func() { _ = conn2.Close() }()
+
+	// Verify the table exists by inserting a row.
+	store := NewStore(conn2)
+	p := &Project{Name: "v20-test", GoalType: "feature", GoalDescription: "test"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if err := store.SaveDepGraph(p.ID, `{"1":[]}`, "test"); err != nil {
+		t.Fatalf("SaveDepGraph after migration: %v", err)
+	}
+	dg, err := store.GetDepGraph(p.ID)
+	if err != nil {
+		t.Fatalf("GetDepGraph after migration: %v", err)
+	}
+	if dg == nil || dg.GraphJSON != `{"1":[]}` {
+		t.Errorf("unexpected dep graph after migration: %+v", dg)
+	}
+}

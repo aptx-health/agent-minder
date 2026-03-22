@@ -245,6 +245,39 @@ func (m Model) renderAutopilotTab() string {
 		return b.String()
 	}
 
+	// Reprepare-choice: existing tasks found, offer keep/rebuild.
+	if m.autopilotMode == "reprepare-choice" && m.autopilotPrepareResult != nil {
+		r := m.autopilotPrepareResult
+		b.WriteString("\n")
+		b.WriteString(headerStyle().Render("  Autopilot — Existing Session Found"))
+		b.WriteString("\n\n")
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Found %d existing tasks (%d done, %d manual)",
+			r.Existing, r.Done, r.Manual)))
+		b.WriteString("\n")
+		if r.NewIssues > 0 {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %d new issues detected", r.NewIssues)))
+			b.WriteString("\n")
+		}
+		if r.HasGraph {
+			b.WriteString(mutedStyle().Render("  Stored dependency graph available"))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+		b.WriteString(mutedStyle().Render("  k = keep existing graph, add new issues only"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle().Render("  r = regenerate full dependency graph"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle().Render("  G = add guidance for dependency analyzer"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle().Render("  esc = cancel"))
+		b.WriteString("\n")
+		if m.autopilotDepGuidance != "" {
+			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  Guidance: %q", m.autopilotDepGuidance)))
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+
 	// Dep-select state: carousel through dependency graph options.
 	if m.autopilotMode == "dep-select" && len(m.autopilotDepOptions) > 0 {
 		idx := m.autopilotDepSelection
@@ -1715,8 +1748,8 @@ func (m Model) bottomBarHeight() int {
 		// Autopilot action modes have an extra padding line above the controls.
 		if m.activeTab == tabAutopilot {
 			switch m.autopilotMode {
-			case "scan-confirm", "dep-select", "confirm":
-				if (m.autopilotMode == "scan-confirm" || m.autopilotMode == "dep-select") && m.polling {
+			case "scan-confirm", "dep-select", "confirm", "reprepare-choice":
+				if (m.autopilotMode == "scan-confirm" || m.autopilotMode == "dep-select" || m.autopilotMode == "reprepare-choice") && m.polling {
 					return 2 // blank + spinner row
 				}
 				return 3 // blank + padding + help row
@@ -1937,6 +1970,28 @@ func (m Model) renderBottomBar() string {
 				b.WriteString(helpStyle().Render(": select • "))
 				b.WriteString(helpKeyStyle().Render("G"))
 				b.WriteString(helpStyle().Render(": regenerate with comments • "))
+				b.WriteString(helpKeyStyle().Render("esc"))
+				b.WriteString(helpStyle().Render(": cancel"))
+				b.WriteString("\n")
+			}
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "reprepare-choice" {
+			if m.polling {
+				b.WriteString("  ")
+				b.WriteString(m.spinner.View())
+				b.WriteString(" ")
+				b.WriteString(mutedStyle().Render(m.autopilotStatus))
+				b.WriteString("\n")
+			} else {
+				if m.autopilotStatus != "" {
+					b.WriteString(mutedStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
+					b.WriteString("\n")
+				} else {
+					b.WriteString("\n")
+				}
+				b.WriteString(helpKeyStyle().Render("k"))
+				b.WriteString(helpStyle().Render(": keep • "))
+				b.WriteString(helpKeyStyle().Render("r"))
+				b.WriteString(helpStyle().Render(": rebuild • "))
 				b.WriteString(helpKeyStyle().Render("esc"))
 				b.WriteString(helpStyle().Render(": cancel"))
 				b.WriteString("\n")

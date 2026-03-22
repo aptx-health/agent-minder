@@ -58,12 +58,13 @@ Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `u` u
 
 Supervisor manages N concurrent Claude Code agents working on GitHub issues in isolated worktrees.
 
-**Flow:** `a` in TUI → `Prepare()` (clears old tasks, converts tracked items, builds dep graph) → user confirms → `Launch()` fills slots with unblocked tasks → agents run `claude -p` → inspect outcome → clean up → refill slots.
+**Flow:** `a` in TUI → `Prepare()` (checks for existing tasks, offers keep/rebuild if found, else fresh scan) → user selects dep graph option → `Launch()` fills slots with unblocked tasks → agents run `claude -p` → inspect outcome → clean up → refill slots.
 
 **Task lifecycle:** `queued` → `running` → `review` (PR opened) → `done` (PR merged) | `bailed` (no PR, agent gave up)
 
 **Key behaviors:**
-- `Prepare()` always starts fresh — clears old tasks, cleans orphaned worktrees, fetches live GitHub status (not cached labels)
+- `Prepare()` preserves existing tasks across restarts — if tasks exist, shows reprepare-choice (k=keep, r=rebuild); selected dep graph stored in `autopilot_dep_graphs` table
+- On reprepare: done stays done, review/failed/bailed/stopped/running → manual, queued/blocked → cleared; new tracked items discovered and optionally analyzed incrementally
 - Issues with the skip label (default `no-agent`, configurable via `project.AutopilotSkipLabel`) are excluded
 - Dependency graph built via one LLM call using analyzer model; includes all tracked items as context for cross-repo deps
 - External dependency blocking: `QueuedUnblockedTasks()` cross-references `tracked_items` — if a dep is tracked and open, it blocks
@@ -79,19 +80,21 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 
 **Agent command:** `claude --agent autopilot -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var. Allowed tools are loaded from `.agent-minder/onboarding.yaml` (if present) or a built-in default set.
 
-### DB schema (internal/db) — currently v18
+### DB schema (internal/db) — currently v20
 
 **projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider (deprecated), llm_model (deprecated), llm_summarizer_model, llm_analyzer_model, autopilot_max_agents, autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label
 
 **polls**: project_id, new_commits, new_messages, concerns_raised, llm_response (legacy), tier1_response, tier2_response, bus_message_sent, polled_at
 
-**autopilot_tasks**: project_id, issue_number, issue_title, issue_body, dependencies (JSON), status (queued/running/done/bailed/blocked), worktree_path, branch, pr_number, agent_log, started_at, completed_at — UNIQUE on project_id+issue_number
+**autopilot_tasks**: project_id, issue_number, issue_title, issue_body, dependencies (JSON), status (queued/running/done/bailed/blocked/manual/skipped), worktree_path, branch, pr_number, agent_log, started_at, completed_at — UNIQUE on project_id+issue_number
+
+**autopilot_dep_graphs**: project_id (UNIQUE), graph_json, option_name, created_at — persists the selected dependency graph across autopilot restarts
 
 **completed_items**: project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at — archived from tracked_items when they reach terminal state (only if progress_summary was non-empty)
 
 **Also**: repos, worktrees, topics, concerns (see `schema.go` for full DDL)
 
-Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns).
+Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns), v20 (autopilot_dep_graphs table for persisting dep graphs).
 
 `Poll.LLMResponse()` accessor returns tier2 > tier1 > raw (backward compat).
 

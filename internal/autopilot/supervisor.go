@@ -60,6 +60,19 @@ type DepOption struct {
 	Unblocked int                        // pre-computed count of unblocked tasks
 }
 
+// PrepareResult holds the outcome of a Prepare() call.
+type PrepareResult struct {
+	Total     int            // total tasks (existing + new)
+	Options   []DepOption    // dep graph options (empty if reusing stored graph)
+	AgentDef  AgentDefSource // which agent definition tier was detected
+	Existing  int            // count of preserved tasks from previous session
+	NewIssues int            // count of newly discovered issues not yet in task table
+	HasGraph  bool           // true if a stored dep graph was found
+	// Status counts for existing tasks.
+	Done   int
+	Manual int
+}
+
 // Event is emitted by the supervisor for the TUI to consume.
 type Event struct {
 	Time    time.Time
@@ -485,14 +498,15 @@ func (s *Supervisor) IsPaused() bool {
 }
 
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
-// Always starts fresh — clears previous tasks, cleans up orphaned worktrees.
+// If existing tasks are found from a previous session, returns PrepareResult with
+// HasGraph=true so the TUI can offer keep/rebuild choice. Otherwise builds fresh.
 // Optional guidance is passed to the LLM during dependency analysis.
-func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, options []DepOption, agentDef AgentDefSource, err error) {
+func (s *Supervisor) Prepare(ctx context.Context, guidance string) (*PrepareResult, error) {
 	// Validate configured base branch exists in at least one enrolled repo.
 	if s.project.AutopilotBaseBranch != "" {
 		repos, err := s.store.GetRepos(s.project.ID)
 		if err != nil {
-			return 0, nil, "", fmt.Errorf("get enrolled repos: %w", err)
+			return nil, fmt.Errorf("get enrolled repos: %w", err)
 		}
 		found := false
 		for _, r := range repos {
@@ -502,33 +516,98 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, o
 			}
 		}
 		if !found {
-			return 0, nil, "", fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
+			return nil, fmt.Errorf("configured base branch %q not found in any enrolled repo", s.project.AutopilotBaseBranch)
 		}
 	}
 
 	// Detect which agent definition tier will be used.
-	agentDef = DetectAgentDef(s.repoDir)
+	agentDef := DetectAgentDef(s.repoDir)
 
-	// Clean up any leftovers from a previous run.
-	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
-		return 0, nil, "", fmt.Errorf("clear autopilot tasks: %w", err)
+	// Check for existing tasks from a previous session.
+	existingTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get existing tasks: %w", err)
 	}
+
+	if len(existingTasks) > 0 {
+		return s.prepareWithExisting(ctx, existingTasks, agentDef)
+	}
+
+	// No existing tasks — fresh prepare.
+	return s.prepareFresh(ctx, guidance, agentDef)
+}
+
+// prepareWithExisting handles the case where tasks exist from a prior session.
+// It counts statuses, finds new issues, checks for a stored graph, and returns
+// a PrepareResult so the TUI can offer keep/rebuild choice.
+func (s *Supervisor) prepareWithExisting(ctx context.Context, existingTasks []db.AutopilotTask, agentDef AgentDefSource) (*PrepareResult, error) {
+	// Count existing task statuses.
+	var doneCount, manualCount int
+	for _, t := range existingTasks {
+		switch t.Status {
+		case "done":
+			doneCount++
+		case "manual":
+			manualCount++
+		}
+	}
+
+	// Find new tracked items not already in the task table.
+	knownIssues := make(map[int]bool, len(existingTasks))
+	for _, t := range existingTasks {
+		knownIssues[t.IssueNumber] = true
+	}
+	items, err := s.store.GetTrackedItems(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get tracked items: %w", err)
+	}
+	var newIssueCount int
+	for _, item := range items {
+		if item.ItemType == "issue" && item.State == "open" && !knownIssues[item.Number] {
+			newIssueCount++
+		}
+	}
+
+	// Check for stored dep graph.
+	storedGraph, err := s.store.GetDepGraph(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get stored dep graph: %w", err)
+	}
+
+	return &PrepareResult{
+		Total:     len(existingTasks),
+		Options:   nil,
+		AgentDef:  agentDef,
+		Existing:  len(existingTasks),
+		NewIssues: newIssueCount,
+		HasGraph:  storedGraph != nil,
+		Done:      doneCount,
+		Manual:    manualCount,
+	}, nil
+}
+
+// prepareFresh runs the full fresh prepare flow: clear old tasks, convert tracked items, build dep graph.
+func (s *Supervisor) prepareFresh(ctx context.Context, guidance string, agentDef AgentDefSource) (*PrepareResult, error) {
+	// Clean up any leftovers.
+	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
+		return nil, fmt.Errorf("clear autopilot tasks: %w", err)
+	}
+	_ = s.store.DeleteDepGraph(s.project.ID)
 	s.cleanOrphanedWorktrees()
 
 	// Convert tracked items to autopilot tasks.
 	tasks, err := s.convertTrackedItems(ctx)
 	if err != nil {
-		return 0, nil, "", fmt.Errorf("convert tracked items: %w", err)
+		return nil, fmt.Errorf("convert tracked items: %w", err)
 	}
 	if len(tasks) == 0 {
-		return 0, nil, agentDef, nil
+		return &PrepareResult{AgentDef: agentDef}, nil
 	}
 
 	// Build dependency graph options.
-	options, err = s.buildDepOptions(ctx, tasks, guidance)
+	options, err := s.buildDepOptions(ctx, tasks, guidance)
 	if err != nil {
 		s.emitEvent("error", fmt.Sprintf("Dependency graph failed: %v — falling back to sequential order", err), nil)
-		// Build a single sequential fallback option.
 		graph := make(map[string]json.RawMessage, len(tasks))
 		var prevAgent int
 		firstAgent := true
@@ -555,7 +634,438 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (total int, o
 		}}
 	}
 
-	return len(tasks), options, agentDef, nil
+	return &PrepareResult{
+		Total:    len(tasks),
+		Options:  options,
+		AgentDef: agentDef,
+	}, nil
+}
+
+// ReprepareKeep preserves all existing tasks and their deps, only resetting
+// stale running tasks (process is gone after restart). Discovers new tracked
+// items and optionally runs incremental dep analysis for them.
+func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) {
+	agentDef := DetectAgentDef(s.repoDir)
+
+	// Only reset running tasks (stale — process is gone). Everything else stays.
+	reset, err := s.store.TransitionStaleRunningTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("reset stale running tasks: %w", err)
+	}
+	if reset > 0 {
+		s.emitEvent("info", fmt.Sprintf("Reset %d stale running tasks to queued", reset), nil)
+	}
+	s.cleanOrphanedWorktrees()
+
+	// Discover and add new tracked items as tasks.
+	added := s.discoverNewTasks(ctx)
+
+	// Get final task list.
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get tasks: %w", err)
+	}
+
+	if len(allTasks) == 0 {
+		return &PrepareResult{AgentDef: agentDef}, nil
+	}
+
+	// If there are new issues, build incremental dep options for them.
+	if added > 0 {
+		options, err := s.BuildIncrementalDepOptions(ctx, allTasks, "")
+		if err != nil {
+			s.emitEvent("warning", fmt.Sprintf("Incremental dep analysis failed: %v — new tasks queued without deps", err), nil)
+		} else if len(options) > 0 {
+			// Merge stored graph into each option so the carousel shows the
+			// full picture (existing tasks + new ones), not just the delta.
+			s.mergeStoredGraphIntoOptions(options, allTasks)
+			return &PrepareResult{
+				Total:    len(allTasks),
+				Options:  options,
+				AgentDef: agentDef,
+			}, nil
+		}
+	}
+
+	// No new issues or incremental failed — go straight to confirm.
+	// Re-evaluate blocked status (some deps may have been satisfied since last run).
+	s.unblockSatisfiedTasks()
+
+	active := 0
+	var doneCount, manualCount int
+	for _, t := range allTasks {
+		if t.Status != "skipped" {
+			active++
+		}
+		if t.Status == "done" {
+			doneCount++
+		}
+		if t.Status == "manual" {
+			manualCount++
+		}
+	}
+
+	return &PrepareResult{
+		Total:     active,
+		Options:   nil,
+		AgentDef:  agentDef,
+		Existing:  len(allTasks) - added,
+		HasGraph:  true,
+		Done:      doneCount,
+		Manual:    manualCount,
+		NewIssues: added,
+	}, nil
+}
+
+// ReprepareRebuild clears remaining queued/blocked tasks, rebuilds the full dep graph.
+func (s *Supervisor) ReprepareRebuild(ctx context.Context, guidance string) (*PrepareResult, error) {
+	agentDef := DetectAgentDef(s.repoDir)
+
+	// Transition tasks: review/failed/bailed/stopped/running → manual; queued/blocked → cleared.
+	if err := s.store.TransitionAutopilotTasksForReprepare(s.project.ID); err != nil {
+		return nil, fmt.Errorf("transition tasks: %w", err)
+	}
+	_ = s.store.DeleteDepGraph(s.project.ID)
+	s.cleanOrphanedWorktrees()
+
+	// Convert all tracked items (will skip those already in task table via BulkCreateAutopilotTasks INSERT OR IGNORE).
+	tasks, err := s.convertTrackedItems(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("convert tracked items: %w", err)
+	}
+
+	// Get all tasks including preserved ones.
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get all tasks: %w", err)
+	}
+
+	if len(allTasks) == 0 {
+		return &PrepareResult{AgentDef: agentDef}, nil
+	}
+
+	// Build dep options for all tasks (including preserved done/manual as context).
+	var taskPtrs []*db.AutopilotTask
+	for i := range allTasks {
+		taskPtrs = append(taskPtrs, &allTasks[i])
+	}
+	// Only build options if there are non-terminal tasks.
+	hasWorkable := false
+	for _, t := range allTasks {
+		if t.Status == "queued" || t.Status == "blocked" || t.Status == "manual" {
+			hasWorkable = true
+			break
+		}
+	}
+	if !hasWorkable {
+		return &PrepareResult{
+			Total:    len(allTasks),
+			AgentDef: agentDef,
+		}, nil
+	}
+
+	options, err := s.buildDepOptions(ctx, taskPtrs, guidance)
+	if err != nil {
+		s.emitEvent("error", fmt.Sprintf("Dependency graph failed: %v — falling back to sequential order", err), nil)
+		graph := make(map[string]json.RawMessage, len(taskPtrs))
+		var prevAgent int
+		firstAgent := true
+		for _, t := range taskPtrs {
+			key := strconv.Itoa(t.IssueNumber)
+			if t.Status == "manual" || t.Status == "done" || t.Status == "skipped" {
+				if t.Status == "manual" {
+					graph[key] = json.RawMessage(`"manual"`)
+				}
+				continue
+			}
+			if firstAgent {
+				graph[key] = json.RawMessage("[]")
+				firstAgent = false
+			} else {
+				deps, _ := json.Marshal([]int{prevAgent})
+				graph[key] = json.RawMessage(deps)
+			}
+			prevAgent = t.IssueNumber
+		}
+		options = []DepOption{{
+			Name:      "Sequential (fallback)",
+			Rationale: "LLM analysis failed; tasks will run one at a time in order.",
+			Graph:     graph,
+			Unblocked: 1,
+		}}
+	}
+
+	_ = tasks // suppress unused warning — tasks were created via convertTrackedItems
+
+	return &PrepareResult{
+		Total:    len(allTasks),
+		Options:  options,
+		AgentDef: agentDef,
+	}, nil
+}
+
+// mergeStoredGraphIntoOptions enriches incremental dep options with stored graph
+// entries so the dep-select carousel shows the full picture (existing + new tasks).
+func (s *Supervisor) mergeStoredGraphIntoOptions(options []DepOption, allTasks []db.AutopilotTask) {
+	storedGraph, _ := s.store.GetDepGraph(s.project.ID)
+
+	// Build a base graph from stored graph + current task statuses.
+	baseGraph := make(map[string]json.RawMessage)
+
+	// Start with stored graph entries.
+	if storedGraph != nil {
+		var stored map[string]json.RawMessage
+		if json.Unmarshal([]byte(storedGraph.GraphJSON), &stored) == nil {
+			for k, v := range stored {
+				baseGraph[k] = v
+			}
+		}
+	}
+
+	// Fill in any tasks not covered by the stored graph (e.g., tasks that existed
+	// before graph persistence was added) using their current DB deps.
+	for _, t := range allTasks {
+		key := strconv.Itoa(t.IssueNumber)
+		if _, exists := baseGraph[key]; exists {
+			continue
+		}
+		switch t.Status {
+		case "manual":
+			baseGraph[key] = json.RawMessage(`"manual"`)
+		case "skipped":
+			baseGraph[key] = json.RawMessage(`"skip"`)
+		default:
+			baseGraph[key] = json.RawMessage(t.Dependencies)
+		}
+	}
+
+	// Merge base graph into each option (option entries for new tasks take priority).
+	for i := range options {
+		merged := make(map[string]json.RawMessage, len(baseGraph)+len(options[i].Graph))
+		for k, v := range baseGraph {
+			merged[k] = v
+		}
+		for k, v := range options[i].Graph {
+			merged[k] = v // new task entries override
+		}
+		options[i].Graph = merged
+		// Recount unblocked with the full graph.
+		var taskPtrs []*db.AutopilotTask
+		for j := range allTasks {
+			taskPtrs = append(taskPtrs, &allTasks[j])
+		}
+		options[i].Unblocked = countUnblocked(merged, taskPtrs)
+	}
+}
+
+// BuildIncrementalDepOptions sends only new issues to LLM for dependency analysis,
+// including existing tasks as context. Returns options that cover only the new issues.
+func (s *Supervisor) BuildIncrementalDepOptions(ctx context.Context, allTasks []db.AutopilotTask, guidance string) ([]DepOption, error) {
+	// Identify new tasks (queued with no deps, added by discoverNewTasks).
+	var newTasks []*db.AutopilotTask
+	var existingTasks []*db.AutopilotTask
+	for i := range allTasks {
+		t := &allTasks[i]
+		if t.Status == "queued" && t.Dependencies == "[]" {
+			newTasks = append(newTasks, t)
+		} else {
+			existingTasks = append(existingTasks, t)
+		}
+	}
+
+	if len(newTasks) == 0 {
+		return nil, nil
+	}
+
+	// Single new task — trivial option.
+	if len(newTasks) == 1 && len(existingTasks) == 0 {
+		graph := make(map[string]json.RawMessage, 1)
+		graph[strconv.Itoa(newTasks[0].IssueNumber)] = json.RawMessage("[]")
+		return []DepOption{{
+			Name:      "No dependencies",
+			Rationale: "Only one new task — no dependencies possible.",
+			Graph:     graph,
+			Unblocked: 1,
+		}}, nil
+	}
+
+	// Build prompt with new issues as the focus and existing as context.
+	var issueList strings.Builder
+	issueList.WriteString("## NEW issues to analyze dependencies for:\n")
+	for _, t := range newTasks {
+		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+		if t.IssueBody != "" {
+			body := t.IssueBody
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	if len(existingTasks) > 0 {
+		issueList.WriteString("\n## Existing tasks (context — may be dependencies for new issues):\n")
+		for _, t := range existingTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s (deps: %s)\n", t.IssueNumber, t.Status, t.IssueTitle, t.Dependencies)
+		}
+	}
+
+	var guidanceSection string
+	if strings.TrimSpace(guidance) != "" {
+		guidanceSection = fmt.Sprintf("\nUser guidance:\n  %q\n", guidance)
+	}
+
+	prompt := fmt.Sprintf(`Analyze these NEW GitHub issues and determine their dependencies.
+Only analyze the NEW issues — existing tasks are provided as context for cross-references.
+A new issue can depend on an existing task or another new issue.
+
+%s%s
+Respond with ONLY a JSON array of exactly 3 dependency graph options. Each has "name", "rationale", and "graph".
+The "graph" should ONLY contain entries for the NEW issues (not existing tasks).
+Values are arrays of integer issue numbers (deps) or "skip"/"manual".
+
+Example:
+[
+  {"name": "Conservative", "rationale": "...", "graph": {"50": [42], "51": []}},
+  {"name": "Parallel", "rationale": "...", "graph": {"50": [], "51": []}},
+  {"name": "Sequential", "rationale": "...", "graph": {"50": [], "51": [50]}}
+]`, issueList.String(), guidanceSection)
+
+	depModel := s.project.LLMAnalyzerModel
+	if depModel == "" {
+		depModel = "opus"
+	}
+
+	var options []DepOption
+	for attempt := 0; attempt < 2; attempt++ {
+		promptText := prompt
+		if attempt > 0 {
+			promptText = prompt + "\n\nYour previous response was not valid JSON. Please respond with ONLY the JSON array."
+		}
+
+		resp, err := s.completer.Complete(ctx, &claudecli.Request{
+			SystemPrompt: "You are analyzing issue dependencies. Respond with ONLY valid JSON, no explanation.",
+			Prompt:       promptText,
+			Model:        depModel,
+			DisableTools: true,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("LLM call: %w", err)
+		}
+
+		content := strings.TrimSpace(resp.Content())
+		if strings.HasPrefix(content, "```") {
+			lines := strings.Split(content, "\n")
+			if len(lines) > 2 {
+				content = strings.Join(lines[1:len(lines)-1], "\n")
+			}
+		}
+		if start := strings.Index(content, "["); start >= 0 {
+			if end := strings.LastIndex(content, "]"); end > start {
+				content = content[start : end+1]
+			}
+		}
+
+		var rawOptions []struct {
+			Name      string                     `json:"name"`
+			Rationale string                     `json:"rationale"`
+			Graph     map[string]json.RawMessage `json:"graph"`
+		}
+		if err := json.Unmarshal([]byte(content), &rawOptions); err != nil {
+			if attempt == 0 {
+				continue
+			}
+			return nil, fmt.Errorf("parse incremental dep options: %w", err)
+		}
+
+		for _, ro := range rawOptions {
+			opt := DepOption{
+				Name:      ro.Name,
+				Rationale: ro.Rationale,
+				Graph:     ro.Graph,
+				Unblocked: countUnblocked(ro.Graph, newTasks),
+			}
+			options = append(options, opt)
+		}
+		break
+	}
+
+	if len(options) == 0 {
+		return nil, fmt.Errorf("LLM returned no options")
+	}
+
+	return options, nil
+}
+
+// ApplyIncrementalDepOption applies deps for new issues and merges into the stored graph.
+func (s *Supervisor) ApplyIncrementalDepOption(ctx context.Context, opt DepOption) error {
+	// Apply deps for the new issues (same logic as ApplyDepOption but only for new keys).
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	for _, t := range tasks {
+		key := strconv.Itoa(t.IssueNumber)
+		rawDeps, ok := opt.Graph[key]
+		if !ok {
+			continue // not a new issue
+		}
+
+		var strVal string
+		if json.Unmarshal(rawDeps, &strVal) == nil {
+			switch strVal {
+			case "skip":
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
+			case "manual":
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "manual")
+			}
+			continue
+		}
+
+		var deps []int
+		if err := json.Unmarshal(rawDeps, &deps); err != nil {
+			var strDeps []string
+			if json.Unmarshal(rawDeps, &strDeps) == nil {
+				for _, sd := range strDeps {
+					if n, err2 := strconv.Atoi(sd); err2 == nil {
+						deps = append(deps, n)
+					}
+				}
+			}
+		}
+
+		if len(deps) > 0 {
+			depsJSON, _ := json.Marshal(deps)
+			_ = s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON))
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "blocked")
+		}
+	}
+
+	// Merge new entries into stored graph.
+	storedGraph, _ := s.store.GetDepGraph(s.project.ID)
+	if storedGraph != nil {
+		var existingGraph map[string]json.RawMessage
+		if json.Unmarshal([]byte(storedGraph.GraphJSON), &existingGraph) == nil {
+			for k, v := range opt.Graph {
+				existingGraph[k] = v
+			}
+			mergedJSON, _ := json.Marshal(existingGraph)
+			_ = s.store.SaveDepGraph(s.project.ID, string(mergedJSON), storedGraph.OptionName+" + incremental")
+		}
+	} else {
+		graphJSON, _ := json.Marshal(opt.Graph)
+		_ = s.store.SaveDepGraph(s.project.ID, string(graphJSON), opt.Name)
+	}
+
+	// Re-evaluate blocked status.
+	s.unblockSatisfiedTasks()
+
+	s.mu.Lock()
+	s.preparedAt = time.Now()
+	s.mu.Unlock()
+
+	return nil
 }
 
 // ApplyDepOption applies the selected dependency option to the DB tasks.
@@ -649,6 +1159,10 @@ func (s *Supervisor) ApplyDepOption(ctx context.Context, opt DepOption) error {
 			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
 		}
 	}
+
+	// Store the selected graph for persistence across restarts.
+	graphJSON, _ := json.Marshal(opt.Graph)
+	_ = s.store.SaveDepGraph(s.project.ID, string(graphJSON), opt.Name)
 
 	s.mu.Lock()
 	s.preparedAt = time.Now()
@@ -2342,6 +2856,10 @@ func (s *Supervisor) ApplyRebuildDepOption(ctx context.Context, opt DepOption) (
 	if unblocked > 0 && s.parentCtx != nil {
 		s.fillSlots(s.parentCtx)
 	}
+
+	// Store the rebuilt graph for persistence.
+	graphJSON, _ := json.Marshal(opt.Graph)
+	_ = s.store.SaveDepGraph(s.project.ID, string(graphJSON), opt.Name)
 
 	s.emitEvent("completed", fmt.Sprintf("Dep graph rebuilt — %d unblocked, %d skipped", unblocked, skipped), nil)
 	return RebuildResult{Unblocked: unblocked, Skipped: skipped}, nil

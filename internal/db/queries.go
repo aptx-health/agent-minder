@@ -654,6 +654,82 @@ func (s *Store) PruneCompletedItems(projectID int64, maxAgeSec int) (int, error)
 	return int(n), nil
 }
 
+// --- Dep Graphs ---
+
+// SaveDepGraph upserts a dependency graph for a project.
+func (s *Store) SaveDepGraph(projectID int64, graphJSON, optionName string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO autopilot_dep_graphs (project_id, graph_json, option_name)
+		VALUES (?, ?, ?)
+		ON CONFLICT(project_id) DO UPDATE SET
+			graph_json = excluded.graph_json,
+			option_name = excluded.option_name,
+			created_at = datetime('now')
+	`, projectID, graphJSON, optionName)
+	if err != nil {
+		return fmt.Errorf("save dep graph: %w", err)
+	}
+	return nil
+}
+
+// GetDepGraph returns the stored dependency graph for a project, or (nil, nil) if none.
+func (s *Store) GetDepGraph(projectID int64) (*DepGraph, error) {
+	var dg DepGraph
+	if err := s.db.Get(&dg, "SELECT * FROM autopilot_dep_graphs WHERE project_id = ?", projectID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get dep graph: %w", err)
+	}
+	return &dg, nil
+}
+
+// DeleteDepGraph removes the stored dependency graph for a project.
+func (s *Store) DeleteDepGraph(projectID int64) error {
+	_, err := s.db.Exec("DELETE FROM autopilot_dep_graphs WHERE project_id = ?", projectID)
+	return err
+}
+
+// ClearNonTerminalAutopilotTasks deletes only queued and blocked autopilot tasks.
+func (s *Store) ClearNonTerminalAutopilotTasks(projectID int64) error {
+	_, err := s.db.Exec(`DELETE FROM autopilot_tasks WHERE project_id = ? AND status IN ('queued', 'blocked')`, projectID)
+	if err != nil {
+		return fmt.Errorf("clear non-terminal tasks: %w", err)
+	}
+	return nil
+}
+
+// TransitionAutopilotTasksForReprepare transitions tasks for a full rebuild re-prepare:
+// review/failed/bailed/stopped/running → manual; done/manual/skipped unchanged; queued/blocked cleared.
+func (s *Store) TransitionAutopilotTasksForReprepare(projectID int64) error {
+	// Transition non-terminal active statuses to manual.
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks SET status = 'manual'
+		WHERE project_id = ? AND status IN ('review', 'failed', 'bailed', 'stopped', 'running')
+	`, projectID)
+	if err != nil {
+		return fmt.Errorf("transition tasks to manual: %w", err)
+	}
+	// Clear queued and blocked tasks (safe to regenerate).
+	return s.ClearNonTerminalAutopilotTasks(projectID)
+}
+
+// TransitionStaleRunningTasks resets only running tasks to queued (process is gone after restart).
+// All other statuses are preserved. Used by the "keep" reprepare flow.
+func (s *Store) TransitionStaleRunningTasks(projectID int64) (int, error) {
+	result, err := s.db.Exec(`
+		UPDATE autopilot_tasks
+		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
+		    started_at = '', completed_at = '', failure_reason = '', failure_detail = ''
+		WHERE project_id = ? AND status = 'running'
+	`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("transition stale running tasks: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
 // --- Autopilot Tasks ---
 
 // CreateAutopilotTask inserts a new autopilot task.

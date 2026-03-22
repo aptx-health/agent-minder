@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 19
+const currentVersion = 20
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -159,6 +159,15 @@ CREATE TABLE IF NOT EXISTS repo_onboarding (
 	validation_status TEXT NOT NULL DEFAULT 'untested',
 	UNIQUE(repo_id)
 );
+
+CREATE TABLE IF NOT EXISTS autopilot_dep_graphs (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	graph_json  TEXT NOT NULL,
+	option_name TEXT DEFAULT '',
+	created_at  TEXT DEFAULT (datetime('now')),
+	UNIQUE(project_id)
+);
 `
 
 // Open opens (or creates) the agent-minder SQLite database and runs migrations,
@@ -301,6 +310,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 19 {
 		if err := migrateV19(db); err != nil {
 			return fmt.Errorf("apply migration v19: %w", err)
+		}
+	}
+
+	if version < 20 {
+		if err := migrateV20(db); err != nil {
+			return fmt.Errorf("apply migration v20: %w", err)
 		}
 	}
 
@@ -621,6 +636,23 @@ func migrateV19(db *sqlx.DB) error {
 	}
 	if _, err := db.Exec(`UPDATE projects SET is_deploy = 0 WHERE is_deploy IS NULL`); err != nil {
 		return fmt.Errorf("null-fill is_deploy: %w", err)
+	}
+	return nil
+}
+
+func migrateV20(db *sqlx.DB) error {
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS autopilot_dep_graphs (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			graph_json  TEXT NOT NULL,
+			option_name TEXT DEFAULT '',
+			created_at  TEXT DEFAULT (datetime('now')),
+			UNIQUE(project_id)
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create autopilot_dep_graphs table: %w", err)
 	}
 	return nil
 }
