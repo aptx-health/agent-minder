@@ -2157,7 +2157,7 @@ func (m Model) renderHelpBar() string {
 				switch task.Status {
 				case "running":
 					condensed = append(condensed,
-						hint{"s", "stop"},
+						hint{"S", "stop"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
@@ -2282,6 +2282,7 @@ var (
 	}
 
 	analysisHints = []helpHint{
+		{"r", "status check"},
 		{"R", "run analysis"},
 		{"e", "expand analysis"},
 		{"c", "expand concerns"},
@@ -2314,72 +2315,70 @@ func helpOverlayHeight() int {
 			maxRows = len(h)
 		}
 	}
-	return 1 + maxRows // 1 header row + hint rows
+	return 1 + maxRows + 1 // 1 header row + hint rows + close hint
 }
 
-// renderHelpOverlay renders a four-column help overlay with the active tab highlighted.
+// tabHints returns the hint list for the given tab index.
+func tabHints(tab int) []helpHint {
+	switch tab {
+	case tabOperations:
+		return opsHints
+	case tabAnalysis:
+		return analysisHints
+	case tabAutopilot:
+		return autopilotHints
+	default:
+		return opsHints
+	}
+}
+
+// tabLabel returns the display name for the given tab index.
+func tabLabel(tab int) string {
+	switch tab {
+	case tabOperations:
+		return "Operations"
+	case tabAnalysis:
+		return "Analysis"
+	case tabAutopilot:
+		return "Autopilot"
+	default:
+		return "Operations"
+	}
+}
+
+// renderHelpOverlay renders a two-column help overlay: Global + active tab.
 func renderHelpOverlay(width, activeTab int) string {
 	keyStyle := helpKeyStyle()
 	descStyle := helpStyle()
 
-	// Column widths.
-	colW := 22
-	if width > 0 && width/4 > colW {
-		colW = width / 4
-	}
+	// Fixed column width — keeps both columns compact and adjacent.
+	colW := 28
 
-	// Build column header labels — highlight the active tab's column.
-	globalLabel := headerStyle().Render("Global")
-	var opsLabel, analysisLabel, autopilotLabel string
-	switch activeTab {
-	case tabOperations:
-		opsLabel = tabActiveStyle().Render(" Operations ")
-		analysisLabel = mutedStyle().Render("Analysis")
-		autopilotLabel = mutedStyle().Render("Autopilot")
-	case tabAnalysis:
-		opsLabel = mutedStyle().Render("Operations")
-		analysisLabel = tabActiveStyle().Render(" Analysis ")
-		autopilotLabel = mutedStyle().Render("Autopilot")
-	case tabAutopilot:
-		opsLabel = mutedStyle().Render("Operations")
-		analysisLabel = mutedStyle().Render("Analysis")
-		autopilotLabel = tabActiveStyle().Render(" Autopilot ")
-	}
+	activeHints := tabHints(activeTab)
+	activeLabel := tabActiveStyle().Render(" " + tabLabel(activeTab) + " ")
 
 	var b strings.Builder
 	b.WriteString(headerStyle().Render("Keybindings"))
 	b.WriteString("\n")
 
 	// Column headers.
-	fmt.Fprintf(&b, "  %-*s", colW, globalLabel)
-	fmt.Fprintf(&b, "%-*s", colW, opsLabel)
-	fmt.Fprintf(&b, "%-*s", colW, analysisLabel)
-	b.WriteString(autopilotLabel)
+	fmt.Fprintf(&b, "  %-*s", colW, headerStyle().Render("Global"))
+	b.WriteString(activeLabel)
 	b.WriteString("\n")
 
-	// Determine row count from longest column.
+	// Determine row count from longer column.
 	maxRows := len(globalHints)
-	for _, h := range [][]helpHint{opsHints, analysisHints, autopilotHints} {
-		if len(h) > maxRows {
-			maxRows = len(h)
-		}
+	if len(activeHints) > maxRows {
+		maxRows = len(activeHints)
 	}
 
-	dimStyle := lipgloss.NewStyle().Foreground(currentTheme().Border) // Surface2 — very faded
-
-	fmtHint := func(hints []helpHint, row int, active bool) string {
+	fmtHint := func(hints []helpHint, row int) string {
 		if row >= len(hints) {
 			return fmt.Sprintf("%-*s", colW, "")
 		}
 		h := hints[row]
-		var k, d string
-		if active {
-			k = keyStyle.Render(fmt.Sprintf("%7s", h.key))
-			d = descStyle.Render(" " + h.desc)
-		} else {
-			k = dimStyle.Render(fmt.Sprintf("%7s", h.key))
-			d = dimStyle.Render(" " + h.desc)
-		}
+		k := keyStyle.Render(fmt.Sprintf("%7s", h.key))
+		d := descStyle.Render(" " + h.desc)
 		entry := k + d
 		// Pad with spaces to fill column (approximate since ANSI codes add invisible chars).
 		pad := colW - len(h.key) - 7 - len(h.desc)
@@ -2391,10 +2390,8 @@ func renderHelpOverlay(width, activeTab int) string {
 
 	for i := 0; i < maxRows; i++ {
 		b.WriteString("  ")
-		b.WriteString(fmtHint(globalHints, i, true))
-		b.WriteString(fmtHint(opsHints, i, activeTab == tabOperations))
-		b.WriteString(fmtHint(analysisHints, i, activeTab == tabAnalysis))
-		b.WriteString(fmtHint(autopilotHints, i, activeTab == tabAutopilot))
+		b.WriteString(fmtHint(globalHints, i))
+		b.WriteString(fmtHint(activeHints, i))
 		b.WriteString("\n")
 	}
 

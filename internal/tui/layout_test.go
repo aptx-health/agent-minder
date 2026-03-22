@@ -738,13 +738,42 @@ func TestRenderHelpOverlay_ContainsKeybindings(t *testing.T) {
 		t.Error("renderHelpOverlay() should contain 'Global' column")
 	}
 	if !strings.Contains(result, "Operations") {
-		t.Error("renderHelpOverlay() should contain 'Operations' column")
+		t.Error("renderHelpOverlay() should contain 'Operations' for active tab")
 	}
-	if !strings.Contains(result, "Analysis") {
-		t.Error("renderHelpOverlay() should contain 'Analysis' column")
+}
+
+func TestRenderHelpOverlay_ShowsOnlyActiveTab(t *testing.T) {
+	// Operations tab should show ops hints, not analysis/autopilot-specific hints
+	opsResult := renderHelpOverlay(120, tabOperations)
+	if !strings.Contains(opsResult, "pause/resume sync") {
+		t.Error("Operations tab should show ops hints")
 	}
-	if !strings.Contains(result, "Autopilot") {
-		t.Error("renderHelpOverlay() should contain 'Autopilot' column")
+	if strings.Contains(opsResult, "run analysis") {
+		t.Error("Operations tab should not show analysis hints")
+	}
+	if strings.Contains(opsResult, "launch autopilot") {
+		t.Error("Operations tab should not show autopilot hints")
+	}
+
+	// Analysis tab should show analysis hints, not ops/autopilot-specific hints
+	analysisResult := renderHelpOverlay(120, tabAnalysis)
+	if !strings.Contains(analysisResult, "Analysis") {
+		t.Error("Analysis tab should show 'Analysis' header")
+	}
+	if !strings.Contains(analysisResult, "run analysis") {
+		t.Error("Analysis tab should show analysis hints")
+	}
+	if strings.Contains(analysisResult, "launch autopilot") {
+		t.Error("Analysis tab should not show autopilot hints")
+	}
+
+	// Autopilot tab should show autopilot hints
+	autopilotResult := renderHelpOverlay(120, tabAutopilot)
+	if !strings.Contains(autopilotResult, "Autopilot") {
+		t.Error("Autopilot tab should show 'Autopilot' header")
+	}
+	if !strings.Contains(autopilotResult, "launch autopilot") {
+		t.Error("Autopilot tab should show autopilot hints")
 	}
 }
 
@@ -1332,16 +1361,16 @@ func TestHelpOverlayHeight(t *testing.T) {
 	if h < 2 {
 		t.Errorf("helpOverlayHeight() = %d, want >= 2", h)
 	}
-	// Should be 1 (header) + max hint group length.
+	// Should be 1 (header) + max hint group length + 1 (close hint).
 	maxHints := len(globalHints)
 	for _, group := range [][]helpHint{opsHints, analysisHints, autopilotHints} {
 		if len(group) > maxHints {
 			maxHints = len(group)
 		}
 	}
-	expected := 1 + maxHints
+	expected := 1 + maxHints + 1
 	if h != expected {
-		t.Errorf("helpOverlayHeight() = %d, want %d (1 + %d)", h, expected, maxHints)
+		t.Errorf("helpOverlayHeight() = %d, want %d (1 + %d + 1)", h, expected, maxHints)
 	}
 }
 

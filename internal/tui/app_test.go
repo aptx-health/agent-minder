@@ -566,16 +566,17 @@ func TestWorktreeToggle(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabOperations
 
+	// Default is true; first toggle hides, second toggle shows.
 	result, _ := m.Update(keyPress('w'))
 	m = result.(Model)
-	if !m.showWorktrees {
-		t.Error("showWorktrees should be true after 'w' on Ops tab")
+	if m.showWorktrees {
+		t.Error("showWorktrees should be false after 'w' on Ops tab (was default true)")
 	}
 
 	result, _ = m.Update(keyPress('w'))
 	m = result.(Model)
-	if m.showWorktrees {
-		t.Error("showWorktrees should be false after second 'w'")
+	if !m.showWorktrees {
+		t.Error("showWorktrees should be true after second 'w'")
 	}
 }
 
@@ -583,10 +584,11 @@ func TestWorktreeToggle_NonOpsTabNoOp(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabAnalysis
 
+	// Default is true, but 'w' on non-Ops tab should be a no-op.
 	result, _ := m.Update(keyPress('w'))
 	m = result.(Model)
-	if m.showWorktrees {
-		t.Error("showWorktrees should remain false on non-Ops tab")
+	if !m.showWorktrees {
+		t.Error("showWorktrees should remain true on non-Ops tab (no-op)")
 	}
 }
 

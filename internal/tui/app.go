@@ -351,6 +351,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		rebuildDepsInput: rdi,
 		spinner:          sp,
 		polling:          true, // initial status check starts immediately
+		showWorktrees:    true,
 		analysisVP:       aVP,
 		eventLogVP:       eVP,
 		autopilotTaskVP:  apVP,
