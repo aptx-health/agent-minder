@@ -1926,6 +1926,113 @@ func TestUpdateAutopilotTaskCost(t *testing.T) {
 	}
 }
 
+func TestEffectiveMaxTurns(t *testing.T) {
+	task := &AutopilotTask{}
+
+	// No override, project default used.
+	if got := task.EffectiveMaxTurns(100); got != 100 {
+		t.Errorf("got %d, want 100", got)
+	}
+
+	// No override, zero project default falls back to 50.
+	if got := task.EffectiveMaxTurns(0); got != 50 {
+		t.Errorf("got %d, want 50 (hardcoded fallback)", got)
+	}
+
+	// Override takes precedence.
+	turns := 75
+	task.MaxTurnsOverride = &turns
+	if got := task.EffectiveMaxTurns(100); got != 75 {
+		t.Errorf("got %d, want 75 (override)", got)
+	}
+}
+
+func TestEffectiveMaxBudget(t *testing.T) {
+	task := &AutopilotTask{}
+
+	// No override, project default used.
+	if got := task.EffectiveMaxBudget(5.00); got != 5.00 {
+		t.Errorf("got %f, want 5.00", got)
+	}
+
+	// No override, zero project default falls back to 3.00.
+	if got := task.EffectiveMaxBudget(0); got != 3.00 {
+		t.Errorf("got %f, want 3.00 (hardcoded fallback)", got)
+	}
+
+	// Override takes precedence.
+	budget := 7.50
+	task.MaxBudgetOverride = &budget
+	if got := task.EffectiveMaxBudget(5.00); got != 7.50 {
+		t.Errorf("got %f, want 7.50 (override)", got)
+	}
+}
+
+func TestHasOverrides(t *testing.T) {
+	task := &AutopilotTask{}
+	if task.HasOverrides() {
+		t.Error("expected no overrides")
+	}
+
+	turns := 10
+	task.MaxTurnsOverride = &turns
+	if !task.HasOverrides() {
+		t.Error("expected overrides with turns set")
+	}
+
+	task.MaxTurnsOverride = nil
+	budget := 1.0
+	task.MaxBudgetOverride = &budget
+	if !task.HasOverrides() {
+		t.Error("expected overrides with budget set")
+	}
+}
+
+func TestUpdateAutopilotTaskOverrides(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "overrides")
+
+	task := &AutopilotTask{
+		ProjectID:    p.ID,
+		IssueNumber:  1,
+		IssueTitle:   "Override test",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	// Initially nil.
+	tasks, _ := store.GetAutopilotTasks(p.ID)
+	if tasks[0].MaxTurnsOverride != nil || tasks[0].MaxBudgetOverride != nil {
+		t.Fatal("expected nil overrides initially")
+	}
+
+	// Set overrides.
+	turns := 75
+	budget := 5.50
+	if err := store.UpdateAutopilotTaskOverrides(task.ID, &turns, &budget); err != nil {
+		t.Fatalf("UpdateAutopilotTaskOverrides: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].MaxTurnsOverride == nil || *tasks[0].MaxTurnsOverride != 75 {
+		t.Errorf("MaxTurnsOverride = %v, want 75", tasks[0].MaxTurnsOverride)
+	}
+	if tasks[0].MaxBudgetOverride == nil || *tasks[0].MaxBudgetOverride != 5.50 {
+		t.Errorf("MaxBudgetOverride = %v, want 5.50", tasks[0].MaxBudgetOverride)
+	}
+
+	// Clear overrides.
+	if err := store.UpdateAutopilotTaskOverrides(task.ID, nil, nil); err != nil {
+		t.Fatalf("clear overrides: %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].MaxTurnsOverride != nil || tasks[0].MaxBudgetOverride != nil {
+		t.Error("expected nil overrides after clear")
+	}
+}
+
 func TestDailyCost(t *testing.T) {
 	store := openTestDB(t)
 	p := createCostTestProject(t, store, "daily-cost")
@@ -2325,9 +2432,15 @@ func TestMigrateV20_CreatesDepGraphTable(t *testing.T) {
 	if _, err := conn.Exec(schemaV1); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
-	// Drop the dep_graphs table that schemaV1 now creates.
+	// Drop objects that schemaV1 creates but didn't exist at v19.
 	if _, err := conn.Exec("DROP TABLE IF EXISTS autopilot_dep_graphs"); err != nil {
 		t.Fatalf("drop table: %v", err)
+	}
+	// Remove v21 columns so migration can re-add them.
+	for _, col := range []string{"max_turns_override", "max_budget_override"} {
+		if _, err := conn.Exec("ALTER TABLE autopilot_tasks DROP COLUMN " + col); err != nil {
+			t.Fatalf("drop column %s: %v", col, err)
+		}
 	}
 	if _, err := conn.Exec("INSERT INTO schema_version (version) VALUES (19)"); err != nil {
 		t.Fatalf("set version: %v", err)

@@ -3980,6 +3980,123 @@ func TestInspectOutcome_FailureReasonStoredOnFailed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// BumpTaskLimits
+// ---------------------------------------------------------------------------
+
+func TestBumpTaskLimits(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotMaxTurns = 50
+	project.AutopilotMaxBudgetUSD = 3.00
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Bump test",
+		Dependencies: "[]",
+		Status:       "failed",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// First bump: 50*1.5=75 turns, 3.00*1.5=4.50 budget.
+	newTurns, newBudget, err := sup.BumpTaskLimits(task.ID)
+	if err != nil {
+		t.Fatalf("BumpTaskLimits: %v", err)
+	}
+	if newTurns != 75 {
+		t.Errorf("newTurns = %d, want 75", newTurns)
+	}
+	if newBudget != 4.50 {
+		t.Errorf("newBudget = %f, want 4.50", newBudget)
+	}
+
+	// Verify overrides persisted.
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, ta := range tasks {
+		if ta.ID == task.ID {
+			if ta.MaxTurnsOverride == nil || *ta.MaxTurnsOverride != 75 {
+				t.Errorf("persisted turns override = %v, want 75", ta.MaxTurnsOverride)
+			}
+			if ta.MaxBudgetOverride == nil || *ta.MaxBudgetOverride != 4.50 {
+				t.Errorf("persisted budget override = %v, want 4.50", ta.MaxBudgetOverride)
+			}
+		}
+	}
+
+	// Second bump compounds: 75*1.5=112 turns, 4.50*1.5=6.75 budget.
+	newTurns, newBudget, err = sup.BumpTaskLimits(task.ID)
+	if err != nil {
+		t.Fatalf("BumpTaskLimits (2nd): %v", err)
+	}
+	if newTurns != 112 {
+		t.Errorf("newTurns = %d, want 112", newTurns)
+	}
+	if newBudget != 6.75 {
+		t.Errorf("newBudget = %f, want 6.75", newBudget)
+	}
+}
+
+func TestBumpTaskLimits_NotFound(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	_, _, err := sup.BumpTaskLimits(99999)
+	if err == nil {
+		t.Fatal("expected error for non-existent task")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// inspectOutcome with per-task overrides
+// ---------------------------------------------------------------------------
+
+func TestInspectOutcome_MaxTurnsWithOverride(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotMaxTurns = 50
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "agent.log")
+	// 75 turns used — would fail with default 50, but override is 100.
+	logContent := `{"type":"result","subtype":"success","is_error":false,"num_turns":75,"total_cost_usd":2.00,"result":"Done","permission_denials":[],"session_id":"abc"}
+`
+	if err := os.WriteFile(logPath, []byte(logContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	turnsOverride := 100
+	task := &db.AutopilotTask{
+		ProjectID:        project.ID,
+		IssueNumber:      42,
+		IssueTitle:       "Override turns",
+		AgentLog:         logPath,
+		Branch:           "agent/issue-42",
+		Dependencies:     "[]",
+		Status:           "running",
+		MaxTurnsOverride: &turnsOverride,
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	status := sup.inspectOutcome(context.Background(), task, 0)
+	// 75 < 100 override, so should NOT be classified as max_turns failure.
+	if status == "failed" {
+		tasks, _ := store.GetAutopilotTasks(project.ID)
+		for _, ta := range tasks {
+			if ta.ID == task.ID && ta.FailureReason == "max_turns" {
+				t.Error("should not fail as max_turns when override allows more turns")
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // cleanup branch deletion logic
 // ---------------------------------------------------------------------------
 
