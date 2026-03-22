@@ -517,16 +517,17 @@ func TestWorktreeToggle(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabOperations
 
+	// Default is true; first toggle hides, second toggle shows.
 	result, _ := m.Update(keyPress('w'))
 	m = result.(Model)
-	if !m.showWorktrees {
-		t.Error("showWorktrees should be true after 'w' on Ops tab")
+	if m.showWorktrees {
+		t.Error("showWorktrees should be false after 'w' on Ops tab (was default true)")
 	}
 
 	result, _ = m.Update(keyPress('w'))
 	m = result.(Model)
-	if m.showWorktrees {
-		t.Error("showWorktrees should be false after second 'w'")
+	if !m.showWorktrees {
+		t.Error("showWorktrees should be true after second 'w'")
 	}
 }
 
@@ -534,10 +535,11 @@ func TestWorktreeToggle_NonOpsTabNoOp(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabAnalysis
 
+	// Default is true, but 'w' on non-Ops tab should be a no-op.
 	result, _ := m.Update(keyPress('w'))
 	m = result.(Model)
-	if m.showWorktrees {
-		t.Error("showWorktrees should remain false on non-Ops tab")
+	if !m.showWorktrees {
+		t.Error("showWorktrees should remain true on non-Ops tab (no-op)")
 	}
 }
 
@@ -1006,15 +1008,15 @@ func TestAutopilot_Confirm_EscCancels(t *testing.T) {
 	}
 }
 
-func TestAutopilot_StopTaskConfirm_NCancels(t *testing.T) {
+func TestAutopilot_StopTaskConfirm_EscCancels2(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabAutopilot
 	m.autopilotMode = "stop-task-confirm"
 
-	result, _ := m.Update(keyPress('n'))
+	result, _ := m.Update(specialKey(tea.KeyEscape))
 	m = result.(Model)
 	if m.autopilotMode != "running" {
-		t.Errorf("autopilotMode = %q, want %q after 'n' from stop-task-confirm", m.autopilotMode, "running")
+		t.Errorf("autopilotMode = %q, want %q after esc from stop-task-confirm", m.autopilotMode, "running")
 	}
 }
 
@@ -1030,40 +1032,40 @@ func TestAutopilot_StopTaskConfirm_EscCancels(t *testing.T) {
 	}
 }
 
-func TestAutopilot_RestartConfirm_NCancels(t *testing.T) {
+func TestAutopilot_RestartConfirm_EscCancels(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabAutopilot
 	m.autopilotMode = "restart-confirm"
 
-	result, _ := m.Update(keyPress('n'))
+	result, _ := m.Update(specialKey(tea.KeyEscape))
 	m = result.(Model)
 	if m.autopilotMode != "running" {
-		t.Errorf("autopilotMode = %q, want %q after 'n' from restart-confirm", m.autopilotMode, "running")
+		t.Errorf("autopilotMode = %q, want %q after esc from restart-confirm", m.autopilotMode, "running")
 	}
 }
 
-func TestAutopilot_ReviewConfirm_NCancels_RestoresMode(t *testing.T) {
+func TestAutopilot_ReviewConfirm_EscCancels_RestoresMode(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabAutopilot
 	m.autopilotMode = "review-confirm"
 	m.autopilotModeBeforeReview = "completed"
 
-	result, _ := m.Update(keyPress('n'))
+	result, _ := m.Update(specialKey(tea.KeyEscape))
 	m = result.(Model)
 	if m.autopilotMode != "completed" {
 		t.Errorf("autopilotMode = %q, want %q (restored from before review)", m.autopilotMode, "completed")
 	}
 }
 
-func TestAutopilot_AddSlotConfirm_NCancels(t *testing.T) {
+func TestAutopilot_AddSlotConfirm_EscCancels(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabAutopilot
 	m.autopilotMode = "add-slot-confirm"
 
-	result, _ := m.Update(keyPress('n'))
+	result, _ := m.Update(specialKey(tea.KeyEscape))
 	m = result.(Model)
 	if m.autopilotMode != "running" {
-		t.Errorf("autopilotMode = %q, want %q after 'n' from add-slot-confirm", m.autopilotMode, "running")
+		t.Errorf("autopilotMode = %q, want %q after esc from add-slot-confirm", m.autopilotMode, "running")
 	}
 }
 
@@ -1531,15 +1533,15 @@ func TestAutopilot_RKey_StoppedTask_ResumeOrRestartConfirm(t *testing.T) {
 	}
 }
 
-func TestAutopilot_ResumeOrRestart_NKey_Cancels(t *testing.T) {
+func TestAutopilot_ResumeOrRestart_EscCancels(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabAutopilot
 	m.autopilotMode = "resume-or-restart-confirm"
 
-	result, _ := m.Update(keyPress('n'))
+	result, _ := m.Update(specialKey(tea.KeyEscape))
 	m = result.(Model)
 	if m.autopilotMode != "running" {
-		t.Errorf("autopilotMode = %q, want %q after 'n' from resume-or-restart-confirm", m.autopilotMode, "running")
+		t.Errorf("autopilotMode = %q, want %q after esc from resume-or-restart-confirm", m.autopilotMode, "running")
 	}
 }
 
@@ -2276,9 +2278,9 @@ func TestFilter_SelectType_LabelChoice(t *testing.T) {
 	m := testModel(t)
 	m.mode = "filter"
 	m.filterState = newFilterState(repos, false)
-	// Auto-skip puts us at selectType.
+	// Auto-skip puts us at selectType, idx 0 = label.
 
-	result, _ := m.Update(keyPress('l'))
+	result, _ := m.Update(specialKey(tea.KeyEnter))
 	m = result.(Model)
 	if m.filterState.filterType != ghpkg.FilterLabel {
 		t.Errorf("filterType = %v, want %v", m.filterState.filterType, ghpkg.FilterLabel)
@@ -2294,7 +2296,10 @@ func TestFilter_SelectType_MilestoneChoice(t *testing.T) {
 	m.mode = "filter"
 	m.filterState = newFilterState(repos, false)
 
-	result, _ := m.Update(keyPress('m'))
+	// Navigate down to milestone (idx 1), then enter.
+	result, _ := m.Update(specialKey(tea.KeyDown))
+	m = result.(Model)
+	result, _ = m.Update(specialKey(tea.KeyEnter))
 	m = result.(Model)
 	if m.filterState.filterType != ghpkg.FilterMilestone {
 		t.Errorf("filterType = %v, want %v", m.filterState.filterType, ghpkg.FilterMilestone)
@@ -2307,7 +2312,12 @@ func TestFilter_SelectType_ProjectGoesInput(t *testing.T) {
 	m.mode = "filter"
 	m.filterState = newFilterState(repos, false)
 
-	result, cmd := m.Update(keyPress('p'))
+	// Navigate down to project (idx 2), then enter.
+	result, _ := m.Update(specialKey(tea.KeyDown))
+	m = result.(Model)
+	result, _ = m.Update(specialKey(tea.KeyDown))
+	m = result.(Model)
+	result, cmd := m.Update(specialKey(tea.KeyEnter))
 	m = result.(Model)
 	if m.filterState.filterType != ghpkg.FilterProject {
 		t.Errorf("filterType = %v, want %v", m.filterState.filterType, ghpkg.FilterProject)
@@ -2326,7 +2336,12 @@ func TestFilter_SelectType_AssigneeChoice(t *testing.T) {
 	m.mode = "filter"
 	m.filterState = newFilterState(repos, false)
 
-	result, _ := m.Update(keyPress('a'))
+	// Navigate down to assignee (idx 3), then enter.
+	for i := 0; i < 3; i++ {
+		result, _ := m.Update(specialKey(tea.KeyDown))
+		m = result.(Model)
+	}
+	result, _ := m.Update(specialKey(tea.KeyEnter))
 	m = result.(Model)
 	if m.filterState.filterType != ghpkg.FilterAssignee {
 		t.Errorf("filterType = %v, want %v", m.filterState.filterType, ghpkg.FilterAssignee)
@@ -2795,10 +2810,10 @@ func TestTrackMode_CleanupConfirm_NCancels(t *testing.T) {
 	m.trackRows = buildTrackRows([]poller.GitHubRepo{{Owner: "org", Repo: "repo"}}, nil)
 	m.trackFocus = 0
 
-	result, _ := m.Update(keyPress('n'))
+	result, _ := m.Update(specialKey(tea.KeyEscape))
 	m = result.(Model)
 	if m.trackStep != trackStepInput {
-		t.Errorf("trackStep = %d, want %d after 'n' from cleanup confirm", m.trackStep, trackStepInput)
+		t.Errorf("trackStep = %d, want %d after esc from cleanup confirm", m.trackStep, trackStepInput)
 	}
 	if m.trackCleanupCount != 0 {
 		t.Errorf("cleanupCount = %d, want 0 after cancel", m.trackCleanupCount)

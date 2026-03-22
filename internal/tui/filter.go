@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
@@ -61,6 +61,8 @@ type filterState struct {
 	results      *ghpkg.SearchResult
 	choices      []ghpkg.RepoChoice // available choices for the selected filter type
 	choiceIdx    int                // currently highlighted choice
+	typeIdx      int                // currently highlighted filter type (0=label, 1=milestone, 2=project, 3=assignee)
+	conflictIdx  int                // currently highlighted conflict option (0=update, 1=append, 2=clear)
 	input        textinput.Model
 	err          error
 	hasExisting  bool // true if project already has tracked items
@@ -140,6 +142,14 @@ func (m Model) updateFilterSelectRepo(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
+// filterTypeOptions defines the order of filter type choices.
+var filterTypeOptions = []ghpkg.FilterType{
+	ghpkg.FilterLabel,
+	ghpkg.FilterMilestone,
+	ghpkg.FilterProject,
+	ghpkg.FilterAssignee,
+}
+
 func (m Model) updateFilterSelectType(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	fs := m.filterState
 	switch msg.String() {
@@ -151,21 +161,26 @@ func (m Model) updateFilterSelectType(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 			m.filterState = nil
 		}
 		return m, nil
-	case "l":
-		fs.filterType = ghpkg.FilterLabel
-		return m.startFetchChoices()
-	case "m":
-		fs.filterType = ghpkg.FilterMilestone
-		return m.startFetchChoices()
-	case "p":
-		// Projects are org-level, no list API — go straight to input.
-		fs.filterType = ghpkg.FilterProject
-		fs.step = filterStepInputValue
-		fs.input.Placeholder = "org/project-number..."
-		cmd := fs.input.Focus()
-		return m, cmd
-	case "a":
-		fs.filterType = ghpkg.FilterAssignee
+	case "up", "k":
+		if fs.typeIdx > 0 {
+			fs.typeIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if fs.typeIdx < len(filterTypeOptions)-1 {
+			fs.typeIdx++
+		}
+		return m, nil
+	case "enter":
+		ft := filterTypeOptions[fs.typeIdx]
+		fs.filterType = ft
+		if ft == ghpkg.FilterProject {
+			// Projects are org-level, no list API — go straight to input.
+			fs.step = filterStepInputValue
+			fs.input.Placeholder = "org/project-number..."
+			cmd := fs.input.Focus()
+			return m, cmd
+		}
 		return m.startFetchChoices()
 	}
 	return m, nil
@@ -328,27 +343,29 @@ func (m Model) updateFilterConflict(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		fs.step = filterStepPreview
 		return m, nil
-	case "a":
-		// Append to existing.
+	case "up", "k":
+		if fs.conflictIdx > 0 {
+			fs.conflictIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if fs.conflictIdx < 2 {
+			fs.conflictIdx++
+		}
+		return m, nil
+	case "enter":
 		items := fs.results.Items
 		if len(items) > 20 {
 			items = items[:20]
 		}
-		return m.startBulkAdd(items, false)
-	case "c":
-		// Clear and replace.
-		items := fs.results.Items
-		if len(items) > 20 {
-			items = items[:20]
+		switch fs.conflictIdx {
+		case 0: // Update
+			return m.startBulkUpdate(items)
+		case 1: // Append
+			return m.startBulkAdd(items, false)
+		case 2: // Clear and replace
+			return m.startBulkAdd(items, true)
 		}
-		return m.startBulkAdd(items, true)
-	case "u":
-		// Update: add new items and remove closed/merged/not-planned.
-		items := fs.results.Items
-		if len(items) > 20 {
-			items = items[:20]
-		}
-		return m.startBulkUpdate(items)
 	}
 	return m, nil
 }
@@ -424,14 +441,20 @@ func (m Model) renderFilterView() string {
 		b.WriteString("\n\n")
 		b.WriteString(textStyle().Render("  Select filter type:"))
 		b.WriteString("\n")
-		b.WriteString(textStyle().Render("    [l] label"))
-		b.WriteString("\n")
-		b.WriteString(textStyle().Render("    [m] milestone"))
-		b.WriteString("\n")
-		b.WriteString(textStyle().Render("    [p] project"))
-		b.WriteString("\n")
-		b.WriteString(textStyle().Render("    [a] assignee"))
-		b.WriteString("\n")
+		typeLabels := []string{"label", "milestone", "project", "assignee"}
+		for i, label := range typeLabels {
+			prefix := "  "
+			if i == fs.typeIdx {
+				prefix = "> "
+			}
+			entry := fmt.Sprintf("  %s%s", prefix, label)
+			if i == fs.typeIdx {
+				b.WriteString(headerStyle().Render(entry))
+			} else {
+				b.WriteString(textStyle().Render(entry))
+			}
+			b.WriteString("\n")
+		}
 
 	case filterStepFetchingChoices:
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Repo: %s/%s  Filter: %s",
@@ -535,14 +558,24 @@ func (m Model) renderFilterView() string {
 	case filterStepConflict:
 		b.WriteString(textStyle().Render(fmt.Sprintf("  %d existing tracked items found.", len(m.trackedItems))))
 		b.WriteString("\n\n")
-		b.WriteString(textStyle().Render("  [u] update (add new, remove closed/merged)"))
-		b.WriteString("\n")
-		b.WriteString(textStyle().Render("  [a] append to existing"))
-		b.WriteString("\n")
-		b.WriteString(textStyle().Render("  [c] clear and replace"))
-		b.WriteString("\n")
-		b.WriteString(textStyle().Render("  [esc] cancel"))
-		b.WriteString("\n")
+		conflictOptions := []string{
+			"update (add new, remove closed/merged)",
+			"append to existing",
+			"clear and replace",
+		}
+		for i, label := range conflictOptions {
+			prefix := "  "
+			if i == fs.conflictIdx {
+				prefix = "> "
+			}
+			entry := fmt.Sprintf("  %s%s", prefix, label)
+			if i == fs.conflictIdx {
+				b.WriteString(headerStyle().Render(entry))
+			} else {
+				b.WriteString(textStyle().Render(entry))
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	return b.String()
