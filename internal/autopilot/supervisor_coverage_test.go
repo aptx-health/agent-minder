@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -519,31 +520,6 @@ func TestAddSlot(t *testing.T) {
 	if len(sup.slots) != initial+1 {
 		t.Errorf("slots len = %d, want %d", len(sup.slots), initial+1)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// TriggerDiscovery
-// ---------------------------------------------------------------------------
-
-func TestTriggerDiscovery(t *testing.T) {
-	store := openTestStore(t)
-	project := createTestProject(t, store)
-	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
-
-	// Should be non-blocking.
-	sup.TriggerDiscovery()
-
-	// Channel should have one signal.
-	select {
-	case <-sup.discovery:
-		// good
-	default:
-		t.Error("expected signal on discovery channel")
-	}
-
-	// Second trigger while one is pending should be dropped.
-	sup.TriggerDiscovery()
-	sup.TriggerDiscovery() // should not block
 }
 
 // ---------------------------------------------------------------------------
@@ -2703,22 +2679,22 @@ func TestApplyRebuildDepOption_MalformedDeps(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// discoverNewTasks — error paths
+// addNewTrackedItems — error paths
 // ---------------------------------------------------------------------------
 
-func TestDiscoverNewTasks_NoTrackedItems(t *testing.T) {
+func TestAddNewTrackedItems_NoTrackedItems(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
 
 	// No tracked items → should return 0.
-	added := sup.discoverNewTasks(context.Background())
+	added := sup.addNewTrackedItems(context.Background())
 	if added != 0 {
-		t.Errorf("discoverNewTasks = %d, want 0", added)
+		t.Errorf("addNewTrackedItems = %d, want 0", added)
 	}
 }
 
-func TestDiscoverNewTasks_AllAlreadyKnown(t *testing.T) {
+func TestAddNewTrackedItems_AllAlreadyKnown(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
@@ -2745,13 +2721,13 @@ func TestDiscoverNewTasks_AllAlreadyKnown(t *testing.T) {
 	}
 	_ = store.CreateAutopilotTask(task)
 
-	added := sup.discoverNewTasks(context.Background())
+	added := sup.addNewTrackedItems(context.Background())
 	if added != 0 {
-		t.Errorf("discoverNewTasks = %d, want 0 (already known)", added)
+		t.Errorf("addNewTrackedItems = %d, want 0 (already known)", added)
 	}
 }
 
-func TestDiscoverNewTasks_ClosedItemSkipped(t *testing.T) {
+func TestAddNewTrackedItems_ClosedItemSkipped(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
@@ -2769,13 +2745,13 @@ func TestDiscoverNewTasks_ClosedItemSkipped(t *testing.T) {
 	}
 	_ = store.AddTrackedItem(item)
 
-	added := sup.discoverNewTasks(context.Background())
+	added := sup.addNewTrackedItems(context.Background())
 	if added != 0 {
-		t.Errorf("discoverNewTasks = %d, want 0 (closed item)", added)
+		t.Errorf("addNewTrackedItems = %d, want 0 (closed item)", added)
 	}
 }
 
-func TestDiscoverNewTasks_PRSkipped(t *testing.T) {
+func TestAddNewTrackedItems_PRSkipped(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
@@ -2793,9 +2769,9 @@ func TestDiscoverNewTasks_PRSkipped(t *testing.T) {
 	}
 	_ = store.AddTrackedItem(item)
 
-	added := sup.discoverNewTasks(context.Background())
+	added := sup.addNewTrackedItems(context.Background())
 	if added != 0 {
-		t.Errorf("discoverNewTasks = %d, want 0 (PR skipped)", added)
+		t.Errorf("addNewTrackedItems = %d, want 0 (PR skipped)", added)
 	}
 }
 
@@ -2870,44 +2846,156 @@ func TestConvertTrackedItems_OnlyPRs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Launch with triggered discovery (via channel signal)
+// ApplyIncrementalDepOption — reverse deps and non-mutable guard
 // ---------------------------------------------------------------------------
 
-func TestLaunch_DiscoverySignal(t *testing.T) {
+func TestApplyIncrementalDepOption_SkipsNonMutableStatuses(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
 
-	// Blocked task keeps loop alive.
-	task := &db.AutopilotTask{
-		ProjectID:    project.ID,
-		IssueNumber:  10,
-		IssueTitle:   "Blocked",
-		Dependencies: "[99]",
-		Status:       "blocked",
+	// Create tasks in various non-mutable states.
+	for _, status := range []string{"running", "review", "done", "bailed", "stopped", "failed"} {
+		task := &db.AutopilotTask{
+			ProjectID:    project.ID,
+			IssueNumber:  10 + len(status), // unique numbers
+			IssueTitle:   "Task " + status,
+			Dependencies: "[]",
+			Status:       status,
+		}
+		_ = store.CreateAutopilotTask(task)
 	}
-	_ = store.CreateAutopilotTask(task)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	sup.Launch(ctx)
-	time.Sleep(100 * time.Millisecond)
+	// Build a graph that tries to update all of them.
+	graph := make(map[string]json.RawMessage)
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, t := range tasks {
+		graph[strconv.Itoa(t.IssueNumber)] = json.RawMessage("[99]")
+	}
 
-	// Trigger discovery — should not panic.
-	sup.TriggerDiscovery()
-	time.Sleep(100 * time.Millisecond)
+	err := sup.ApplyIncrementalDepOption(context.Background(), DepOption{
+		Name:  "test",
+		Graph: graph,
+	})
+	if err != nil {
+		t.Fatalf("ApplyIncrementalDepOption: %v", err)
+	}
 
-	cancel()
+	// Verify none of them were modified.
+	tasks, _ = store.GetAutopilotTasks(project.ID)
+	for _, task := range tasks {
+		if task.Dependencies != "[]" {
+			t.Errorf("task #%d (%s) deps changed to %s, want []", task.IssueNumber, task.Status, task.Dependencies)
+		}
+	}
+}
 
-	done := make(chan struct{})
-	go func() {
-		sup.Stop()
-		close(done)
-	}()
+func TestApplyIncrementalDepOption_UpdatesExistingQueuedTask(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
 
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Stop() hung")
+	// Existing queued task with deps [99].
+	existing := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Existing task",
+		Dependencies: "[99]",
+		Status:       "queued",
+	}
+	_ = store.CreateAutopilotTask(existing)
+
+	// New task #50.
+	newTask := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  50,
+		IssueTitle:   "New task",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	_ = store.CreateAutopilotTask(newTask)
+
+	// Graph: new #50 has no deps; existing #42 now also depends on #50 (reverse dep).
+	graph := map[string]json.RawMessage{
+		"50": json.RawMessage("[]"),
+		"42": json.RawMessage("[99,50]"),
+	}
+
+	err := sup.ApplyIncrementalDepOption(context.Background(), DepOption{
+		Name:  "test",
+		Graph: graph,
+	})
+	if err != nil {
+		t.Fatalf("ApplyIncrementalDepOption: %v", err)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, task := range tasks {
+		if task.IssueNumber == 42 {
+			if task.Dependencies != "[99,50]" {
+				t.Errorf("task #42 deps = %s, want [99,50]", task.Dependencies)
+			}
+			if task.Status != "blocked" {
+				t.Errorf("task #42 status = %s, want blocked", task.Status)
+			}
+		}
+		if task.IssueNumber == 50 {
+			// New task with no deps should remain queued.
+			if task.Status != "queued" {
+				t.Errorf("task #50 status = %s, want queued", task.Status)
+			}
+		}
+	}
+}
+
+func TestApplyIncrementalDepOption_EmitsEvents(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+
+	// New task (queued with empty deps).
+	newTask := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  50,
+		IssueTitle:   "New task",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	_ = store.CreateAutopilotTask(newTask)
+
+	graph := map[string]json.RawMessage{
+		"50": json.RawMessage("[42]"),
+	}
+
+	err := sup.ApplyIncrementalDepOption(context.Background(), DepOption{
+		Name:  "test",
+		Graph: graph,
+	})
+	if err != nil {
+		t.Fatalf("ApplyIncrementalDepOption: %v", err)
+	}
+
+	// Drain events and check for graph-update and info events.
+	var graphUpdates, infoEvents int
+	for {
+		select {
+		case ev := <-sup.Events():
+			switch ev.Type {
+			case "graph-update":
+				graphUpdates++
+			case "info":
+				infoEvents++
+			}
+		default:
+			goto done
+		}
+	}
+done:
+	if graphUpdates == 0 {
+		t.Error("expected at least one graph-update event")
+	}
+	if infoEvents == 0 {
+		t.Error("expected at least one info summary event")
 	}
 }
 
