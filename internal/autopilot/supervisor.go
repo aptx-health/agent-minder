@@ -676,6 +676,9 @@ func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) 
 		if err != nil {
 			s.emitEvent("warning", fmt.Sprintf("Incremental dep analysis failed: %v — new tasks queued without deps", err), nil)
 		} else if len(options) > 0 {
+			// Merge stored graph into each option so the carousel shows the
+			// full picture (existing tasks + new ones), not just the delta.
+			s.mergeStoredGraphIntoOptions(options, allTasks)
 			return &PrepareResult{
 				Total:    len(allTasks),
 				Options:  options,
@@ -799,6 +802,60 @@ func (s *Supervisor) ReprepareRebuild(ctx context.Context, guidance string) (*Pr
 		Options:  options,
 		AgentDef: agentDef,
 	}, nil
+}
+
+// mergeStoredGraphIntoOptions enriches incremental dep options with stored graph
+// entries so the dep-select carousel shows the full picture (existing + new tasks).
+func (s *Supervisor) mergeStoredGraphIntoOptions(options []DepOption, allTasks []db.AutopilotTask) {
+	storedGraph, _ := s.store.GetDepGraph(s.project.ID)
+
+	// Build a base graph from stored graph + current task statuses.
+	baseGraph := make(map[string]json.RawMessage)
+
+	// Start with stored graph entries.
+	if storedGraph != nil {
+		var stored map[string]json.RawMessage
+		if json.Unmarshal([]byte(storedGraph.GraphJSON), &stored) == nil {
+			for k, v := range stored {
+				baseGraph[k] = v
+			}
+		}
+	}
+
+	// Fill in any tasks not covered by the stored graph (e.g., tasks that existed
+	// before graph persistence was added) using their current DB deps.
+	for _, t := range allTasks {
+		key := strconv.Itoa(t.IssueNumber)
+		if _, exists := baseGraph[key]; exists {
+			continue
+		}
+		switch t.Status {
+		case "manual":
+			baseGraph[key] = json.RawMessage(`"manual"`)
+		case "skipped":
+			baseGraph[key] = json.RawMessage(`"skip"`)
+		default:
+			baseGraph[key] = json.RawMessage(t.Dependencies)
+		}
+	}
+
+	// Merge base graph into each option (option entries for new tasks take priority).
+	for i := range options {
+		merged := make(map[string]json.RawMessage, len(baseGraph)+len(options[i].Graph))
+		for k, v := range baseGraph {
+			merged[k] = v
+		}
+		for k, v := range options[i].Graph {
+			merged[k] = v // new task entries override
+		}
+		options[i].Graph = merged
+		// Recount unblocked with the full graph.
+		var taskPtrs []*db.AutopilotTask
+		for j := range allTasks {
+			taskPtrs = append(taskPtrs, &allTasks[j])
+		}
+		options[i].Unblocked = countUnblocked(merged, taskPtrs)
+	}
 }
 
 // BuildIncrementalDepOptions sends only new issues to LLM for dependency analysis,
