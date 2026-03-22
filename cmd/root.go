@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/dustinlange/agent-minder/internal/build"
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "agent-minder",
-	Short: "Coordination layer on top of agent-msg",
+	Use:     "agent-minder",
+	Short:   "Coordination layer on top of agent-msg",
+	Version: build.Version,
 	Long: `A CLI tool that monitors multiple repositories, watches the message bus,
 tracks git activity, and keeps both AI agents and the human operator
 informed about cross-repo state.

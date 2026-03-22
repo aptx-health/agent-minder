@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `--version` flag on root CLI command, using `internal/build.Version` constant (#187)
+
 ## [0.1.0] - 2026-03-19
 
 Initial pre-release. This captures the current feature set ahead of public open-source release.
