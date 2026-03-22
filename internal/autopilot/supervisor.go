@@ -125,7 +125,6 @@ type Supervisor struct {
 	parentCtx  context.Context // parent context for the session (used by slot goroutines for fillSlots)
 	cancel     context.CancelFunc
 	done       chan struct{}
-	discovery  chan struct{} // signal to trigger immediate discovery
 }
 
 // New creates a new Supervisor.
@@ -144,7 +143,6 @@ func New(store *db.Store, project *db.Project, completer claudecli.Completer, re
 		ghToken:   ghToken,
 		slots:     make([]*slotState, maxAgents),
 		events:    make(chan Event, 64),
-		discovery: make(chan struct{}, 1),
 	}
 }
 
@@ -164,14 +162,6 @@ func (s *Supervisor) IsActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.active
-}
-
-// TriggerDiscovery signals the supervisor to check for new tracked items immediately.
-func (s *Supervisor) TriggerDiscovery() {
-	select {
-	case s.discovery <- struct{}{}:
-	default: // already pending
-	}
 }
 
 // StopAgent cancels a single agent slot, leaving other agents running.
@@ -690,7 +680,7 @@ func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) 
 	s.cleanOrphanedWorktrees()
 
 	// Discover and add new tracked items as tasks.
-	added := s.discoverNewTasks(ctx)
+	added := s.addNewTrackedItems(ctx)
 
 	// Get final task list.
 	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
@@ -702,8 +692,9 @@ func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) 
 		return &PrepareResult{AgentDef: agentDef}, nil
 	}
 
-	// If there are new issues, build incremental dep options for them.
+	// If there are new issues, run incremental dep analysis (including reverse deps).
 	if added > 0 {
+		s.emitEvent("info", fmt.Sprintf("Analyzing dependencies for %d new issue(s)", added), nil)
 		options, err := s.BuildIncrementalDepOptions(ctx, allTasks, "")
 		if err != nil {
 			s.emitEvent("warning", fmt.Sprintf("Incremental dep analysis failed: %v — new tasks queued without deps", err), nil)
@@ -935,9 +926,26 @@ func (s *Supervisor) BuildIncrementalDepOptions(ctx context.Context, allTasks []
 		}
 	}
 
-	if len(existingTasks) > 0 {
-		issueList.WriteString("\n## Existing tasks (context — may be dependencies for new issues):\n")
-		for _, t := range existingTasks {
+	// Separate existing tasks by mutability for the prompt.
+	var mutableTasks, immutableTasks []*db.AutopilotTask
+	for _, t := range existingTasks {
+		switch t.Status {
+		case "queued", "blocked":
+			mutableTasks = append(mutableTasks, t)
+		default:
+			immutableTasks = append(immutableTasks, t)
+		}
+	}
+
+	if len(mutableTasks) > 0 {
+		issueList.WriteString("\n## Existing queued/blocked tasks (deps may be updated if a new issue should block them):\n")
+		for _, t := range mutableTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s (current deps: %s)\n", t.IssueNumber, t.Status, t.IssueTitle, t.Dependencies)
+		}
+	}
+	if len(immutableTasks) > 0 {
+		issueList.WriteString("\n## Existing tasks (context only — deps cannot be changed):\n")
+		for _, t := range immutableTasks {
 			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s (deps: %s)\n", t.IssueNumber, t.Status, t.IssueTitle, t.Dependencies)
 		}
 	}
@@ -948,17 +956,21 @@ func (s *Supervisor) BuildIncrementalDepOptions(ctx context.Context, allTasks []
 	}
 
 	prompt := fmt.Sprintf(`Analyze these NEW GitHub issues and determine their dependencies.
-Only analyze the NEW issues — existing tasks are provided as context for cross-references.
-A new issue can depend on an existing task or another new issue.
+Also check if any existing queued/blocked tasks should now depend on a new issue (reverse dependencies).
+
+Rules:
+- New issues can depend on existing tasks or other new issues.
+- Existing queued/blocked tasks can gain new dependencies on new issues. If so, include that task's FULL updated dependency array (not just the new dep).
+- Do NOT include entries for existing running/review/done/manual tasks — their deps are locked.
 
 %s%s
 Respond with ONLY a JSON array of exactly 3 dependency graph options. Each has "name", "rationale", and "graph".
-The "graph" should ONLY contain entries for the NEW issues (not existing tasks).
+The "graph" MUST contain entries for all NEW issues. It MAY also contain entries for existing queued/blocked tasks whose deps changed.
 Values are arrays of integer issue numbers (deps) or "skip"/"manual".
 
-Example:
+Example (issue #50 and #51 are new; existing #42 now depends on new #50):
 [
-  {"name": "Conservative", "rationale": "...", "graph": {"50": [42], "51": []}},
+  {"name": "Conservative", "rationale": "...", "graph": {"50": [42], "51": [], "42": [99, 50]}},
   {"name": "Parallel", "rationale": "...", "graph": {"50": [], "51": []}},
   {"name": "Sequential", "rationale": "...", "graph": {"50": [], "51": [50]}}
 ]`, issueList.String(), guidanceSection)
@@ -1029,32 +1041,51 @@ Example:
 	return options, nil
 }
 
-// ApplyIncrementalDepOption applies deps for new issues and merges into the stored graph.
+// ApplyIncrementalDepOption applies deps for new and updated issues, merges into
+// the stored graph, and re-evaluates blocked status. Existing tasks in non-mutable
+// states (running/review/done/bailed/stopped/failed) are never modified.
 func (s *Supervisor) ApplyIncrementalDepOption(ctx context.Context, opt DepOption) error {
-	// Apply deps for the new issues (same logic as ApplyDepOption but only for new keys).
 	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
 		return fmt.Errorf("get tasks: %w", err)
 	}
 
+	var newCount, updatedCount int
+
 	for _, t := range tasks {
 		key := strconv.Itoa(t.IssueNumber)
 		rawDeps, ok := opt.Graph[key]
 		if !ok {
-			continue // not a new issue
+			continue
 		}
 
+		// Never modify deps for tasks in non-mutable states.
+		switch t.Status {
+		case "running", "review", "done", "bailed", "stopped", "failed":
+			continue
+		}
+
+		isNew := t.Dependencies == "[]" && t.Status == "queued"
+
+		// Handle string directives: "skip" or "manual".
 		var strVal string
 		if json.Unmarshal(rawDeps, &strVal) == nil {
 			switch strVal {
 			case "skip":
 				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "skipped")
+				if isNew {
+					s.emitEvent("graph-update", fmt.Sprintf("#%d marked as skip", t.IssueNumber), nil)
+				}
 			case "manual":
 				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "manual")
+				if isNew {
+					s.emitEvent("graph-update", fmt.Sprintf("#%d marked as manual", t.IssueNumber), nil)
+				}
 			}
 			continue
 		}
 
+		// Parse dependency array.
 		var deps []int
 		if err := json.Unmarshal(rawDeps, &deps); err != nil {
 			var strDeps []string
@@ -1067,11 +1098,39 @@ func (s *Supervisor) ApplyIncrementalDepOption(ctx context.Context, opt DepOptio
 			}
 		}
 
-		if len(deps) > 0 {
-			depsJSON, _ := json.Marshal(deps)
-			_ = s.store.UpdateAutopilotTaskDeps(t.ID, string(depsJSON))
-			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "blocked")
+		depsJSON, _ := json.Marshal(deps)
+		newDepsStr := string(depsJSON)
+
+		if isNew {
+			newCount++
+			if len(deps) > 0 {
+				_ = s.store.UpdateAutopilotTaskDeps(t.ID, newDepsStr)
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "blocked")
+				s.emitEvent("graph-update", fmt.Sprintf("#%d added with deps %s", t.IssueNumber, newDepsStr), nil)
+			} else {
+				s.emitEvent("graph-update", fmt.Sprintf("#%d added with no deps (queued)", t.IssueNumber), nil)
+			}
+		} else if newDepsStr != t.Dependencies {
+			// Existing queued/blocked task with updated deps (reverse dependency injection).
+			updatedCount++
+			_ = s.store.UpdateAutopilotTaskDeps(t.ID, newDepsStr)
+			if len(deps) > 0 {
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "blocked")
+			}
+			s.emitEvent("graph-update", fmt.Sprintf("#%d deps updated: %s -> %s", t.IssueNumber, t.Dependencies, newDepsStr), nil)
 		}
+	}
+
+	// Summary event.
+	if newCount > 0 || updatedCount > 0 {
+		parts := make([]string, 0, 2)
+		if newCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d new", newCount))
+		}
+		if updatedCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d updated", updatedCount))
+		}
+		s.emitEvent("info", fmt.Sprintf("Dep graph applied: %s tasks", strings.Join(parts, ", ")), nil)
 	}
 
 	// Merge new entries into stored graph.
@@ -1090,7 +1149,7 @@ func (s *Supervisor) ApplyIncrementalDepOption(ctx context.Context, opt DepOptio
 		_ = s.store.SaveDepGraph(s.project.ID, string(graphJSON), opt.Name)
 	}
 
-	// Re-evaluate blocked status.
+	// Re-evaluate blocked status — some tasks may now be unblocked.
 	s.unblockSatisfiedTasks()
 
 	s.mu.Lock()
@@ -1250,9 +1309,6 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		// discover new tracked items, fill new slots.
 		reviewCheckTicker := time.NewTicker(30 * time.Second)
 		defer reviewCheckTicker.Stop()
-		discoveryTicker := time.NewTicker(60 * time.Second)
-		defer discoveryTicker.Stop()
-
 		for {
 			select {
 			case <-ctx.Done():
@@ -1266,18 +1322,6 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.checkManualTasks(ctx)
 				unblocked := s.unblockSatisfiedTasks()
 				if unblocked > 0 {
-					s.fillSlots(ctx)
-				}
-			case <-discoveryTicker.C:
-				if s.hasIdleSlot() {
-					added := s.discoverNewTasks(ctx)
-					if added > 0 {
-						s.fillSlots(ctx)
-					}
-				}
-			case <-s.discovery:
-				added := s.discoverNewTasks(ctx)
-				if added > 0 {
 					s.fillSlots(ctx)
 				}
 			default:
@@ -1927,9 +1971,11 @@ func (s *Supervisor) hasIdleSlot() bool {
 	return false
 }
 
-// discoverNewTasks checks tracked items for new open issues not already in the
-// autopilot task list and adds them. Returns the number of new tasks added.
-func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
+// addNewTrackedItems checks tracked items for new open issues not already in the
+// autopilot task list and adds them with queued status. Called during ReprepareKeep
+// so that incremental dep analysis can determine their ordering.
+// Returns the number of new tasks added.
+func (s *Supervisor) addNewTrackedItems(ctx context.Context) int {
 	existing, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
 		return 0
@@ -2000,7 +2046,7 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 			IssueNumber:  item.Number,
 			IssueTitle:   liveStatus.Title,
 			IssueBody:    body,
-			Dependencies: "[]", // No deps — new tasks start unblocked.
+			Dependencies: "[]",
 			Status:       "queued",
 		})
 	}
@@ -2016,21 +2062,11 @@ func (s *Supervisor) discoverNewTasks(ctx context.Context) int {
 
 	for _, t := range newTasks {
 		if t.Status == "manual" {
-			s.emitEvent("discovered", fmt.Sprintf("New manual task #%d: %s (watching for completion)", t.IssueNumber, t.IssueTitle), nil)
+			s.emitEvent("info", fmt.Sprintf("New manual task #%d: %s (watching for completion)", t.IssueNumber, t.IssueTitle), nil)
 		} else {
-			s.emitEvent("discovered", fmt.Sprintf("New task #%d: %s", t.IssueNumber, t.IssueTitle), nil)
+			s.emitEvent("info", fmt.Sprintf("New task #%d: %s (pending dep analysis)", t.IssueNumber, t.IssueTitle), nil)
 		}
 	}
-
-	// Warn that the dependency graph (built once during Prepare) may be stale.
-	// Dynamically discovered tasks are queued without deps, but they could
-	// affect ordering of already-queued tasks. The user can stop and re-launch
-	// autopilot to rebuild the full dep graph with an LLM call.
-	var nums []string
-	for _, t := range newTasks {
-		nums = append(nums, fmt.Sprintf("#%d", t.IssueNumber))
-	}
-	s.emitEvent("warning", fmt.Sprintf("New tasks discovered (%s) — dependency graph may be stale. New tasks will run without dependency ordering.", strings.Join(nums, ", ")), nil)
 
 	return added
 }

@@ -64,11 +64,12 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 
 **Key behaviors:**
 - `Prepare()` preserves existing tasks across restarts — if tasks exist, shows reprepare-choice (k=keep, r=rebuild); selected dep graph stored in `autopilot_dep_graphs` table
-- On reprepare: done stays done, review/failed/bailed/stopped/running → manual, queued/blocked → cleared; new tracked items discovered and optionally analyzed incrementally
+- On reprepare keep: stale running → queued, everything else preserved; new tracked items discovered and analyzed incrementally with reverse dep injection
+- On reprepare rebuild: done stays done, review/failed/bailed/stopped/running → manual, queued/blocked → cleared; full dep graph regenerated
 - Issues with the skip label (default `no-agent`, configurable via `project.AutopilotSkipLabel`) are excluded
 - Dependency graph built via one LLM call using analyzer model; includes all tracked items as context for cross-repo deps
 - External dependency blocking: `QueuedUnblockedTasks()` cross-references `tracked_items` — if a dep is tracked and open, it blocks
-- Dynamic task discovery: every 60s when idle slots exist, checks for new tracked items not yet in autopilot_tasks
+- New task discovery: handled during ReprepareKeep — new tracked items get incremental dep analysis with reverse dependency injection (existing queued/blocked tasks can gain deps on new issues)
 - Review check: every 30s, checks if PRs for `review` tasks have been merged → promotes to `done`
 - Label management: agent adds `in-progress` on start; supervisor swaps to `needs-review` when PR detected; removes `needs-review` when merged
 - On restart, `Prepare()` clears all tasks and rebuilds — no resume of stale state
