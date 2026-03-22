@@ -1855,9 +1855,12 @@ func (m Model) renderBottomBar() string {
 		b.WriteString("\n")
 	case "track", "untrack":
 		if m.trackStep == trackStepCleanupConfirm {
-			b.WriteString(headerStyle().Render(fmt.Sprintf("  Clean up %d done items? (y/n)", m.trackCleanupCount)))
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Clean up %d done items?", m.trackCleanupCount)))
 			b.WriteString("\n")
-			b.WriteString(helpStyle().Render("y: confirm \u2022 n/esc: cancel"))
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": confirm • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.trackStep == trackStepPreview {
 			// Preview step: help bar only (preview renders in main content area).
@@ -1921,7 +1924,7 @@ func (m Model) renderBottomBar() string {
 			case filterStepSelectRepo:
 				b.WriteString(helpStyle().Render("up/down: select \u2022 enter: confirm \u2022 esc: cancel"))
 			case filterStepSelectType:
-				b.WriteString(helpStyle().Render("l: label \u2022 m: milestone \u2022 p: project \u2022 a: assignee \u2022 esc: back"))
+				b.WriteString(helpStyle().Render("up/down: select \u2022 enter: confirm \u2022 esc: back"))
 			case filterStepInputValue:
 				b.WriteString(helpStyle().Render("enter: search \u2022 esc: back"))
 			case filterStepFetching:
@@ -1933,7 +1936,7 @@ func (m Model) renderBottomBar() string {
 					b.WriteString(helpStyle().Render("enter: add all \u2022 esc: back"))
 				}
 			case filterStepConflict:
-				b.WriteString(helpStyle().Render("a: append \u2022 c: clear & replace \u2022 esc: back"))
+				b.WriteString(helpStyle().Render("up/down: select \u2022 enter: confirm \u2022 esc: back"))
 			}
 		}
 		b.WriteString("\n\n")
@@ -1941,7 +1944,10 @@ func (m Model) renderBottomBar() string {
 		if m.pollConfirm {
 			b.WriteString(headerStyle().Render("  Run comprehensive analysis? (~1 min depending on complexity)"))
 			b.WriteString("\n")
-			b.WriteString(helpStyle().Render("y: analyze • n: cancel"))
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": analyze • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "scan-confirm" {
 			if m.polling {

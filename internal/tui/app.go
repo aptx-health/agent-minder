@@ -989,7 +989,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Poll confirm mode: confirm before expensive comprehensive analysis.
 	if m.pollConfirm {
 		switch msg.String() {
-		case "y":
+		case "enter":
 			m.pollConfirm = false
 			m.activeTab = tabAnalysis
 			m.analysisHasNew = false
@@ -999,7 +999,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				p.PollNow(context.Background())
 				return nil
 			}
-		case "n", "esc":
+		case "esc":
 			m.pollConfirm = false
 			return m, nil
 		}
@@ -1128,18 +1128,18 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.autopilotMode == "stop-task-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
-		case "y", "enter":
+		case "enter":
 			return m.confirmStopTask()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = "running"
 			return m, nil
 		}
 	}
 	if m.autopilotMode == "restart-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
-		case "y", "enter":
+		case "enter":
 			return m.confirmRestartTask()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = "running"
 			return m, nil
 		}
@@ -1152,25 +1152,25 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m.confirmBumpAndResumeTask()
 		case "f":
 			return m.confirmRestartTask()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = "running"
 			return m, nil
 		}
 	}
 	if m.autopilotMode == "review-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
-		case "y", "enter":
+		case "enter":
 			return m.launchReviewSession()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = m.autopilotModeBeforeReview
 			return m, nil
 		}
 	}
 	if m.autopilotMode == "add-slot-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
-		case "y", "enter":
+		case "enter":
 			return m.confirmAddSlot()
-		case "n", "esc":
+		case "esc":
 			m.autopilotMode = "running"
 			return m, nil
 		}
@@ -1772,10 +1772,10 @@ func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Cleanup confirm step: y to proceed, n/esc to go back.
+	// Cleanup confirm step: enter to proceed, esc to go back.
 	if m.trackStep == trackStepCleanupConfirm {
 		switch msg.String() {
-		case "y":
+		case "enter":
 			store := m.store
 			projectID := m.project.ID
 			m.trackStep = trackStepFetching
@@ -1784,7 +1784,7 @@ func (m Model) updateTrack(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				removed, err := store.ArchiveTerminalTrackedItems(projectID)
 				return cleanupResultMsg{removed: removed, err: err}
 			})
-		case "n", "esc":
+		case "esc":
 			m.trackStep = trackStepInput
 			m.trackCleanupCount = 0
 			if len(m.trackRows) > 0 {
