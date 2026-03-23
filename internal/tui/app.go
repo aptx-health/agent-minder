@@ -150,6 +150,9 @@ type reviewSessionResultMsg struct {
 	err    error
 }
 
+// autopilotAutoloadMsg triggers automatic loading of a saved dep graph on startup.
+type autopilotAutoloadMsg struct{}
+
 // autopilotTickMsg triggers periodic refresh of task list and slot status.
 type autopilotTickMsg time.Time
 
@@ -253,6 +256,7 @@ type Model struct {
 	autopilotDepGuidance   string                // user guidance for dep graph analysis
 	autopilotDepOptions    []autopilot.DepOption // dep graph options from LLM
 	autopilotDepSelection  int                   // 0-2, index into autopilotDepOptions
+	autopilotAutoloading   bool                  // true when auto-loading saved dep graph on startup
 
 	// Rebuild deps mode.
 	rebuildDepsInput  textarea.Model
@@ -396,6 +400,10 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.project.IdlePauseSec > 0 {
 		cmds = append(cmds, idleCheckTick())
+	}
+	// Auto-load saved dep graph if one exists.
+	if dg, _ := m.store.GetDepGraph(m.project.ID); dg != nil {
+		cmds = append(cmds, func() tea.Msg { return autopilotAutoloadMsg{} })
 	}
 	return tea.Batch(cmds...)
 }
@@ -720,12 +728,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 
+	case autopilotAutoloadMsg:
+		// Auto-load saved dep graph on startup — runs the same flow as 'a' then 'k'.
+		m.autopilotAutoloading = true
+		tm, cmd := m.startAutopilot()
+		m2 := tm.(Model)
+		if m2.autopilotMode == "scan-confirm" {
+			// Prerequisites passed — proceed directly to prepare.
+			tm3, cmd2 := m2.prepareAutopilot()
+			return tm3, tea.Batch(cmd, cmd2)
+		}
+		// Prerequisites failed — startAutopilot set status message.
+		m2.autopilotAutoloading = false
+		return m2, cmd
+
 	case autopilotPrepareResultMsg:
 		m.polling = false
 		if msg.err != nil {
 			m.autopilotStatus = fmt.Sprintf("Error: %v", msg.err)
 			m.autopilotMode = ""
 			m.autopilotSupervisor = nil
+			m.autopilotAutoloading = false
 			return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 				return clearAutopilotStatusMsg{}
 			})
@@ -735,17 +758,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.autopilotStatus = "No issues found matching filter"
 			m.autopilotMode = ""
 			m.autopilotSupervisor = nil
+			m.autopilotAutoloading = false
 			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 				return clearAutopilotStatusMsg{}
 			})
 		}
-		// If existing tasks found, offer keep/rebuild choice.
+		// If existing tasks found, offer keep/rebuild choice (or auto-keep on startup).
 		if r.HasGraph || r.Existing > 0 {
 			m.autopilotTotal = r.Total
 			m.autopilotPrepareResult = r
-			m.autopilotMode = "reprepare-choice"
 			m.autopilotStatus = fmt.Sprintf("Agent definition: %s", r.AgentDef.Description())
 			m.rebuildAutopilotTaskContent()
+
+			// When autoloading on startup, skip the choice UI and auto-keep.
+			if m.autopilotAutoloading {
+				m.autopilotAutoloading = false
+				sup := m.autopilotSupervisor
+				if sup == nil {
+					m.autopilotMode = ""
+					return m, nil
+				}
+				m.autopilotStatus = "Loading saved dependency graph..."
+				m.polling = true
+				m.activeTab = tabAutopilot
+				return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+					result, err := sup.ReprepareKeep(context.Background())
+					return reprepareKeepResultMsg{result: result, err: err}
+				})
+			}
+
+			m.autopilotMode = "reprepare-choice"
 			if m.activeTab != tabAutopilot {
 				m.autopilotHasNew = true
 			}
@@ -754,6 +796,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		// Fresh prepare — go to dep-select.
+		m.autopilotAutoloading = false
 		m.autopilotTotal = r.Total
 		m.autopilotDepOptions = r.Options
 		m.autopilotDepSelection = 0
