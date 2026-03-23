@@ -69,15 +69,34 @@ permissions:
 ```
 
 Build the `allowed_tools` list using these rules:
-- **Format**: Use **spaces** inside `Bash()` patterns — e.g., `Bash(git *)`, `Bash(go build *)`. Do NOT use colons (`Bash(git:*)`) — the colon syntax silently fails to match commands in `settings.json` and `onboarding.yaml`. Colons are only valid for the CLI `--allowedTools` flag, and that conversion is handled automatically by `ToCliToolPattern()`.
+- **Format**: Use **spaces** inside `Bash()` patterns — e.g., `Bash(git add *)`, `Bash(go build *)`. Do NOT use colons (`Bash(git:*)`) — the colon syntax silently fails to match commands in `settings.json` and `onboarding.yaml`. Colons are only valid for the CLI `--allowedTools` flag, and that conversion is handled automatically by `ToCliToolPattern()`.
 - Each entry is `Bash(<command> *)` where `<command>` comes from `tools_needed` and the build/test/lint commands
 - For multi-word commands, use spaces between all words: `Bash(go build *)`, `Bash(doppler run -- *)`
-- Always include `Bash(git *)` and `Bash(gh *)` — agents always need version control
-- Always include `Read`, `Edit`, `Write`, `Glob`, `Grep` — agents need file access
-- If a secrets manager is detected (e.g., doppler), include `Bash(doppler run -- *)` or the equivalent prefix
-- If a process manager is detected, include its command pattern
 - Do NOT include overly broad patterns like `Bash(*)` — be specific
-- Keep the list minimal but sufficient for the build/test/lint commands
+- Be **thorough** — agents will be blocked if any needed permission is missing. It is much better to include a permission that isn't used than to omit one that is needed.
+
+**Always include these baseline permissions:**
+- `Read`, `Edit`, `Write`, `Glob`, `Grep` — agents need file access
+- `Bash(ls *)`, `Bash(mkdir *)`, `Bash(which *)`, `Bash(wc *)` — basic filesystem operations
+- Git (use individual subcommands, not `Bash(git *)`): `Bash(git add *)`, `Bash(git commit *)`, `Bash(git checkout *)`, `Bash(git log *)`, `Bash(git diff *)`, `Bash(git status *)`, `Bash(git branch *)`, `Bash(git show *)`, `Bash(git remote *)`, `Bash(git fetch *)`, `Bash(git push *)`, `Bash(git pull *)`, `Bash(git rebase *)`, `Bash(git worktree *)`, `Bash(git stash *)`, `Bash(git merge *)`
+- GitHub CLI: `Bash(gh issue *)`, `Bash(gh pr *)`, `Bash(gh api *)`
+
+**Add language/framework-specific permissions based on detected inventory:**
+- Go: `Bash(go test *)`, `Bash(go build *)`, `Bash(go vet *)`, `Bash(go get *)`, `Bash(go mod *)`, `Bash(go fmt *)`, `Bash(go doc *)`, `Bash(go env *)`, `Bash(go run *)`, `Bash(gofmt *)`
+- Node/JS: `Bash(npm *)`, `Bash(npx *)` (or yarn/pnpm equivalents), `Bash(node *)`
+- Python: `Bash(python *)`, `Bash(pip *)`, `Bash(pytest *)` (or poetry/uv equivalents)
+- Ruby: `Bash(bundle *)`, `Bash(ruby *)`, `Bash(rake *)`
+- Rust: `Bash(cargo *)`, `Bash(rustc *)`
+
+**Add tooling-specific permissions:**
+- Linters: `Bash(golangci-lint *)`, `Bash(eslint *)`, `Bash(flake8 *)`, etc.
+- Formatters: `Bash(prettier *)`, `Bash(black *)`, etc.
+- Pre-commit hooks: `Bash(lefthook *)`, `Bash(pre-commit *)`, `Bash(husky *)`
+- Build tools: `Bash(make *)`, `Bash(cmake *)`, etc.
+- Secrets manager if detected: `Bash(doppler run -- *)`, `Bash(vault *)`, etc.
+- Process manager if detected: `Bash(overmind *)`, `Bash(foreman *)`, etc.
+- Container tools if detected: `Bash(docker *)`, `Bash(docker-compose *)`, etc.
+- File search: `Bash(fd *)` or `Bash(find *)`, `Bash(rg *)` if available
 
 Rules for updating the onboarding file:
 - Use the existing onboarding file structure — do NOT rewrite the `inventory` section
@@ -140,6 +159,34 @@ tools: Bash, Read, Edit, Write, Glob, Grep
 ---
 ```
 
+### Artifact 4: `.claude/agents/reviewer.md`
+
+Generate a project-specific reviewer agent definition **only if** `.claude/agents/reviewer.md` does not already exist in the target repo.
+
+If one already exists, skip this artifact and tell the user.
+
+If a global reviewer template exists at `~/.claude/agents/reviewer.md`, use it as the base and customize it. Otherwise, generate a fresh definition using the standard reviewer structure below.
+
+Customize with:
+- A "Project-specific guidance" section listing:
+  - Test command(s) from the onboarding context
+  - Lint command(s) from the onboarding context
+  - Any special instructions (secrets, services, constraints)
+  - Language-specific things to watch for during review (e.g., Go: goroutine leaks, deferred closes; JS: async/await pitfalls)
+- The standard reviewer workflow sections (first steps, review process, fix protocol, structured assessment, constraints)
+
+Use the same YAML frontmatter format:
+
+```yaml
+---
+name: reviewer
+description: >
+  Reviews PRs for correctness, test coverage, issue alignment, and code quality.
+  Project-specific configuration for <project-name>.
+tools: Bash, Read, Edit, Write, Glob, Grep
+---
+```
+
 ## Step 3: Review with user
 
 Before writing any files, present all artifacts to the user in a clear format:
@@ -147,6 +194,7 @@ Before writing any files, present all artifacts to the user in a clear format:
 1. Show the updated onboarding file `context` and `permissions` sections
 2. Show the `.claude/settings.json` that will be derived from the permissions
 3. Show the autopilot agent definition (if generating one)
+4. Show the reviewer agent definition (if generating one)
 
 Ask: "Does this look correct? I'll write these files when you confirm. Let me know if you'd like to change anything."
 
@@ -157,6 +205,7 @@ After the user confirms:
 1. Write the updated onboarding file to the onboarding file path provided in your context
 2. Write `.claude/settings.json` to the repo directory (creating `.claude/` if needed)
 3. Write `.claude/agents/autopilot.md` to the repo directory (if generating one, creating directories if needed)
+4. Write `.claude/agents/reviewer.md` to the repo directory (if generating one, creating directories if needed)
 
 Report what was written and their paths.
 

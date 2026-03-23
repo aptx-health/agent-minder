@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,6 +115,12 @@ func TestBuildInventoryContext(t *testing.T) {
 }
 
 func TestRunRepoOnboarding_CleansUpOnFailure(t *testing.T) {
+	// This test relies on `claude` not being on PATH so the onboarding
+	// agent fails immediately. Skip if claude is available (e.g., dev machines).
+	if _, err := exec.LookPath("claude"); err == nil {
+		t.Skip("claude binary is available — test requires it to be missing")
+	}
+
 	dir := t.TempDir()
 	ri := &discovery.RepoInfo{
 		Path:      dir,

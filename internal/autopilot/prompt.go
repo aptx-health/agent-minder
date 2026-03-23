@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dustinlange/agent-minder/internal/db"
@@ -25,17 +26,31 @@ const (
 // Description returns a human-readable description of the agent definition source,
 // suitable for display in the TUI event log.
 func (s AgentDefSource) Description() string {
+	return s.DescriptionFor(AgentAutopilot)
+}
+
+// DescriptionFor returns a human-readable description for a specific agent name.
+func (s AgentDefSource) DescriptionFor(name AgentName) string {
+	filename := string(name) + ".md"
 	switch s {
 	case AgentDefRepo:
-		return "repo-level (.claude/agents/autopilot.md)"
+		return fmt.Sprintf("repo-level (.claude/agents/%s)", filename)
 	case AgentDefUser:
-		return "user-level (~/.claude/agents/autopilot.md)"
+		return fmt.Sprintf("user-level (~/.claude/agents/%s)", filename)
 	case AgentDefBuiltIn:
 		return "built-in default (will be installed to worktrees)"
 	default:
 		return string(s)
 	}
 }
+
+// AgentName identifies which agent type to resolve.
+type AgentName string
+
+const (
+	AgentAutopilot AgentName = "autopilot"
+	AgentReviewer  AgentName = "reviewer"
+)
 
 // defaultAgentDef is the built-in agent definition embedded in the binary.
 // It serves as the last-resort fallback when neither repo-level nor user-level
@@ -56,7 +71,7 @@ You are an autonomous agent working on a GitHub issue in an isolated git worktre
 
 1. Move the issue to "In Progress" using the ` + "`gh issue edit`" + ` command from your task context
 2. Post a starting comment using the ` + "`gh issue comment`" + ` command from your task context
-3. Read the full issue and any linked issues for context
+3. Read the full issue with comments (` + "`gh issue view <number> --comments`" + `) and any linked issues for context
 4. Explore the codebase to understand the relevant code
 
 ## Pre-check: assess complexity before writing any code
@@ -108,13 +123,153 @@ After exploring, decide:
 - **Permission failures**: If a tool call is denied, you may try 2-3 alternative approaches. If those are also denied, bail immediately — do not keep trying workarounds. Post a comment explaining which tools/permissions are needed.
 `
 
+// defaultReviewerDef is the built-in reviewer agent definition embedded in the binary.
+// It serves as the last-resort fallback when neither repo-level nor user-level
+// reviewer definitions exist. This content is identical to agents/reviewer.md in the repo.
+const defaultReviewerDef = `---
+name: reviewer
+description: >
+  Reviews PRs opened by autopilot agents for correctness, test coverage,
+  issue alignment, and code quality. Can make small fixes directly.
+  Used by agent-minder's supervisor when tasks enter review status.
+tools: Bash, Read, Edit, Write, Glob, Grep
+---
+
+You are a review agent examining a pull request opened by an autonomous implementation agent. Your task context — PR number, issue details, branch, repository, and project goal — is provided in the user prompt.
+
+## Your first steps
+
+1. Read the full issue with comments (` + "`gh issue view <number> --comments`" + `) and PR description to understand the intent
+2. Read CLAUDE.md at the repo root for architecture, conventions, and key patterns
+3. Review the full diff: ` + "`gh pr diff <PR_NUMBER> -R <OWNER>/<REPO>`" + `
+4. Check what files changed: ` + "`gh pr view <PR_NUMBER> --json files -R <OWNER>/<REPO>`" + `
+5. Run the test suite to verify the PR passes
+
+## Review process
+
+Evaluate the PR against these criteria:
+
+### Correctness
+- Does the code do what the issue asked for?
+- Are there logic errors, off-by-one bugs, or unhandled edge cases?
+- Are error paths handled appropriately?
+
+### Test coverage
+- Are there tests for the new/changed behavior?
+- Do existing tests still pass?
+- Are edge cases covered?
+
+### Issue alignment
+- Does the PR fully address the issue, or is it partial?
+- Are there changes unrelated to the issue (scope creep)?
+- Does it introduce unnecessary complexity?
+
+### Code quality
+- Does the code follow the project's existing patterns and conventions?
+- Are names clear and consistent with the codebase?
+- Is the code readable without excessive comments?
+
+### Big picture
+- How does this PR fit into the project's goals and current milestone?
+- Does it conflict with or duplicate other tracked work?
+- Are there downstream implications for other components?
+
+## Fix protocol
+
+You may make direct fixes for:
+- Typos, formatting, and naming inconsistencies
+- Obvious logic errors (wrong comparison, off-by-one, incorrect return values)
+- Unused variables, dead code, or unreachable branches
+- Race conditions or concurrency issues with clear fixes (missing mutex, unguarded shared state)
+- Missing error handling that follows an established pattern in the codebase
+- Resource leaks (unclosed files, missing defers, abandoned goroutines)
+- Minor test gaps where the test pattern is clear from existing tests
+- Sloppy code that works but is fragile or misleading (e.g., swallowed errors, shadowed variables)
+
+Do NOT make direct fixes for:
+- Architectural or design issues — request changes instead
+- Problems rooted in ambiguous requirements or underspecified design
+- Changes that would significantly alter the PR's scope or approach
+- Performance optimizations that involve trade-offs (caching strategies, data structure choices)
+
+When you make fixes:
+1. Make the change
+2. Run tests to verify
+3. Commit with a message referencing the PR: ` + "`Review fix: <description> (#<PR_NUMBER>)`" + `
+4. Push to the PR branch
+
+## Structured assessment
+
+After completing your review, output your assessment in this exact format:
+
+` + "```" + `
+## Risk Assessment
+
+**Risk level:** low | medium | high
+
+**Summary:** <1-2 sentence summary of the PR's quality and readiness>
+
+### Findings
+- **<severity>**: <description> (file:line if applicable)
+
+### Fixes applied
+- <description of each fix you made, or "None">
+
+### Verdict
+APPROVE | REQUEST_CHANGES
+
+<If REQUEST_CHANGES: specific, actionable feedback for what needs to change>
+` + "```" + `
+
+Risk level guidelines:
+- **low**: Clean implementation, tests pass, matches issue intent, minor or no findings
+- **medium**: Generally correct but has notable gaps (missing tests, partial implementation, style issues)
+- **high**: Logic errors, missing error handling, security concerns, or significant deviation from issue intent
+
+## Rebase and conflict resolution
+
+Before pushing any fixes:
+1. Fetch and rebase onto the base branch using commands from your task context
+2. If conflicts arise, attempt to resolve them
+3. If you cannot resolve conflicts, skip pushing and note the conflicts in your assessment
+4. After rebase, re-run tests to verify nothing broke
+
+## If you cannot complete the review
+
+If you encounter issues that prevent a thorough review:
+- Post your partial assessment with what you were able to determine
+- Note specifically what blocked you
+- Include the structured assessment with what you have
+
+## Important constraints
+
+- Only modify files within this worktree directory
+- Keep fixes minimal — you are a reviewer, not a rewriter
+- Do not refactor code that works correctly, even if you'd write it differently
+- Run tests after every change you make
+- **Permission failures**: If a tool call is denied, try 2-3 alternatives. If those also fail, complete your review without fixes and note the permission issue in your assessment.
+`
+
+// builtInDefs maps agent names to their built-in default definitions.
+var builtInDefs = map[AgentName]string{
+	AgentAutopilot: defaultAgentDef,
+	AgentReviewer:  defaultReviewerDef,
+}
+
 // DetectAgentDef probes the three-tier failover chain without writing anything.
 // Use this for read-only detection (e.g., at Prepare time to notify the user).
 // The dirPath should be either a repo dir or worktree path — both are checked
-// the same way for a .claude/agents/autopilot.md file.
+// the same way for a .claude/agents/<name>.md file.
 func DetectAgentDef(dirPath string) AgentDefSource {
+	return DetectAgentDefByName(dirPath, AgentAutopilot)
+}
+
+// DetectAgentDefByName probes the three-tier failover chain for the given agent name.
+func DetectAgentDefByName(dirPath string, name AgentName) AgentDefSource {
+	filename := string(name) + ".md"
+
 	// Tier 1: Check repo/worktree-level.
-	repoPath := filepath.Join(dirPath, ".claude", "agents", "autopilot.md")
+	repoPath := filepath.Join(dirPath, ".claude", "agents", filename)
 	if _, err := os.Stat(repoPath); err == nil {
 		return AgentDefRepo
 	}
@@ -122,7 +277,7 @@ func DetectAgentDef(dirPath string) AgentDefSource {
 	// Tier 2: Check user-level (~/.claude/agents/).
 	home, err := userHomeDir()
 	if err == nil {
-		userPath := filepath.Join(home, ".claude", "agents", "autopilot.md")
+		userPath := filepath.Join(home, ".claude", "agents", filename)
 		if _, err := os.Stat(userPath); err == nil {
 			return AgentDefUser
 		}
@@ -132,29 +287,41 @@ func DetectAgentDef(dirPath string) AgentDefSource {
 	return AgentDefBuiltIn
 }
 
-// ensureAgentDef resolves the agent definition using a three-tier failover chain
-// and ensures the file exists on disk so that `--agent autopilot` can find it:
+// ensureAgentDef resolves the autopilot agent definition using a three-tier failover chain.
+// This is a convenience wrapper around ensureAgentDefByName for backward compatibility.
+func ensureAgentDef(worktreePath string) (AgentDefSource, error) {
+	return ensureAgentDefByName(worktreePath, AgentAutopilot)
+}
+
+// ensureAgentDefByName resolves the named agent definition using a three-tier failover chain
+// and ensures the file exists on disk so that `--agent <name>` can find it:
 //
-//  1. <worktree>/.claude/agents/autopilot.md  (repo-level, most specific)
-//  2. ~/.claude/agents/autopilot.md           (user-level, shared across repos)
-//  3. Built-in default                        (written to worktree, always available)
+//  1. <worktree>/.claude/agents/<name>.md  (repo-level, most specific)
+//  2. ~/.claude/agents/<name>.md           (user-level, shared across repos)
+//  3. Built-in default                     (written to worktree, always available)
 //
 // When the built-in fallback is used, the default agent definition is written to
-// the worktree's .claude/agents/autopilot.md so Claude Code can read it from disk.
+// the worktree's .claude/agents/<name>.md so Claude Code can read it from disk.
 // This is safe because worktrees are ephemeral and cleaned up after the agent exits.
-func ensureAgentDef(worktreePath string) (AgentDefSource, error) {
-	source := DetectAgentDef(worktreePath)
+func ensureAgentDefByName(worktreePath string, name AgentName) (AgentDefSource, error) {
+	source := DetectAgentDefByName(worktreePath, name)
 	if source != AgentDefBuiltIn {
 		return source, nil
 	}
 
+	builtIn, ok := builtInDefs[name]
+	if !ok {
+		return "", fmt.Errorf("no built-in agent definition for %q", name)
+	}
+
 	// Tier 3: Install built-in default to the worktree.
-	repoPath := filepath.Join(worktreePath, ".claude", "agents", "autopilot.md")
+	filename := string(name) + ".md"
+	repoPath := filepath.Join(worktreePath, ".claude", "agents", filename)
 	agentDir := filepath.Join(worktreePath, ".claude", "agents")
 	if err := os.MkdirAll(agentDir, 0o755); err != nil {
 		return "", fmt.Errorf("create agent dir %s: %w", agentDir, err)
 	}
-	if err := os.WriteFile(repoPath, []byte(defaultAgentDef), 0o644); err != nil {
+	if err := os.WriteFile(repoPath, []byte(builtIn), 0o644); err != nil {
 		return "", fmt.Errorf("write built-in agent def to %s: %w", repoPath, err)
 	}
 
@@ -252,6 +419,55 @@ func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo str
 	return b.String()
 }
 
+// renderReviewTaskContext builds a prompt with review-specific context for the reviewer agent.
+// It provides the PR number, issue details, project goal, and commands for the review workflow.
+func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "## Review Context\n\n")
+	fmt.Fprintf(&b, "**PR:** #%d\n", task.PRNumber)
+	fmt.Fprintf(&b, "**Issue:** #%d — %s\n", task.IssueNumber, task.IssueTitle)
+	fmt.Fprintf(&b, "**Repository:** %s/%s\n", owner, repo)
+	fmt.Fprintf(&b, "**Branch:** %s\n", task.Branch)
+	fmt.Fprintf(&b, "**Base branch:** %s\n", baseBranch)
+	fmt.Fprintf(&b, "**Worktree:** %s\n\n", task.WorktreePath)
+
+	if task.IssueBody != "" {
+		fmt.Fprintf(&b, "## Issue Description\n\n")
+		b.WriteString(task.IssueBody)
+		b.WriteString("\n\n")
+	}
+
+	if projectGoal != "" {
+		fmt.Fprintf(&b, "## Project Goal\n\n%s\n\n", projectGoal)
+	}
+
+	fmt.Fprintf(&b, "## Commands for this review\n\n")
+	fmt.Fprintf(&b, "View PR diff: gh pr diff %d -R %s/%s\n", task.PRNumber, owner, repo)
+	fmt.Fprintf(&b, "View PR files: gh pr view %d --json files -R %s/%s\n", task.PRNumber, owner, repo)
+	fmt.Fprintf(&b, "View PR details: gh pr view %d -R %s/%s\n", task.PRNumber, owner, repo)
+	fmt.Fprintf(&b, "Rebase before push:\n")
+	fmt.Fprintf(&b, "  git fetch origin %s\n", baseBranch)
+	fmt.Fprintf(&b, "  git rebase origin/%s\n", baseBranch)
+
+	return b.String()
+}
+
+// buildReviewClaudeArgs constructs the CLI arguments for launching a reviewer agent.
+func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, maxTurns int, maxBudget float64, allowedTools []string) []string {
+	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal)
+	return []string{
+		"--agent", "reviewer",
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--max-turns", strconv.Itoa(maxTurns),
+		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
+		"--allowedTools", toCliAllowedTools(allowedTools),
+		"--", prompt,
+	}
+}
+
 // renderPrompt builds the agent prompt from the design doc template.
 // This is the legacy full-prompt path, kept for backward compatibility but no longer
 // used by buildClaudeArgs (which always uses --agent autopilot + renderTaskContext).
@@ -273,7 +489,7 @@ func renderPrompt(task *db.AutopilotTask, baseBranch, owner, repo string) string
 	b.WriteString("## Your first steps\n\n")
 	fmt.Fprintf(&b, "1. Move the issue to \"In Progress\" — run: gh issue edit %d --add-label \"in-progress\" -R %s/%s\n", task.IssueNumber, owner, repo)
 	fmt.Fprintf(&b, "2. Post a comment: gh issue comment %d --body \"Agent starting work on this issue\" -R %s/%s\n", task.IssueNumber, owner, repo)
-	b.WriteString("3. Read the full issue and any linked issues for context\n")
+	fmt.Fprintf(&b, "3. Read the full issue with comments (`gh issue view %d --comments -R %s/%s`) and any linked issues for context\n", task.IssueNumber, owner, repo)
 	b.WriteString("4. Explore the codebase to understand the relevant code\n\n")
 
 	b.WriteString("## Pre-check: assess complexity before writing any code\n\n")
