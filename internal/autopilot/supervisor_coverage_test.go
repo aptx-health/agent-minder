@@ -4298,6 +4298,97 @@ func TestParseReviewRisk_PlainMarker(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// riskToLabel
+// ---------------------------------------------------------------------------
+
+func TestRiskToLabel_Low(t *testing.T) {
+	if got := riskToLabel("low"); got != "low-risk" {
+		t.Errorf("riskToLabel('low') = %q, want 'low-risk'", got)
+	}
+}
+
+func TestRiskToLabel_Medium(t *testing.T) {
+	if got := riskToLabel("medium"); got != "needs-testing" {
+		t.Errorf("riskToLabel('medium') = %q, want 'needs-testing'", got)
+	}
+}
+
+func TestRiskToLabel_High(t *testing.T) {
+	if got := riskToLabel("high"); got != "suspect" {
+		t.Errorf("riskToLabel('high') = %q, want 'suspect'", got)
+	}
+}
+
+func TestRiskToLabel_Unknown(t *testing.T) {
+	if got := riskToLabel("unknown"); got != "needs-testing" {
+		t.Errorf("riskToLabel('unknown') = %q, want 'needs-testing'", got)
+	}
+}
+
+func TestRiskToLabel_Empty(t *testing.T) {
+	if got := riskToLabel(""); got != "needs-testing" {
+		t.Errorf("riskToLabel('') = %q, want 'needs-testing'", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// formatReviewComment
+// ---------------------------------------------------------------------------
+
+func TestFormatReviewComment_LowRisk(t *testing.T) {
+	body := formatReviewComment("## Risk Assessment\n\n**Risk level:** low\n\n**Summary:** Clean implementation", "low-risk")
+	if !strings.Contains(body, "✅") {
+		t.Error("low-risk comment should contain ✅ emoji")
+	}
+	if !strings.Contains(body, "`low-risk`") {
+		t.Error("comment should contain low-risk label")
+	}
+	if !strings.Contains(body, "**Recommendation:** Merge") {
+		t.Error("low-risk recommendation should be 'Merge'")
+	}
+	if !strings.Contains(body, "Clean implementation") {
+		t.Error("comment should include agent output")
+	}
+	if !strings.Contains(body, "agent-minder autopilot reviewer") {
+		t.Error("comment should have reviewer footer")
+	}
+}
+
+func TestFormatReviewComment_NeedsTesting(t *testing.T) {
+	body := formatReviewComment("**Risk level:** medium", "needs-testing")
+	if !strings.Contains(body, "⚠️") {
+		t.Error("needs-testing comment should contain ⚠️ emoji")
+	}
+	if !strings.Contains(body, "`needs-testing`") {
+		t.Error("comment should contain needs-testing label")
+	}
+	if !strings.Contains(body, "**Recommendation:** Test first") {
+		t.Error("needs-testing recommendation should be 'Test first'")
+	}
+}
+
+func TestFormatReviewComment_Suspect(t *testing.T) {
+	body := formatReviewComment("**Risk level:** high", "suspect")
+	if !strings.Contains(body, "🔴") {
+		t.Error("suspect comment should contain 🔴 emoji")
+	}
+	if !strings.Contains(body, "`suspect`") {
+		t.Error("comment should contain suspect label")
+	}
+	if !strings.Contains(body, "**Recommendation:** Needs rework") {
+		t.Error("suspect recommendation should be 'Needs rework'")
+	}
+}
+
+func TestFormatReviewComment_TrimsWhitespace(t *testing.T) {
+	body := formatReviewComment("  some output  \n\n", "low-risk")
+	// Should not have leading/trailing whitespace in the agent output section.
+	if strings.Contains(body, "  some output  \n\n\n") {
+		t.Error("agent output should be trimmed")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // checkReviewTasks — reviewing/reviewed status paths
 // ---------------------------------------------------------------------------
 
@@ -4803,7 +4894,13 @@ func TestReviewOutcome_Success_ParsesRisk(t *testing.T) {
 		t.Fatalf("parseReviewRisk = %q, want 'low'", riskLevel)
 	}
 
-	_ = store.UpdateAutopilotTaskReview(task.ID, riskLevel, 0)
+	// Production code flows through riskToLabel before storing — verify the full path.
+	label := riskToLabel(riskLevel)
+	if label != "low-risk" {
+		t.Fatalf("riskToLabel(%q) = %q, want 'low-risk'", riskLevel, label)
+	}
+
+	_ = store.UpdateAutopilotTaskReview(task.ID, label, 0)
 	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
 
 	tasks, _ := store.GetAutopilotTasks(project.ID)
@@ -4815,8 +4912,8 @@ func TestReviewOutcome_Success_ParsesRisk(t *testing.T) {
 			if tt.FailureReason != "" {
 				t.Errorf("failure_reason = %q, want empty (success)", tt.FailureReason)
 			}
-			if tt.ReviewRisk == nil || *tt.ReviewRisk != "low" {
-				t.Errorf("review_risk = %v, want 'low'", tt.ReviewRisk)
+			if tt.ReviewRisk == nil || *tt.ReviewRisk != "low-risk" {
+				t.Errorf("review_risk = %v, want 'low-risk'", tt.ReviewRisk)
 			}
 		}
 	}
