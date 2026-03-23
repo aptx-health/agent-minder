@@ -81,13 +81,13 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 
 **Agent command:** `claude --agent autopilot -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var. Allowed tools are loaded from `.agent-minder/onboarding.yaml` (if present) or a built-in default set.
 
-### DB schema (internal/db) — currently v21
+### DB schema (internal/db) — currently v23
 
-**projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider (deprecated), llm_model (deprecated), llm_summarizer_model, llm_analyzer_model, autopilot_max_agents, autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label
+**projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider (deprecated), llm_model (deprecated), llm_summarizer_model, llm_analyzer_model, autopilot_max_agents, autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label, autopilot_auto_merge, autopilot_review_max_turns (nullable), autopilot_review_max_budget_usd (nullable)
 
 **polls**: project_id, new_commits, new_messages, concerns_raised, llm_response (legacy), tier1_response, tier2_response, bus_message_sent, polled_at
 
-**autopilot_tasks**: project_id, issue_number, issue_title, issue_body, dependencies (JSON), status (queued/running/done/bailed/blocked/manual/skipped), worktree_path, branch, pr_number, agent_log, started_at, completed_at, max_turns_override (nullable), max_budget_override (nullable) — UNIQUE on project_id+issue_number
+**autopilot_tasks**: project_id, issue_number, issue_title, issue_body, dependencies (JSON), status (queued/running/review/reviewing/reviewed/done/bailed/blocked/manual/skipped), worktree_path, branch, pr_number, agent_log, started_at, completed_at, max_turns_override (nullable), max_budget_override (nullable), review_risk (nullable), review_comment_id (nullable) — UNIQUE on project_id+issue_number
 
 **autopilot_dep_graphs**: project_id (UNIQUE), graph_json, option_name, created_at — persists the selected dependency graph across autopilot restarts
 
@@ -95,7 +95,7 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 
 **Also**: repos, worktrees, topics, concerns (see `schema.go` for full DDL)
 
-Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns), v20 (autopilot_dep_graphs table for persisting dep graphs), v21 (per-task max_turns_override + max_budget_override columns).
+Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns), v20 (autopilot_dep_graphs table for persisting dep graphs), v21 (per-task max_turns_override + max_budget_override columns), v23 (review automation: autopilot_auto_merge, review_max_turns/budget on projects; review_risk, review_comment_id on tasks; reviewing/reviewed statuses).
 
 `Poll.LLMResponse()` accessor returns tier2 > tier1 > raw (backward compat).
 

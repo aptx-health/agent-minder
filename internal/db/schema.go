@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 22
+const currentVersion = 23
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -44,8 +44,11 @@ CREATE TABLE IF NOT EXISTS projects (
 	autopilot_skip_label   TEXT DEFAULT 'no-agent',
 	autopilot_base_branch  TEXT DEFAULT '',
 	is_deploy             INTEGER DEFAULT 0,
-	analyzer_session_id   TEXT DEFAULT '',
-	created_at            TEXT DEFAULT (datetime('now'))
+	analyzer_session_id          TEXT DEFAULT '',
+	autopilot_auto_merge         INTEGER DEFAULT 0,
+	autopilot_review_max_turns   INTEGER,
+	autopilot_review_max_budget_usd REAL,
+	created_at                   TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS repos (
@@ -137,6 +140,8 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
 	cost_usd              REAL DEFAULT 0,
 	max_turns_override    INTEGER,
 	max_budget_override   REAL,
+	review_risk           TEXT,
+	review_comment_id     INTEGER,
 	UNIQUE(project_id, issue_number)
 );
 
@@ -332,6 +337,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 22 {
 		if err := migrateV22(db); err != nil {
 			return fmt.Errorf("apply migration v22: %w", err)
+		}
+	}
+
+	if version < 23 {
+		if err := migrateV23(db); err != nil {
+			return fmt.Errorf("apply migration v23: %w", err)
 		}
 	}
 
@@ -695,6 +706,31 @@ func migrateV22(db *sqlx.DB) error {
 	}
 	if _, err := db.Exec(`UPDATE projects SET analyzer_session_id = '' WHERE analyzer_session_id IS NULL`); err != nil {
 		return fmt.Errorf("null-fill analyzer_session_id: %w", err)
+	}
+	return nil
+}
+
+func migrateV23(db *sqlx.DB) error {
+	stmts := []string{
+		// Projects: review automation settings.
+		`ALTER TABLE projects ADD COLUMN autopilot_auto_merge INTEGER DEFAULT 0`,
+		`ALTER TABLE projects ADD COLUMN autopilot_review_max_turns INTEGER`,
+		`ALTER TABLE projects ADD COLUMN autopilot_review_max_budget_usd REAL`,
+		// Autopilot tasks: review pipeline columns.
+		`ALTER TABLE autopilot_tasks ADD COLUMN review_risk TEXT`,
+		`ALTER TABLE autopilot_tasks ADD COLUMN review_comment_id INTEGER`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column") {
+				continue
+			}
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	// Null-fill the boolean column so Go bool scanning works.
+	if _, err := db.Exec(`UPDATE projects SET autopilot_auto_merge = 0 WHERE autopilot_auto_merge IS NULL`); err != nil {
+		return fmt.Errorf("null-fill autopilot_auto_merge: %w", err)
 	}
 	return nil
 }
