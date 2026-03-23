@@ -2416,9 +2416,9 @@ func (s *Supervisor) promoteIfMerged(ctx context.Context, ghClient *ghpkg.Client
 	if item.State == "merged" || item.State == "closed" {
 		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
-		// Clean up risk labels from the PR.
-		for _, label := range riskLabels {
-			ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, label)
+		// Clean up the risk label from the PR (if one was applied).
+		if task.ReviewRisk != nil && *task.ReviewRisk != "" {
+			ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, *task.ReviewRisk)
 		}
 		s.emitEvent("completed", fmt.Sprintf("PR #%d for issue #%d merged — dependents unblocked", task.PRNumber, task.IssueNumber), &task)
 		return true
@@ -2672,14 +2672,18 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 		var commentID int64
 		ghClient := ghpkg.NewClient(s.ghToken)
 		body := formatReviewComment(agentResult.Result, label)
-		if cid, err := ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber, body); err == nil {
+		if cid, err := ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber, body); err != nil {
+			s.emitEvent("error", fmt.Sprintf("Failed to post review comment on PR #%d: %v", task.PRNumber, err), task)
+		} else {
 			commentID = cid
 		}
 		// Remove any previously applied risk labels, then apply the current one.
 		for _, old := range riskLabels {
 			ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, old)
 		}
-		_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.PRNumber, label)
+		if err := ghClient.AddLabel(ctx, s.owner, s.repo, task.PRNumber, label); err != nil {
+			s.emitEvent("error", fmt.Sprintf("Failed to apply label %q to PR #%d: %v", label, task.PRNumber, err), task)
+		}
 
 		_ = s.store.UpdateAutopilotTaskReview(task.ID, label, commentID)
 		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "reviewed")

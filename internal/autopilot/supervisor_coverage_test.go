@@ -4894,7 +4894,13 @@ func TestReviewOutcome_Success_ParsesRisk(t *testing.T) {
 		t.Fatalf("parseReviewRisk = %q, want 'low'", riskLevel)
 	}
 
-	_ = store.UpdateAutopilotTaskReview(task.ID, riskLevel, 0)
+	// Production code flows through riskToLabel before storing — verify the full path.
+	label := riskToLabel(riskLevel)
+	if label != "low-risk" {
+		t.Fatalf("riskToLabel(%q) = %q, want 'low-risk'", riskLevel, label)
+	}
+
+	_ = store.UpdateAutopilotTaskReview(task.ID, label, 0)
 	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
 
 	tasks, _ := store.GetAutopilotTasks(project.ID)
@@ -4906,8 +4912,8 @@ func TestReviewOutcome_Success_ParsesRisk(t *testing.T) {
 			if tt.FailureReason != "" {
 				t.Errorf("failure_reason = %q, want empty (success)", tt.FailureReason)
 			}
-			if tt.ReviewRisk == nil || *tt.ReviewRisk != "low" {
-				t.Errorf("review_risk = %v, want 'low'", tt.ReviewRisk)
+			if tt.ReviewRisk == nil || *tt.ReviewRisk != "low-risk" {
+				t.Errorf("review_risk = %v, want 'low-risk'", tt.ReviewRisk)
 			}
 		}
 	}
