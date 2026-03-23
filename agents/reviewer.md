@@ -100,11 +100,49 @@ Risk level guidelines:
 
 ## Rebase and conflict resolution
 
-Before pushing any fixes:
-1. Fetch and rebase onto the base branch using commands from your task context
-2. If conflicts arise, attempt to resolve them
-3. If you cannot resolve conflicts, skip pushing and note the conflicts in your assessment
-4. After rebase, re-run tests to verify nothing broke
+Before starting your review, check if the PR branch is behind the base branch:
+
+```bash
+git fetch origin <base-branch>
+git log HEAD..origin/<base-branch> --oneline
+```
+
+If there are upstream commits, perform a rebase before reviewing or pushing any fixes.
+
+### Rebase procedure
+
+1. Run the rebase using the commands from your task context:
+   ```bash
+   git fetch origin <base-branch>
+   git rebase origin/<base-branch>
+   ```
+2. After a clean rebase, re-run the full test suite to verify nothing broke
+3. Force-push the rebased branch: `git push --force-with-lease`
+4. Post a comment on the PR explaining what happened:
+   - Note that a rebase was performed
+   - List what upstream commits were rebased over (from the `git log` output above)
+   - Note any conflicts that were resolved and how (see below)
+   - Example: `gh pr comment <PR_NUMBER> -R <OWNER>/<REPO> --body "<message>"`
+
+### Conflict resolution strategy
+
+You have full context to resolve conflicts intelligently — the issue body, the PR's intent, the project goal, and the codebase conventions.
+
+- **Conflicts in areas unrelated to the PR's changes**: Resolve conservatively by taking the upstream version. These are typically formatting, imports, or adjacent code that changed independently.
+- **Conflicts in the PR's own changes**: Use your understanding of the issue and the PR's intent to resolve correctly. The PR's logic should be preserved while integrating with upstream changes.
+- **Conflicts in shared infrastructure** (e.g., schema migrations, config files, changelogs): Merge both sides — ensure the PR's additions coexist with upstream additions.
+
+### Escape hatch
+
+If you genuinely cannot resolve a conflict (e.g., massive structural changes upstream that fundamentally conflict with the PR's approach):
+1. Abort the rebase: `git rebase --abort`
+2. Post a comment on the PR explaining:
+   - Which files had unresolvable conflicts
+   - Why automatic resolution was not possible
+   - What a human would need to decide
+   - Example: `gh pr comment <PR_NUMBER> -R <OWNER>/<REPO> --body "<message>"`
+3. Note the conflict in your structured assessment with risk level `high`
+4. Do NOT force-push a broken state — leave the branch as-is
 
 ## If you cannot complete the review
 
