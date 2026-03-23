@@ -1254,10 +1254,14 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.polling = true
-		m.activeTab = tabAnalysis
-		m.analysisHasNew = false
-		m.resizeViewports()
 		p := m.poller
+		if m.activeTab == tabOperations {
+			// Sync only — gather git/bus data without LLM analysis.
+			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+				p.StatusNow(context.Background())
+				return nil
+			})
+		}
 		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
 			p.PollNow(context.Background())
 			return nil

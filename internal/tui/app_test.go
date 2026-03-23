@@ -482,7 +482,7 @@ func TestModeTransition_StopAutopilotRequiresTab3(t *testing.T) {
 
 // --- 'r' key (full analysis) ---
 
-func TestPollNow_RKey(t *testing.T) {
+func TestPollNow_RKey_OpsTab(t *testing.T) {
 	m := testModel(t)
 	m.activeTab = tabOperations
 	result, cmd := m.Update(keyPress('r'))
@@ -490,8 +490,24 @@ func TestPollNow_RKey(t *testing.T) {
 	if !m.polling {
 		t.Error("polling should be true after 'r'")
 	}
+	if m.activeTab != tabOperations {
+		t.Errorf("activeTab = %d, want %d (should stay on Operations)", m.activeTab, tabOperations)
+	}
+	if cmd == nil {
+		t.Error("'r' should return a non-nil command (StatusNow)")
+	}
+}
+
+func TestPollNow_RKey_AnalysisTab(t *testing.T) {
+	m := testModel(t)
+	m.activeTab = tabAnalysis
+	result, cmd := m.Update(keyPress('r'))
+	m = result.(Model)
+	if !m.polling {
+		t.Error("polling should be true after 'r'")
+	}
 	if m.activeTab != tabAnalysis {
-		t.Errorf("activeTab = %d, want %d (should switch to Analysis)", m.activeTab, tabAnalysis)
+		t.Errorf("activeTab = %d, want %d (should stay on Analysis)", m.activeTab, tabAnalysis)
 	}
 	if cmd == nil {
 		t.Error("'r' should return a non-nil command (PollNow)")
