@@ -604,6 +604,110 @@ func TestResolveTestCommand(t *testing.T) {
 			t.Errorf("expected empty, got %q", cmd)
 		}
 	})
+
+	t.Run("falls back to convention detection for Go", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := resolveTestCommand(dir)
+		if cmd != "go test ./..." {
+			t.Errorf("expected %q, got %q", "go test ./...", cmd)
+		}
+	})
+
+	t.Run("onboarding takes precedence over convention", func(t *testing.T) {
+		dir := t.TempDir()
+		// Create both onboarding yaml and go.mod — onboarding should win.
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/foo"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		onboardDir := filepath.Join(dir, ".agent-minder")
+		if err := os.MkdirAll(onboardDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "version: 1\nscanned_at: 2024-01-01T00:00:00Z\ncontext:\n  test_command: \"make test-all\"\n"
+		if err := os.WriteFile(filepath.Join(onboardDir, "onboarding.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := resolveTestCommand(dir)
+		if cmd != "make test-all" {
+			t.Errorf("expected %q, got %q", "make test-all", cmd)
+		}
+	})
+}
+
+func TestDetectTestCommand(t *testing.T) {
+	t.Run("detects Go", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cmd := detectTestCommand(dir); cmd != "go test ./..." {
+			t.Errorf("expected %q, got %q", "go test ./...", cmd)
+		}
+	})
+
+	t.Run("detects Node.js", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cmd := detectTestCommand(dir); cmd != "npm test" {
+			t.Errorf("expected %q, got %q", "npm test", cmd)
+		}
+	})
+
+	t.Run("detects Python via pyproject.toml", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[tool.pytest]"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cmd := detectTestCommand(dir); cmd != "pytest" {
+			t.Errorf("expected %q, got %q", "pytest", cmd)
+		}
+	})
+
+	t.Run("detects Rust", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte("[package]"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cmd := detectTestCommand(dir); cmd != "cargo test" {
+			t.Errorf("expected %q, got %q", "cargo test", cmd)
+		}
+	})
+
+	t.Run("detects Makefile", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte("test:\n\techo ok"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if cmd := detectTestCommand(dir); cmd != "make test" {
+			t.Errorf("expected %q, got %q", "make test", cmd)
+		}
+	})
+
+	t.Run("returns empty for unknown project", func(t *testing.T) {
+		dir := t.TempDir()
+		if cmd := detectTestCommand(dir); cmd != "" {
+			t.Errorf("expected empty, got %q", cmd)
+		}
+	})
+
+	t.Run("Go takes precedence over Makefile", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, f := range []string{"go.mod", "Makefile"} {
+			if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if cmd := detectTestCommand(dir); cmd != "go test ./..." {
+			t.Errorf("expected %q, got %q", "go test ./...", cmd)
+		}
+	})
 }
 
 func TestRenderResumeTaskContext(t *testing.T) {
@@ -818,6 +922,7 @@ func TestRenderReviewTaskContext(t *testing.T) {
 		"git fetch origin main",
 		"git rebase origin/main",
 		"go test ./...", // test command
+		"MUST run this test command after making", // test emphasis
 	}
 
 	for _, check := range checks {
