@@ -178,8 +178,9 @@ type Model struct {
 	autopilotHasNew bool // true when autopilot state changed while on another tab
 
 	// State.
-	events   []poller.Event
-	lastPoll *poller.PollResult
+	events     []poller.Event
+	lastPoll   *poller.PollResult
+	lastPollAt time.Time
 
 	// Viewports for scrollable sections.
 	analysisVP       viewport.Model
@@ -360,6 +361,9 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		for _, poll := range polls {
 			if poll.Tier2Response != "" {
 				m.lastPoll = &poller.PollResult{Tier2Analysis: poll.Tier2Response}
+				if t, err := time.Parse("2006-01-02 15:04:05", poll.PolledAt); err == nil {
+					m.lastPollAt = t
+				}
 				break
 			}
 		}
@@ -496,6 +500,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				event.PollResult.Tier2Analysis = m.lastPoll.Tier2Analysis
 			}
 			m.lastPoll = event.PollResult
+			m.lastPollAt = time.Now()
 			m.polling = false
 			m.pollNotice = ""
 			m.refreshTrackedItems()
@@ -537,6 +542,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.userMsgStatus = ""
 		m.mode = "normal"
 		m.lastPoll = &poller.PollResult{Tier2Analysis: msg.response}
+		m.lastPollAt = time.Now()
 		m.activeTab = tabAnalysis
 		m.analysisHasNew = false
 		m.rebuildAnalysisContent()
@@ -2622,6 +2628,24 @@ func (m *Model) clearTabIndicator() {
 		m.analysisHasNew = false
 	case tabAutopilot:
 		m.autopilotHasNew = false
+	}
+}
+
+// formatTimeAgo returns a human-readable relative time like "3m ago" or "2h ago".
+func formatTimeAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		if m > 0 {
+			return fmt.Sprintf("%dh%dm ago", h, m)
+		}
+		return fmt.Sprintf("%dh ago", h)
 	}
 }
 
