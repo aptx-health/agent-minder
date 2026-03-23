@@ -758,7 +758,7 @@ func TestRenderReviewTaskContext(t *testing.T) {
 		PRNumber:     99,
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform")
+	ctx := renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", nil)
 
 	checks := []string{
 		"#99", // PR number
@@ -791,7 +791,7 @@ func TestRenderReviewTaskContextEmptyGoal(t *testing.T) {
 		PRNumber:     15,
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "org", "repo", "")
+	ctx := renderReviewTaskContext(task, "main", "org", "repo", "", nil)
 
 	if strings.Contains(ctx, "Project Goal") {
 		t.Error("should not include project goal section when empty")
@@ -809,7 +809,7 @@ func TestBuildReviewClaudeArgs(t *testing.T) {
 	}
 
 	tools := []string{"Read", "Edit", "Write", "Bash(git *)"}
-	args := buildReviewClaudeArgs(task, "main", "org", "repo", "Project goal", 30, 2.00, tools)
+	args := buildReviewClaudeArgs(task, "main", "org", "repo", "Project goal", 30, 2.00, tools, nil)
 
 	// Should use --agent reviewer.
 	if args[0] != "--agent" || args[1] != "reviewer" {
@@ -838,6 +838,115 @@ func TestBuildReviewClaudeArgs(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Project goal") {
 		t.Error("prompt should contain project goal")
+	}
+}
+
+func TestRenderRelatedWork(t *testing.T) {
+	task := &db.AutopilotTask{IssueNumber: 42}
+
+	t.Run("nil returns empty", func(t *testing.T) {
+		if got := renderRelatedWork(task, nil); got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+
+	t.Run("empty struct returns empty", func(t *testing.T) {
+		rw := &reviewRelatedWork{}
+		if got := renderRelatedWork(task, rw); got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+
+	t.Run("dep graph only", func(t *testing.T) {
+		rw := &reviewRelatedWork{
+			depGraph: `{"42":[],"38":[42]}`,
+		}
+		got := renderRelatedWork(task, rw)
+		if !strings.Contains(got, "Dependency Graph") {
+			t.Error("should contain Dependency Graph heading")
+		}
+		if !strings.Contains(got, `"38":[42]`) {
+			t.Error("should contain dep graph JSON")
+		}
+		if strings.Contains(got, "Autopilot Task Status") {
+			t.Error("should not contain task status when no sibling tasks")
+		}
+	})
+
+	t.Run("sibling tasks only", func(t *testing.T) {
+		rw := &reviewRelatedWork{
+			siblingTasks: []db.AutopilotTask{
+				{IssueNumber: 42, IssueTitle: "Current task", Status: "reviewing"},
+				{IssueNumber: 38, IssueTitle: "Dependency task", Status: "done", PRNumber: 50},
+				{IssueNumber: 55, IssueTitle: "Blocked task", Status: "blocked"},
+			},
+		}
+		got := renderRelatedWork(task, rw)
+		if strings.Contains(got, "Dependency Graph") {
+			t.Error("should not contain Dependency Graph when no dep graph")
+		}
+		if !strings.Contains(got, "Autopilot Task Status") {
+			t.Error("should contain task status heading")
+		}
+		// Current task (#42) should be excluded.
+		if strings.Contains(got, "Current task") {
+			t.Error("should not include the task under review")
+		}
+		if !strings.Contains(got, "#38") || !strings.Contains(got, "done") {
+			t.Error("should include sibling task #38 with status")
+		}
+		if !strings.Contains(got, "#50") {
+			t.Error("should include PR number for sibling task")
+		}
+		if !strings.Contains(got, "#55") || !strings.Contains(got, "blocked") {
+			t.Error("should include blocked sibling task")
+		}
+	})
+
+	t.Run("both dep graph and tasks", func(t *testing.T) {
+		rw := &reviewRelatedWork{
+			depGraph: `{"42":[],"38":[42]}`,
+			siblingTasks: []db.AutopilotTask{
+				{IssueNumber: 38, IssueTitle: "Other", Status: "queued"},
+			},
+		}
+		got := renderRelatedWork(task, rw)
+		if !strings.Contains(got, "Dependency Graph") {
+			t.Error("should contain dep graph")
+		}
+		if !strings.Contains(got, "Autopilot Task Status") {
+			t.Error("should contain task status")
+		}
+	})
+}
+
+func TestRenderReviewTaskContextWithRelatedWork(t *testing.T) {
+	task := &db.AutopilotTask{
+		IssueNumber:  42,
+		IssueTitle:   "Add auth",
+		IssueBody:    "Implement auth",
+		WorktreePath: "/tmp/wt",
+		Branch:       "agent/issue-42",
+		PRNumber:     99,
+	}
+
+	rw := &reviewRelatedWork{
+		depGraph: `{"42":[]}`,
+		siblingTasks: []db.AutopilotTask{
+			{IssueNumber: 10, IssueTitle: "Setup DB", Status: "done", PRNumber: 20},
+		},
+	}
+
+	ctx := renderReviewTaskContext(task, "main", "org", "repo", "Goal", rw)
+
+	if !strings.Contains(ctx, "Related Work") {
+		t.Error("should contain Related Work section")
+	}
+	if !strings.Contains(ctx, "Dependency Graph") {
+		t.Error("should contain dep graph")
+	}
+	if !strings.Contains(ctx, "#10") {
+		t.Error("should contain sibling task")
 	}
 }
 
@@ -885,7 +994,7 @@ func TestPrintPrompts(t *testing.T) {
 
 	fmt.Printf("\n%s\n  REVIEW TASK CONTEXT (used with --agent reviewer)\n%s\n\n", sep, sep)
 	task.PRNumber = 123
-	fmt.Println(renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform"))
+	fmt.Println(renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", nil))
 
 	fmt.Printf("\n%s\n  BUILT-IN DEFAULT REVIEWER DEFINITION\n%s\n\n", sep, sep)
 	fmt.Print(defaultReviewerDef)

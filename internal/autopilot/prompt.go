@@ -467,9 +467,65 @@ func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo str
 	return b.String()
 }
 
+// reviewRelatedWork holds dependency graph and sibling task context for the reviewer.
+type reviewRelatedWork struct {
+	// depGraph is the raw JSON dependency graph (issue→[deps]) from autopilot_dep_graphs.
+	depGraph string
+	// siblingTasks is the list of all autopilot tasks in the same project.
+	siblingTasks []db.AutopilotTask
+}
+
+// renderRelatedWork formats the dependency graph and sibling task statuses
+// into a "Related Work" section for the review prompt. Returns empty string
+// if no useful context is available.
+func renderRelatedWork(task *db.AutopilotTask, rw *reviewRelatedWork) string {
+	if rw == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## Related Work\n\n")
+
+	// Show where this issue sits in the dependency graph.
+	if rw.depGraph != "" {
+		b.WriteString("### Dependency Graph\n\n")
+		b.WriteString("This JSON maps each issue number to the issues it depends on (must complete first):\n\n")
+		b.WriteString("```json\n")
+		b.WriteString(rw.depGraph)
+		b.WriteString("\n```\n\n")
+	}
+
+	// Show sibling task statuses so the reviewer can evaluate the PR in context.
+	if len(rw.siblingTasks) > 0 {
+		b.WriteString("### Autopilot Task Status\n\n")
+		b.WriteString("Other issues being worked on in this autopilot session:\n\n")
+		b.WriteString("| Issue | Title | Status | PR |\n")
+		b.WriteString("|-------|-------|--------|----|\n")
+		for _, t := range rw.siblingTasks {
+			if t.IssueNumber == task.IssueNumber {
+				continue // skip the task under review
+			}
+			pr := "—"
+			if t.PRNumber > 0 {
+				pr = fmt.Sprintf("#%d", t.PRNumber)
+			}
+			fmt.Fprintf(&b, "| #%d | %s | %s | %s |\n", t.IssueNumber, t.IssueTitle, t.Status, pr)
+		}
+		b.WriteString("\n")
+	}
+
+	result := b.String()
+	// If we only wrote the header with no content, return empty.
+	if result == "## Related Work\n\n" {
+		return ""
+	}
+	return result
+}
+
 // renderReviewTaskContext builds a prompt with review-specific context for the reviewer agent.
-// It provides the PR number, issue details, project goal, and commands for the review workflow.
-func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string) string {
+// It provides the PR number, issue details, project goal, dependency graph, sibling task
+// statuses, and commands for the review workflow.
+func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, rw *reviewRelatedWork) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Review Context\n\n")
@@ -490,6 +546,10 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 		fmt.Fprintf(&b, "## Project Goal\n\n%s\n\n", projectGoal)
 	}
 
+	if related := renderRelatedWork(task, rw); related != "" {
+		b.WriteString(related)
+	}
+
 	fmt.Fprintf(&b, "## Commands for this review\n\n")
 	fmt.Fprintf(&b, "View PR diff: gh pr diff %d -R %s/%s\n", task.PRNumber, owner, repo)
 	fmt.Fprintf(&b, "View PR files: gh pr view %d --json files -R %s/%s\n", task.PRNumber, owner, repo)
@@ -502,8 +562,8 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 }
 
 // buildReviewClaudeArgs constructs the CLI arguments for launching a reviewer agent.
-func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, maxTurns int, maxBudget float64, allowedTools []string) []string {
-	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal)
+func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, maxTurns int, maxBudget float64, allowedTools []string, rw *reviewRelatedWork) []string {
+	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, rw)
 	return []string{
 		"--agent", "reviewer",
 		"-p",

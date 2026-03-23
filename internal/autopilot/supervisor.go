@@ -2566,7 +2566,21 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 	allowedTools := resolveAllowedTools(s.repoDir)
 	projectGoal := s.project.GoalDescription
 
-	args := buildReviewClaudeArgs(task, baseBranch, s.owner, s.repo, projectGoal, maxTurns, maxBudget, allowedTools)
+	// Load dependency graph and sibling task statuses for review context.
+	var rw *reviewRelatedWork
+	dg, err := s.store.GetDepGraph(s.project.ID)
+	tasks, taskErr := s.store.GetAutopilotTasks(s.project.ID)
+	if err == nil || taskErr == nil {
+		rw = &reviewRelatedWork{}
+		if err == nil && dg != nil {
+			rw.depGraph = dg.GraphJSON
+		}
+		if taskErr == nil {
+			rw.siblingTasks = tasks
+		}
+	}
+
+	args := buildReviewClaudeArgs(task, baseBranch, s.owner, s.repo, projectGoal, maxTurns, maxBudget, allowedTools, rw)
 
 	debugLog("review agent command",
 		"stage", "autopilot", "step", "review-launch",
