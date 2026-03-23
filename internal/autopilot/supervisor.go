@@ -2565,6 +2565,7 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 
 	allowedTools := resolveAllowedTools(s.repoDir)
 	projectGoal := s.project.GoalDescription
+	testCommand := resolveTestCommand(s.repoDir)
 
 	// Load dependency graph and sibling task statuses for review context.
 	var rw *reviewRelatedWork
@@ -2580,7 +2581,7 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 		}
 	}
 
-	args := buildReviewClaudeArgs(task, baseBranch, s.owner, s.repo, projectGoal, maxTurns, maxBudget, allowedTools, rw)
+	args := buildReviewClaudeArgs(task, baseBranch, s.owner, s.repo, projectGoal, testCommand, maxTurns, maxBudget, allowedTools, rw)
 
 	debugLog("review agent command",
 		"stage", "autopilot", "step", "review-launch",

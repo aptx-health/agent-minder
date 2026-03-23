@@ -522,10 +522,20 @@ func renderRelatedWork(task *db.AutopilotTask, rw *reviewRelatedWork) string {
 	return result
 }
 
+// resolveTestCommand reads the test command from the repo's onboarding file.
+// Returns empty string if no onboarding file exists or no test command is configured.
+func resolveTestCommand(repoDir string) string {
+	f, err := onboarding.Parse(onboarding.FilePath(repoDir))
+	if err != nil {
+		return ""
+	}
+	return f.Context.TestCommand
+}
+
 // renderReviewTaskContext builds a prompt with review-specific context for the reviewer agent.
-// It provides the PR number, issue details, project goal, dependency graph, sibling task
-// statuses, and commands for the review workflow.
-func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, rw *reviewRelatedWork) string {
+// It provides the PR number, issue details, project goal, test command, dependency graph,
+// sibling task statuses, and commands for the review workflow.
+func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, rw *reviewRelatedWork) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Review Context\n\n")
@@ -546,6 +556,11 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 		fmt.Fprintf(&b, "## Project Goal\n\n%s\n\n", projectGoal)
 	}
 
+	if testCommand != "" {
+		fmt.Fprintf(&b, "## Test command\n\n")
+		fmt.Fprintf(&b, "Run tests: `%s`\n\n", testCommand)
+	}
+
 	if related := renderRelatedWork(task, rw); related != "" {
 		b.WriteString(related)
 	}
@@ -562,8 +577,8 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 }
 
 // buildReviewClaudeArgs constructs the CLI arguments for launching a reviewer agent.
-func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, maxTurns int, maxBudget float64, allowedTools []string, rw *reviewRelatedWork) []string {
-	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, rw)
+func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *reviewRelatedWork) []string {
+	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, testCommand, rw)
 	return []string{
 		"--agent", "reviewer",
 		"-p",

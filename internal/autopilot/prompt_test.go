@@ -562,6 +562,50 @@ permissions:
 	})
 }
 
+func TestResolveTestCommand(t *testing.T) {
+	t.Run("returns empty when no onboarding file", func(t *testing.T) {
+		dir := t.TempDir()
+		cmd := resolveTestCommand(dir)
+		if cmd != "" {
+			t.Errorf("expected empty, got %q", cmd)
+		}
+	})
+
+	t.Run("returns test command from onboarding", func(t *testing.T) {
+		dir := t.TempDir()
+		onboardDir := filepath.Join(dir, ".agent-minder")
+		if err := os.MkdirAll(onboardDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "version: 1\nscanned_at: 2024-01-01T00:00:00Z\ncontext:\n  test_command: \"go test ./...\"\n"
+		if err := os.WriteFile(filepath.Join(onboardDir, "onboarding.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := resolveTestCommand(dir)
+		if cmd != "go test ./..." {
+			t.Errorf("expected %q, got %q", "go test ./...", cmd)
+		}
+	})
+
+	t.Run("returns empty when test command not set", func(t *testing.T) {
+		dir := t.TempDir()
+		onboardDir := filepath.Join(dir, ".agent-minder")
+		if err := os.MkdirAll(onboardDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := "version: 1\nscanned_at: 2024-01-01T00:00:00Z\ncontext:\n  build_command: \"make\"\n"
+		if err := os.WriteFile(filepath.Join(onboardDir, "onboarding.yaml"), []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := resolveTestCommand(dir)
+		if cmd != "" {
+			t.Errorf("expected empty, got %q", cmd)
+		}
+	})
+}
+
 func TestRenderResumeTaskContext(t *testing.T) {
 	task := &db.AutopilotTask{
 		IssueNumber:   42,
@@ -758,7 +802,7 @@ func TestRenderReviewTaskContext(t *testing.T) {
 		PRNumber:     99,
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", nil)
+	ctx := renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", "go test ./...", nil)
 
 	checks := []string{
 		"#99", // PR number
@@ -773,6 +817,7 @@ func TestRenderReviewTaskContext(t *testing.T) {
 		"gh pr view 99",
 		"git fetch origin main",
 		"git rebase origin/main",
+		"go test ./...", // test command
 	}
 
 	for _, check := range checks {
@@ -791,10 +836,13 @@ func TestRenderReviewTaskContextEmptyGoal(t *testing.T) {
 		PRNumber:     15,
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "org", "repo", "", nil)
+	ctx := renderReviewTaskContext(task, "main", "org", "repo", "", "", nil)
 
 	if strings.Contains(ctx, "Project Goal") {
 		t.Error("should not include project goal section when empty")
+	}
+	if strings.Contains(ctx, "Test command") {
+		t.Error("should not include test command section when empty")
 	}
 }
 
@@ -809,7 +857,7 @@ func TestBuildReviewClaudeArgs(t *testing.T) {
 	}
 
 	tools := []string{"Read", "Edit", "Write", "Bash(git *)"}
-	args := buildReviewClaudeArgs(task, "main", "org", "repo", "Project goal", 30, 2.00, tools, nil)
+	args := buildReviewClaudeArgs(task, "main", "org", "repo", "Project goal", "npm test", 30, 2.00, tools, nil)
 
 	// Should use --agent reviewer.
 	if args[0] != "--agent" || args[1] != "reviewer" {
@@ -994,7 +1042,7 @@ func TestPrintPrompts(t *testing.T) {
 
 	fmt.Printf("\n%s\n  REVIEW TASK CONTEXT (used with --agent reviewer)\n%s\n\n", sep, sep)
 	task.PRNumber = 123
-	fmt.Println(renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", nil))
+	fmt.Println(renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", "go test ./...", nil))
 
 	fmt.Printf("\n%s\n  BUILT-IN DEFAULT REVIEWER DEFINITION\n%s\n\n", sep, sep)
 	fmt.Print(defaultReviewerDef)
