@@ -841,6 +841,16 @@ func (s *Store) UpdateAutopilotTaskFailure(id int64, reason, detail string) erro
 	return err
 }
 
+// UpdateAutopilotTaskFailureInfo sets failure_reason and failure_detail without
+// changing the task status. Used by the review agent to record why a review failed
+// while still allowing the task to transition to "reviewed".
+func (s *Store) UpdateAutopilotTaskFailureInfo(id int64, reason, detail string) error {
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks SET failure_reason = ?, failure_detail = ? WHERE id = ?
+	`, reason, detail, id)
+	return err
+}
+
 // UpdateAutopilotTaskDeps updates the dependencies JSON for a task.
 func (s *Store) UpdateAutopilotTaskDeps(id int64, deps string) error {
 	_, err := s.db.Exec(`UPDATE autopilot_tasks SET dependencies = ? WHERE id = ?`, deps, id)

@@ -116,15 +116,16 @@ type Supervisor struct {
 	repo      string
 	ghToken   string
 
-	mu         sync.Mutex
-	slots      []*slotState // len == maxAgents; nil = idle
-	active     bool
-	paused     bool // when true, fillSlots returns early
-	preparedAt time.Time
-	events     chan Event
-	parentCtx  context.Context // parent context for the session (used by slot goroutines for fillSlots)
-	cancel     context.CancelFunc
-	done       chan struct{}
+	mu            sync.Mutex
+	slots         []*slotState // len == maxAgents; nil = idle
+	active        bool
+	paused        bool // when true, fillSlots returns early
+	preparedAt    time.Time
+	events        chan Event
+	parentCtx     context.Context // parent context for the session (used by slot goroutines for fillSlots)
+	cancel        context.CancelFunc
+	done          chan struct{}
+	reviewRetries map[int64]int // in-memory retry count for review agent transient failures
 }
 
 // New creates a new Supervisor.
@@ -134,15 +135,16 @@ func New(store *db.Store, project *db.Project, completer claudecli.Completer, re
 		maxAgents = 3
 	}
 	return &Supervisor{
-		store:     store,
-		project:   project,
-		completer: completer,
-		repoDir:   repoDir,
-		owner:     owner,
-		repo:      repo,
-		ghToken:   ghToken,
-		slots:     make([]*slotState, maxAgents),
-		events:    make(chan Event, 64),
+		store:         store,
+		project:       project,
+		completer:     completer,
+		repoDir:       repoDir,
+		owner:         owner,
+		repo:          repo,
+		ghToken:       ghToken,
+		slots:         make([]*slotState, maxAgents),
+		events:        make(chan Event, 64),
+		reviewRetries: make(map[int64]int),
 	}
 }
 
@@ -2347,6 +2349,11 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	}
 }
 
+// defaultReviewMaxRetries is the default number of transient-failure retries
+// before giving up on a review agent. Resource exhaustion and bails don't count.
+// Configurable per-project via autopilot_review_max_retries.
+const defaultReviewMaxRetries = 1
+
 // checkReviewTasks checks tasks in "review" and "reviewed" status.
 // For "review" tasks: spawns a review agent if a slot is available.
 // For "reviewed" tasks (and "review" tasks that weren't picked up): checks if PRs were merged.
@@ -2367,40 +2374,74 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 
 		switch task.Status {
 		case "review":
-			// Try to spawn a review agent if a slot is available.
+			// Try to spawn a review agent if a slot is available and retries not exhausted.
 			if s.hasIdleSlot() && s.project.AutopilotReviewMaxTurns != nil {
+				retries := s.getReviewRetries(task.ID)
+				if retries >= s.reviewMaxRetries() {
+					// Retries exhausted — give up on automated review.
+					_ = s.store.UpdateAutopilotTaskFailureInfo(task.ID, "review_retries_exhausted",
+						fmt.Sprintf("failed %d times due to transient errors", retries))
+					_ = s.store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+					s.emitEvent("error", fmt.Sprintf("Review retries exhausted for #%d (PR #%d) — %d transient failures",
+						task.IssueNumber, task.PRNumber, retries), &task)
+					continue
+				}
 				s.spawnReviewAgent(ctx, task)
 				continue // Don't check merge status — the review agent is handling it.
 			}
 
 			// No slot available or review not configured — check for merge.
-			item, err := ghClient.FetchItem(ctx, s.owner, s.repo, task.PRNumber)
-			if err != nil {
-				continue
-			}
-			if item.State == "merged" || item.State == "closed" {
-				_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
-				ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+			if ok := s.promoteIfMerged(ctx, ghClient, task); ok {
 				promoted++
-				s.emitEvent("completed", fmt.Sprintf("PR #%d for issue #%d merged — dependents unblocked", task.PRNumber, task.IssueNumber), &task)
 			}
 
 		case "reviewed":
 			// Review agent finished — check if PR was merged.
-			item, err := ghClient.FetchItem(ctx, s.owner, s.repo, task.PRNumber)
-			if err != nil {
-				continue
-			}
-			if item.State == "merged" || item.State == "closed" {
-				_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
-				ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+			if ok := s.promoteIfMerged(ctx, ghClient, task); ok {
 				promoted++
-				s.emitEvent("completed", fmt.Sprintf("PR #%d for issue #%d merged — dependents unblocked", task.PRNumber, task.IssueNumber), &task)
 			}
 		}
 	}
 
 	return promoted
+}
+
+// promoteIfMerged checks if a task's PR has been merged or closed, and if so
+// promotes the task to "done" and cleans up labels. Returns true if promoted.
+func (s *Supervisor) promoteIfMerged(ctx context.Context, ghClient *ghpkg.Client, task db.AutopilotTask) bool {
+	item, err := ghClient.FetchItem(ctx, s.owner, s.repo, task.PRNumber)
+	if err != nil {
+		return false
+	}
+	if item.State == "merged" || item.State == "closed" {
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
+		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+		s.emitEvent("completed", fmt.Sprintf("PR #%d for issue #%d merged — dependents unblocked", task.PRNumber, task.IssueNumber), &task)
+		return true
+	}
+	return false
+}
+
+// incrReviewRetry increments the in-memory retry counter for a review task.
+func (s *Supervisor) incrReviewRetry(taskID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reviewRetries[taskID]++
+}
+
+// getReviewRetries returns the current retry count for a review task.
+func (s *Supervisor) getReviewRetries(taskID int64) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reviewRetries[taskID]
+}
+
+// reviewMaxRetries returns the effective max review retries for the project.
+func (s *Supervisor) reviewMaxRetries() int {
+	if s.project.AutopilotReviewMaxRetries != nil {
+		return *s.project.AutopilotReviewMaxRetries
+	}
+	return defaultReviewMaxRetries
 }
 
 // spawnReviewAgent launches a review agent for a task in "review" status.
@@ -2413,15 +2454,21 @@ func (s *Supervisor) spawnReviewAgent(ctx context.Context, task db.AutopilotTask
 	// Restore worktree if it doesn't exist.
 	if _, err := os.Stat(task.WorktreePath); os.IsNotExist(err) {
 		if !gitpkg.BranchExists(s.repoDir, task.Branch) {
-			s.emitEvent("error", fmt.Sprintf("Cannot review #%d: branch %s not found locally or on remote", task.IssueNumber, task.Branch), &task)
+			s.incrReviewRetry(task.ID)
+			s.emitEvent("error", fmt.Sprintf("Cannot review #%d: branch %s not found locally or on remote (retry %d/%d)",
+				task.IssueNumber, task.Branch, s.getReviewRetries(task.ID), s.reviewMaxRetries()), &task)
 			return
 		}
 		if err := os.MkdirAll(filepath.Dir(task.WorktreePath), 0755); err != nil {
-			s.emitEvent("error", fmt.Sprintf("Failed to create worktree dir for review of #%d: %v", task.IssueNumber, err), &task)
+			s.incrReviewRetry(task.ID)
+			s.emitEvent("error", fmt.Sprintf("Failed to create worktree dir for review of #%d: %v (retry %d/%d)",
+				task.IssueNumber, err, s.getReviewRetries(task.ID), s.reviewMaxRetries()), &task)
 			return
 		}
 		if err := gitpkg.WorktreeAddExisting(s.repoDir, task.WorktreePath, task.Branch); err != nil {
-			s.emitEvent("error", fmt.Sprintf("Failed to restore worktree for review of #%d: %v", task.IssueNumber, err), &task)
+			s.incrReviewRetry(task.ID)
+			s.emitEvent("error", fmt.Sprintf("Failed to restore worktree for review of #%d: %v (retry %d/%d)",
+				task.IssueNumber, err, s.getReviewRetries(task.ID), s.reviewMaxRetries()), &task)
 			return
 		}
 	}
@@ -2467,6 +2514,9 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 		s.mu.Lock()
 		s.slots[slotIdx] = nil
 		s.mu.Unlock()
+		// Re-evaluate blocked tasks and fill slots with newly unblocked work.
+		s.unblockSatisfiedTasks()
+		s.fillSlots(s.parentCtx)
 	}()
 
 	home, _ := os.UserHomeDir()
@@ -2475,7 +2525,8 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 	logDir := filepath.Join(home, ".agent-minder", "agents")
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to create agents dir for review of #%d: %v", task.IssueNumber, err), task)
-		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert to review
+		s.incrReviewRetry(task.ID)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert to review for retry
 		return
 	}
 
@@ -2486,7 +2537,8 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 	agentDefSource, err := ensureAgentDefByName(task.WorktreePath, AgentReviewer)
 	if err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to resolve reviewer agent def for #%d: %v", task.IssueNumber, err), task)
-		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert
+		s.incrReviewRetry(task.ID)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert for retry
 		return
 	}
 	s.emitEvent("info", fmt.Sprintf("Reviewer def: %s", agentDefSource.DescriptionFor(AgentReviewer)), task)
@@ -2523,7 +2575,8 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to open review log for #%d: %v", task.IssueNumber, err), task)
-		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert
+		s.incrReviewRetry(task.ID)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert for retry
 		return
 	}
 	defer func() { _ = logFile.Close() }()
@@ -2536,7 +2589,8 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to get stdout pipe for review of #%d: %v", task.IssueNumber, err), task)
-		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert
+		s.incrReviewRetry(task.ID)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert for retry
 		return
 	}
 
@@ -2548,7 +2602,8 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 
 	if err := cmd.Start(); err != nil {
 		s.emitEvent("error", fmt.Sprintf("Failed to start review agent for #%d: %v", task.IssueNumber, err), task)
-		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert
+		s.incrReviewRetry(task.ID)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review") // revert for retry
 		return
 	}
 
@@ -2560,7 +2615,7 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 	}()
 
 	// Wait for process to finish.
-	err = cmd.Wait()
+	_ = cmd.Wait()
 	<-scanDone
 
 	// Check if stopped by user.
@@ -2574,27 +2629,44 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 		return
 	}
 
-	// Parse agent log for risk assessment.
+	// Parse agent log and classify outcome.
 	agentResult, _ := parseAgentLog(logPath)
 	if agentResult != nil && agentResult.TotalCost > 0 {
 		_ = s.store.UpdateAutopilotTaskCost(task.ID, agentResult.TotalCost)
 	}
 
-	// Extract risk level from the agent's text output.
-	riskLevel := parseReviewRisk(agentResult)
+	_, reason, detail := classifyOutcome(agentResult, maxTurns, maxBudget)
 
-	// Store the risk assessment and transition to reviewed.
-	_ = s.store.UpdateAutopilotTaskReview(task.ID, riskLevel, 0)
-	_ = s.store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+	switch {
+	case reason == "max_turns" || reason == "max_budget":
+		// Resource exhaustion — no retry, store failure, transition to reviewed.
+		_ = s.store.UpdateAutopilotTaskFailureInfo(task.ID, reason, detail)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+		s.emitEvent("completed", fmt.Sprintf("Review agent hit %s on #%d (PR #%d): %s — no retry",
+			reason, task.IssueNumber, task.PRNumber, detail), task)
 
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
+	case agentResult == nil || agentResult.Result == "":
+		// Bail — agent produced no output. No retry.
+		_ = s.store.UpdateAutopilotTaskFailureInfo(task.ID, "review_bail", "reviewer produced no output")
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+		s.emitEvent("completed", fmt.Sprintf("Review agent bailed on #%d (PR #%d) — no output, no retry",
+			task.IssueNumber, task.PRNumber), task)
+
+	case reason == "error":
+		// Explicit error from agent — treat as transient, revert for retry.
+		s.incrReviewRetry(task.ID)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "review")
+		s.emitEvent("error", fmt.Sprintf("Review agent errored on #%d (PR #%d): %s (retry %d/%d)",
+			task.IssueNumber, task.PRNumber, detail, s.getReviewRetries(task.ID), s.reviewMaxRetries()), task)
+
+	default:
+		// Success — parse risk and transition to reviewed.
+		riskLevel := parseReviewRisk(agentResult)
+		_ = s.store.UpdateAutopilotTaskReview(task.ID, riskLevel, 0)
+		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+		s.emitEvent("completed", fmt.Sprintf("Review agent finished #%d (PR #%d, risk: %s)",
+			task.IssueNumber, task.PRNumber, riskLevel), task)
 	}
-
-	s.emitEvent("completed", fmt.Sprintf("Review agent finished #%d (PR #%d, risk: %s, exit: %d)", task.IssueNumber, task.PRNumber, riskLevel, exitCode), task)
 
 	// Clean up worktree after review — it can be restored again if needed.
 	s.cleanup(task, false)

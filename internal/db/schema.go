@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 23
+const currentVersion = 24
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -343,6 +343,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 23 {
 		if err := migrateV23(db); err != nil {
 			return fmt.Errorf("apply migration v23: %w", err)
+		}
+	}
+
+	if version < 24 {
+		if err := migrateV24(db); err != nil {
+			return fmt.Errorf("apply migration v24: %w", err)
 		}
 	}
 
@@ -731,6 +737,14 @@ func migrateV23(db *sqlx.DB) error {
 	// Null-fill the boolean column so Go bool scanning works.
 	if _, err := db.Exec(`UPDATE projects SET autopilot_auto_merge = 0 WHERE autopilot_auto_merge IS NULL`); err != nil {
 		return fmt.Errorf("null-fill autopilot_auto_merge: %w", err)
+	}
+	return nil
+}
+
+func migrateV24(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN autopilot_review_max_retries INTEGER`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("add autopilot_review_max_retries: %w", err)
 	}
 	return nil
 }
