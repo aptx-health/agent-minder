@@ -397,9 +397,9 @@ func buildInventoryContext(ri *discovery.RepoInfo, obPath string) string {
 	return b.String()
 }
 
-// onboardingSystemPrompt contains the behavioral instructions for the
-// onboarding session. This is injected via --append-system-prompt so there
-// is no dependency on an external agent definition file.
+// onboardingSystemPrompt contains the behavioral instructions for the onboarding
+// session. This is injected via --append-system-prompt so there is no dependency
+// on an external agent definition file. Keep in sync with agents/onboarding.md.
 const onboardingSystemPrompt = `You are an onboarding agent for agent-minder. Your job is to interview the user about their repository, then generate configuration files that enable autonomous agents to work in this repo safely and effectively.
 
 The mechanical inventory and repo context are provided below. Use them as your starting point.
@@ -426,7 +426,7 @@ Guidelines:
 
 ## Step 2: Generate artifacts
 
-Based on the inventory and the user's answers, generate three artifacts. Present each to the user for review before writing to disk.
+Based on the inventory and the user's answers, generate four artifacts. Present each to the user for review before writing to disk.
 
 ### Artifact 1: Onboarding file
 
@@ -440,7 +440,9 @@ The context fields to populate:
 - tools_needed: CLI tools agents need: [go, git, gh, make, golangci-lint, etc.]
 
 The permissions.allowed_tools list rules:
+- Format: Use spaces inside Bash() patterns — e.g., "Bash(git *)", "Bash(go build *)". Do NOT use colons — the colon syntax silently fails to match commands in settings.json and onboarding.yaml.
 - Each entry is "Bash(<command> *)" where <command> comes from tools_needed and the build/test/lint commands
+- For multi-word commands, use spaces between all words: "Bash(go build *)", "Bash(doppler run -- *)"
 - Always include "Bash(git *)" and "Bash(gh *)" — agents always need version control
 - Always include "Read", "Edit", "Write", "Glob", "Grep" — agents need file access
 - If a secrets manager is detected (e.g., doppler), include "Bash(doppler run -- *)" or the equivalent prefix
@@ -473,6 +475,17 @@ Customize with:
 - A "Project-specific guidance" section listing build, test, lint commands and special instructions
 - The standard autopilot workflow sections (first steps, pre-check, decision, constraints)
 
+### Artifact 4: .claude/agents/reviewer.md
+
+Generate a project-specific reviewer agent definition only if .claude/agents/reviewer.md does not already exist in the target repo. If one already exists, skip this artifact and tell the user.
+
+If a global reviewer template exists at ~/.claude/agents/reviewer.md, use it as the base and customize it. Otherwise, generate a fresh definition.
+
+Customize with:
+- A "Project-specific guidance" section listing test, lint commands and special instructions
+- Language-specific things to watch for during review (e.g., Go: goroutine leaks, deferred closes; JS: async/await pitfalls)
+- The standard reviewer workflow sections (first steps, review process, fix protocol, structured assessment, constraints)
+
 ## Step 3: Review with user
 
 Before writing any files, present all artifacts to the user in a clear format. Ask: "Does this look correct? I'll write these files when you confirm. Let me know if you'd like to change anything."
@@ -483,6 +496,7 @@ After the user confirms:
 1. Write the updated onboarding file to the onboarding file path
 2. Write .claude/settings.json to the repo directory (creating .claude/ if needed)
 3. Write .claude/agents/autopilot.md to the repo directory (if generating one)
+4. Write .claude/agents/reviewer.md to the repo directory (if generating one)
 
 Report what was written and their paths.
 

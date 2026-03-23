@@ -135,8 +135,10 @@ func runRepoEnroll(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	prompt := buildEnrollmentPrompt(info, filePath, permFailures)
-	agentCmd := exec.Command(claudePath, "--agent", "onboarding", prompt)
+	enrollPrompt := buildEnrollmentPrompt(info, filePath, permFailures)
+	systemPrompt := onboardingSystemPrompt + "\n\n" + enrollPrompt
+	agentCmd := exec.Command(claudePath, "--append-system-prompt", systemPrompt,
+		"Begin the onboarding interview for this repository.")
 	agentCmd.Dir = info.Path
 	agentCmd.Stdin = os.Stdin
 	agentCmd.Stdout = os.Stdout
@@ -422,6 +424,7 @@ func printPostAgentSummary(repoDir string) {
 		{"Onboarding file", onboarding.FilePath(repoDir)},
 		{"Claude settings", filepath.Join(repoDir, ".claude", "settings.json")},
 		{"Autopilot agent", filepath.Join(repoDir, ".claude", "agents", "autopilot.md")},
+		{"Reviewer agent", filepath.Join(repoDir, ".claude", "agents", "reviewer.md")},
 	}
 
 	for _, a := range artifacts {
