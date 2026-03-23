@@ -2471,3 +2471,133 @@ func TestMigrateV20_CreatesDepGraphTable(t *testing.T) {
 		t.Errorf("unexpected dep graph after migration: %+v", dg)
 	}
 }
+
+func TestMigrateV23_ReviewAutomationColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	// Create a v22 database.
+	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	// Apply schemaV1 but set version to 22.
+	if _, err := conn.Exec(schemaV1); err != nil {
+		t.Fatalf("apply schema: %v", err)
+	}
+	// Drop v23 columns so migration can re-add them.
+	for _, col := range []string{"autopilot_auto_merge", "autopilot_review_max_turns", "autopilot_review_max_budget_usd"} {
+		if _, err := conn.Exec("ALTER TABLE projects DROP COLUMN " + col); err != nil {
+			t.Fatalf("drop column %s: %v", col, err)
+		}
+	}
+	for _, col := range []string{"review_risk", "review_comment_id"} {
+		if _, err := conn.Exec("ALTER TABLE autopilot_tasks DROP COLUMN " + col); err != nil {
+			t.Fatalf("drop column %s: %v", col, err)
+		}
+	}
+	if _, err := conn.Exec("INSERT INTO schema_version (version) VALUES (22)"); err != nil {
+		t.Fatalf("set version: %v", err)
+	}
+	_ = conn.Close()
+
+	// Re-open with Open() which will run migrations.
+	conn2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open with migration: %v", err)
+	}
+	defer func() { _ = conn2.Close() }()
+
+	store := NewStore(conn2)
+
+	// Verify project columns exist with defaults.
+	p := &Project{Name: "v23-test", GoalType: "feature", GoalDescription: "test"}
+	if err := store.CreateProject(p); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	got, err := store.GetProject("v23-test")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if got.AutopilotAutoMerge != false {
+		t.Errorf("AutopilotAutoMerge = %v, want false", got.AutopilotAutoMerge)
+	}
+	if got.AutopilotReviewMaxTurns != nil {
+		t.Errorf("AutopilotReviewMaxTurns = %v, want nil", got.AutopilotReviewMaxTurns)
+	}
+	if got.AutopilotReviewMaxBudgetUSD != nil {
+		t.Errorf("AutopilotReviewMaxBudgetUSD = %v, want nil", got.AutopilotReviewMaxBudgetUSD)
+	}
+
+	// Verify autopilot_tasks review columns.
+	task := &AutopilotTask{
+		ProjectID:   p.ID,
+		Owner:       "test",
+		Repo:        "test",
+		IssueNumber: 1,
+		IssueTitle:  "test issue",
+		Status:      "review",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+
+	// Update review fields.
+	if err := store.UpdateAutopilotTaskReview(task.ID, "low-risk", 12345); err != nil {
+		t.Fatalf("UpdateAutopilotTaskReview: %v", err)
+	}
+
+	// Verify the update.
+	tasks, err := store.GetAutopilotTasks(p.ID)
+	if err != nil {
+		t.Fatalf("GetAutopilotTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].ReviewRisk == nil || *tasks[0].ReviewRisk != "low-risk" {
+		t.Errorf("ReviewRisk = %v, want 'low-risk'", tasks[0].ReviewRisk)
+	}
+	if tasks[0].ReviewCommentID == nil || *tasks[0].ReviewCommentID != 12345 {
+		t.Errorf("ReviewCommentID = %v, want 12345", tasks[0].ReviewCommentID)
+	}
+
+	// Test reviewing/reviewed status transitions.
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "reviewing"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus(reviewing): %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].Status != "reviewing" {
+		t.Errorf("Status = %q, want 'reviewing'", tasks[0].Status)
+	}
+	if err := store.UpdateAutopilotTaskStatus(task.ID, "reviewed"); err != nil {
+		t.Fatalf("UpdateAutopilotTaskStatus(reviewed): %v", err)
+	}
+	tasks, _ = store.GetAutopilotTasks(p.ID)
+	if tasks[0].Status != "reviewed" {
+		t.Errorf("Status = %q, want 'reviewed'", tasks[0].Status)
+	}
+	// reviewed should set completed_at.
+	if tasks[0].CompletedAt == "" {
+		t.Errorf("CompletedAt should be set for 'reviewed' status")
+	}
+
+	// Test ReviewTasks query.
+	task2 := &AutopilotTask{
+		ProjectID:   p.ID,
+		Owner:       "test",
+		Repo:        "test",
+		IssueNumber: 2,
+		IssueTitle:  "another issue",
+		Status:      "review",
+	}
+	if err := store.CreateAutopilotTask(task2); err != nil {
+		t.Fatalf("CreateAutopilotTask: %v", err)
+	}
+	reviewTasks, err := store.ReviewTasks(p.ID)
+	if err != nil {
+		t.Fatalf("ReviewTasks: %v", err)
+	}
+	if len(reviewTasks) != 1 {
+		t.Errorf("ReviewTasks returned %d tasks, want 1", len(reviewTasks))
+	}
+}

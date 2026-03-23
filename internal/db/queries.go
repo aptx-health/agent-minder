@@ -35,14 +35,16 @@ func (s *Store) CreateProject(p *Project) error {
 			idle_pause_sec, analyzer_focus,
 			autopilot_filter_type, autopilot_filter_value, autopilot_max_agents,
 			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label,
-			autopilot_base_branch, is_deploy)
+			autopilot_base_branch, is_deploy,
+			autopilot_auto_merge, autopilot_review_max_turns, autopilot_review_max_budget_usd)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
 			:llm_summarizer_model, :llm_analyzer_model, :status_interval_sec, :analysis_interval_sec,
 			:idle_pause_sec, :analyzer_focus,
 			:autopilot_filter_type, :autopilot_filter_value, :autopilot_max_agents,
 			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label,
-			:autopilot_base_branch, :is_deploy)
+			:autopilot_base_branch, :is_deploy,
+			:autopilot_auto_merge, :autopilot_review_max_turns, :autopilot_review_max_budget_usd)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -108,7 +110,10 @@ func (s *Store) UpdateProject(p *Project) error {
 			autopilot_max_turns = :autopilot_max_turns,
 			autopilot_max_budget_usd = :autopilot_max_budget_usd,
 			autopilot_skip_label = :autopilot_skip_label,
-			autopilot_base_branch = :autopilot_base_branch
+			autopilot_base_branch = :autopilot_base_branch,
+			autopilot_auto_merge = :autopilot_auto_merge,
+			autopilot_review_max_turns = :autopilot_review_max_turns,
+			autopilot_review_max_budget_usd = :autopilot_review_max_budget_usd
 		WHERE id = :id
 	`, p)
 	return err
@@ -802,7 +807,7 @@ func (s *Store) GetAutopilotTasks(projectID int64) ([]AutopilotTask, error) {
 
 // UpdateAutopilotTaskStatus updates only the status and completed_at of an autopilot task.
 func (s *Store) UpdateAutopilotTaskStatus(id int64, status string) error {
-	if status == "done" || status == "bailed" || status == "stopped" || status == "failed" {
+	if status == "done" || status == "bailed" || status == "stopped" || status == "failed" || status == "reviewed" {
 		_, err := s.db.Exec(`
 			UPDATE autopilot_tasks SET status = ?, completed_at = datetime('now') WHERE id = ?
 		`, status, id)
@@ -1083,6 +1088,25 @@ func (s *Store) UpdateAutopilotTaskOverrides(id int64, maxTurns *int, maxBudget 
 func (s *Store) UpdateAutopilotTaskCost(id int64, costUSD float64) error {
 	_, err := s.db.Exec(`UPDATE autopilot_tasks SET cost_usd = ? WHERE id = ?`, costUSD, id)
 	return err
+}
+
+// UpdateAutopilotTaskReview sets the review risk and comment ID for a task.
+func (s *Store) UpdateAutopilotTaskReview(id int64, reviewRisk string, commentID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE autopilot_tasks SET review_risk = ?, review_comment_id = ? WHERE id = ?
+	`, reviewRisk, commentID, id)
+	return err
+}
+
+// ReviewTasks returns all tasks in "review" status (PR opened, awaiting review).
+func (s *Store) ReviewTasks(projectID int64) ([]AutopilotTask, error) {
+	var tasks []AutopilotTask
+	if err := s.db.Select(&tasks, `
+		SELECT * FROM autopilot_tasks WHERE project_id = ? AND status = 'review' ORDER BY issue_number
+	`, projectID); err != nil {
+		return nil, fmt.Errorf("review tasks: %w", err)
+	}
+	return tasks, nil
 }
 
 // --- Cost Aggregation ---

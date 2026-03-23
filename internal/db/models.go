@@ -8,34 +8,37 @@ import (
 
 // Project represents a monitored project.
 type Project struct {
-	ID                    int64   `db:"id"`
-	Name                  string  `db:"name"`
-	GoalType              string  `db:"goal_type"`
-	GoalDescription       string  `db:"goal_description"`
-	RefreshIntervalSec    int     `db:"refresh_interval_sec"`
-	MessageTTLSec         int     `db:"message_ttl_sec"`
-	AutoEnrollWorktrees   bool    `db:"auto_enroll_worktrees"`
-	MinderIdentity        string  `db:"minder_identity"`
-	LLMProvider           string  `db:"llm_provider"`
-	LLMModel              string  `db:"llm_model"`
-	LLMSummarizerModel    string  `db:"llm_summarizer_model"`
-	LLMAnalyzerModel      string  `db:"llm_analyzer_model"`
-	LLMSummarizerProvider string  `db:"llm_summarizer_provider"`
-	LLMAnalyzerProvider   string  `db:"llm_analyzer_provider"`
-	StatusIntervalSec     int     `db:"status_interval_sec"`
-	AnalysisIntervalSec   int     `db:"analysis_interval_sec"`
-	IdlePauseSec          int     `db:"idle_pause_sec"`
-	AnalyzerFocus         string  `db:"analyzer_focus"`
-	AutopilotFilterType   string  `db:"autopilot_filter_type"`  // deprecated, unused
-	AutopilotFilterValue  string  `db:"autopilot_filter_value"` // deprecated, unused
-	AutopilotMaxAgents    int     `db:"autopilot_max_agents"`
-	AutopilotMaxTurns     int     `db:"autopilot_max_turns"`
-	AutopilotMaxBudgetUSD float64 `db:"autopilot_max_budget_usd"`
-	AutopilotSkipLabel    string  `db:"autopilot_skip_label"`
-	AutopilotBaseBranch   string  `db:"autopilot_base_branch"`
-	IsDeploy              bool    `db:"is_deploy"`
-	AnalyzerSessionID     string  `db:"analyzer_session_id"`
-	CreatedAt             string  `db:"created_at"`
+	ID                          int64    `db:"id"`
+	Name                        string   `db:"name"`
+	GoalType                    string   `db:"goal_type"`
+	GoalDescription             string   `db:"goal_description"`
+	RefreshIntervalSec          int      `db:"refresh_interval_sec"`
+	MessageTTLSec               int      `db:"message_ttl_sec"`
+	AutoEnrollWorktrees         bool     `db:"auto_enroll_worktrees"`
+	MinderIdentity              string   `db:"minder_identity"`
+	LLMProvider                 string   `db:"llm_provider"`
+	LLMModel                    string   `db:"llm_model"`
+	LLMSummarizerModel          string   `db:"llm_summarizer_model"`
+	LLMAnalyzerModel            string   `db:"llm_analyzer_model"`
+	LLMSummarizerProvider       string   `db:"llm_summarizer_provider"`
+	LLMAnalyzerProvider         string   `db:"llm_analyzer_provider"`
+	StatusIntervalSec           int      `db:"status_interval_sec"`
+	AnalysisIntervalSec         int      `db:"analysis_interval_sec"`
+	IdlePauseSec                int      `db:"idle_pause_sec"`
+	AnalyzerFocus               string   `db:"analyzer_focus"`
+	AutopilotFilterType         string   `db:"autopilot_filter_type"`  // deprecated, unused
+	AutopilotFilterValue        string   `db:"autopilot_filter_value"` // deprecated, unused
+	AutopilotMaxAgents          int      `db:"autopilot_max_agents"`
+	AutopilotMaxTurns           int      `db:"autopilot_max_turns"`
+	AutopilotMaxBudgetUSD       float64  `db:"autopilot_max_budget_usd"`
+	AutopilotSkipLabel          string   `db:"autopilot_skip_label"`
+	AutopilotBaseBranch         string   `db:"autopilot_base_branch"`
+	IsDeploy                    bool     `db:"is_deploy"`
+	AnalyzerSessionID           string   `db:"analyzer_session_id"`
+	AutopilotAutoMerge          bool     `db:"autopilot_auto_merge"`
+	AutopilotReviewMaxTurns     *int     `db:"autopilot_review_max_turns"`
+	AutopilotReviewMaxBudgetUSD *float64 `db:"autopilot_review_max_budget_usd"`
+	CreatedAt                   string   `db:"created_at"`
 }
 
 // RefreshInterval returns the refresh interval as a time.Duration.
@@ -200,6 +203,9 @@ type AutopilotTask struct {
 
 	MaxTurnsOverride  *int     `db:"max_turns_override"`  // per-task turns override (nil = use project default)
 	MaxBudgetOverride *float64 `db:"max_budget_override"` // per-task budget override (nil = use project default)
+
+	ReviewRisk      *string `db:"review_risk"`       // risk assessment: "low-risk", "needs-testing", "suspect"
+	ReviewCommentID *int64  `db:"review_comment_id"` // GitHub PR comment ID for updating review comment
 }
 
 // EffectiveMaxTurns returns the per-task max turns override if set,
