@@ -172,6 +172,10 @@ func (m Model) renderAnalysisTab() string {
 		expandHint = "e: collapse"
 	}
 	b.WriteString(headerStyle().Render("Last Analysis"))
+	if !m.lastPollAt.IsZero() {
+		b.WriteString("  ")
+		b.WriteString(mutedStyle().Render(formatTimeAgo(m.lastPollAt)))
+	}
 	b.WriteString("  ")
 	b.WriteString(mutedStyle().Render(fmt.Sprintf("[%s]", expandHint)))
 	b.WriteString("  ")
