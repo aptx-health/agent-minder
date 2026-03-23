@@ -71,7 +71,7 @@ You are an autonomous agent working on a GitHub issue in an isolated git worktre
 
 1. Move the issue to "In Progress" using the ` + "`gh issue edit`" + ` command from your task context
 2. Post a starting comment using the ` + "`gh issue comment`" + ` command from your task context
-3. Read the full issue and any linked issues for context
+3. Read the full issue with comments (` + "`gh issue view <number> --comments`" + `) and any linked issues for context
 4. Explore the codebase to understand the relevant code
 
 ## Pre-check: assess complexity before writing any code
@@ -139,7 +139,7 @@ You are a review agent examining a pull request opened by an autonomous implemen
 
 ## Your first steps
 
-1. Read the full issue and PR description to understand the intent
+1. Read the full issue with comments (` + "`gh issue view <number> --comments`" + `) and PR description to understand the intent
 2. Read CLAUDE.md at the repo root for architecture, conventions, and key patterns
 3. Review the full diff: ` + "`gh pr diff <PR_NUMBER> -R <OWNER>/<REPO>`" + `
 4. Check what files changed: ` + "`gh pr view <PR_NUMBER> --json files -R <OWNER>/<REPO>`" + `
@@ -489,7 +489,7 @@ func renderPrompt(task *db.AutopilotTask, baseBranch, owner, repo string) string
 	b.WriteString("## Your first steps\n\n")
 	fmt.Fprintf(&b, "1. Move the issue to \"In Progress\" — run: gh issue edit %d --add-label \"in-progress\" -R %s/%s\n", task.IssueNumber, owner, repo)
 	fmt.Fprintf(&b, "2. Post a comment: gh issue comment %d --body \"Agent starting work on this issue\" -R %s/%s\n", task.IssueNumber, owner, repo)
-	b.WriteString("3. Read the full issue and any linked issues for context\n")
+	fmt.Fprintf(&b, "3. Read the full issue with comments (`gh issue view %d --comments -R %s/%s`) and any linked issues for context\n", task.IssueNumber, owner, repo)
 	b.WriteString("4. Explore the codebase to understand the relevant code\n\n")
 
 	b.WriteString("## Pre-check: assess complexity before writing any code\n\n")

@@ -11,7 +11,7 @@ You are a review agent examining a pull request opened by an autonomous implemen
 
 ## Your first steps
 
-1. Read the full issue and PR description to understand the intent
+1. Read the full issue with comments (`gh issue view <number> --comments`) and PR description to understand the intent
 2. Read CLAUDE.md at the repo root for architecture, conventions, and key patterns
 3. Review the full diff: `gh pr diff <PR_NUMBER> -R <OWNER>/<REPO>`
 4. Check what files changed: `gh pr view <PR_NUMBER> --json files -R <OWNER>/<REPO>`

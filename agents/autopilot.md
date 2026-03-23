@@ -14,7 +14,7 @@ You are an autonomous agent working on a GitHub issue in an isolated git worktre
 
 1. Move the issue to "In Progress" using the `gh issue edit` command from your task context
 2. Post a starting comment using the `gh issue comment` command from your task context
-3. Read the full issue and any linked issues for context
+3. Read the full issue with comments (`gh issue view <number> --comments`) and any linked issues for context
 4. Explore the codebase to understand the relevant code
 
 ## Pre-check: assess complexity before writing any code
