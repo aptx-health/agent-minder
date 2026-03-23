@@ -4238,6 +4238,139 @@ func TestCleanup_ReviewKeepsBranch(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// parseReviewRisk
+// ---------------------------------------------------------------------------
+
+func TestParseReviewRisk_Low(t *testing.T) {
+	result := &AgentResult{Result: "## Risk Assessment\n\n**Risk level:** low\n\n**Summary:** Clean implementation"}
+	got := parseReviewRisk(result)
+	if got != "low" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "low")
+	}
+}
+
+func TestParseReviewRisk_Medium(t *testing.T) {
+	result := &AgentResult{Result: "Some preamble\n\n**Risk level:** medium\n\nSome details"}
+	got := parseReviewRisk(result)
+	if got != "medium" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "medium")
+	}
+}
+
+func TestParseReviewRisk_High(t *testing.T) {
+	result := &AgentResult{Result: "**Risk level:** high\n\nLogic errors found"}
+	got := parseReviewRisk(result)
+	if got != "high" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "high")
+	}
+}
+
+func TestParseReviewRisk_NoMarker(t *testing.T) {
+	result := &AgentResult{Result: "This review found nothing special"}
+	got := parseReviewRisk(result)
+	if got != "unknown" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "unknown")
+	}
+}
+
+func TestParseReviewRisk_NilResult(t *testing.T) {
+	got := parseReviewRisk(nil)
+	if got != "unknown" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "unknown")
+	}
+}
+
+func TestParseReviewRisk_EmptyResult(t *testing.T) {
+	result := &AgentResult{Result: ""}
+	got := parseReviewRisk(result)
+	if got != "unknown" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "unknown")
+	}
+}
+
+func TestParseReviewRisk_PlainMarker(t *testing.T) {
+	// Without bold markdown markers.
+	result := &AgentResult{Result: "Risk level: low"}
+	got := parseReviewRisk(result)
+	if got != "low" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "low")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// checkReviewTasks — reviewing/reviewed status paths
+// ---------------------------------------------------------------------------
+
+func TestCheckReviewTasks_ReviewWithNoReviewConfig(t *testing.T) {
+	// When autopilot_review_max_turns is nil, review tasks should NOT spawn
+	// a review agent — they should just check for merge status.
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	// project.AutopilotReviewMaxTurns is nil by default.
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Test review",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "review")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 100)
+
+	// checkReviewTasks will try to fetch PR status via GitHub API which will fail
+	// with the fake token, so promoted should be 0 — but importantly, the task
+	// should NOT transition to "reviewing".
+	promoted := sup.checkReviewTasks(context.Background())
+	if promoted != 0 {
+		t.Errorf("promoted = %d, want 0", promoted)
+	}
+
+	// Verify task is still in "review" status (not "reviewing").
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID && tt.Status != "review" {
+			t.Errorf("task status = %q, want 'review' (should not spawn review without config)", tt.Status)
+		}
+	}
+}
+
+func TestLaunch_ReviewingTaskKeepsLoopAlive(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+
+	// Create a task in "reviewing" status — the loop should stay alive.
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Reviewing",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	_ = store.CreateAutopilotTask(task)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sup.Launch(ctx)
+
+	// Give the loop time to evaluate hasWork.
+	time.Sleep(200 * time.Millisecond)
+
+	// Loop should still be active because there's a "reviewing" task.
+	if !sup.IsActive() {
+		t.Error("supervisor exited prematurely — should stay alive for reviewing tasks")
+	}
+
+	cancel()
+	<-sup.Done()
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
