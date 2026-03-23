@@ -4238,6 +4238,915 @@ func TestCleanup_ReviewKeepsBranch(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// parseReviewRisk
+// ---------------------------------------------------------------------------
+
+func TestParseReviewRisk_Low(t *testing.T) {
+	result := &AgentResult{Result: "## Risk Assessment\n\n**Risk level:** low\n\n**Summary:** Clean implementation"}
+	got := parseReviewRisk(result)
+	if got != "low" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "low")
+	}
+}
+
+func TestParseReviewRisk_Medium(t *testing.T) {
+	result := &AgentResult{Result: "Some preamble\n\n**Risk level:** medium\n\nSome details"}
+	got := parseReviewRisk(result)
+	if got != "medium" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "medium")
+	}
+}
+
+func TestParseReviewRisk_High(t *testing.T) {
+	result := &AgentResult{Result: "**Risk level:** high\n\nLogic errors found"}
+	got := parseReviewRisk(result)
+	if got != "high" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "high")
+	}
+}
+
+func TestParseReviewRisk_NoMarker(t *testing.T) {
+	result := &AgentResult{Result: "This review found nothing special"}
+	got := parseReviewRisk(result)
+	if got != "unknown" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "unknown")
+	}
+}
+
+func TestParseReviewRisk_NilResult(t *testing.T) {
+	got := parseReviewRisk(nil)
+	if got != "unknown" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "unknown")
+	}
+}
+
+func TestParseReviewRisk_EmptyResult(t *testing.T) {
+	result := &AgentResult{Result: ""}
+	got := parseReviewRisk(result)
+	if got != "unknown" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "unknown")
+	}
+}
+
+func TestParseReviewRisk_PlainMarker(t *testing.T) {
+	// Without bold markdown markers.
+	result := &AgentResult{Result: "Risk level: low"}
+	got := parseReviewRisk(result)
+	if got != "low" {
+		t.Errorf("parseReviewRisk = %q, want %q", got, "low")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// checkReviewTasks — reviewing/reviewed status paths
+// ---------------------------------------------------------------------------
+
+func TestCheckReviewTasks_ReviewWithNoReviewConfig(t *testing.T) {
+	// When autopilot_review_max_turns is nil, review tasks should NOT spawn
+	// a review agent — they should just check for merge status.
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	// project.AutopilotReviewMaxTurns is nil by default.
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Test review",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "review")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 100)
+
+	// checkReviewTasks will try to fetch PR status via GitHub API which will fail
+	// with the fake token, so promoted should be 0 — but importantly, the task
+	// should NOT transition to "reviewing".
+	promoted := sup.checkReviewTasks(context.Background())
+	if promoted != 0 {
+		t.Errorf("promoted = %d, want 0", promoted)
+	}
+
+	// Verify task is still in "review" status (not "reviewing").
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID && tt.Status != "review" {
+			t.Errorf("task status = %q, want 'review' (should not spawn review without config)", tt.Status)
+		}
+	}
+}
+
+func TestLaunch_ReviewingTaskKeepsLoopAlive(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+
+	// Create a task in "reviewing" status — the loop should stay alive.
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Reviewing",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	_ = store.CreateAutopilotTask(task)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sup.Launch(ctx)
+
+	// Give the loop time to evaluate hasWork.
+	time.Sleep(200 * time.Millisecond)
+
+	// Loop should still be active because there's a "reviewing" task.
+	if !sup.IsActive() {
+		t.Error("supervisor exited prematurely — should stay alive for reviewing tasks")
+	}
+
+	cancel()
+	<-sup.Done()
+}
+
+// ---------------------------------------------------------------------------
+// Review agent failure classification
+// ---------------------------------------------------------------------------
+
+func TestCheckReviewTasks_RetriesExhausted(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	maxTurns := 10
+	project.AutopilotReviewMaxTurns = &maxTurns
+
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Test review retries",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "review")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 100)
+
+	// Exhaust retries.
+	for i := 0; i < defaultReviewMaxRetries; i++ {
+		sup.incrReviewRetry(task.ID)
+	}
+
+	// checkReviewTasks should transition to "reviewed" with failure info.
+	promoted := sup.checkReviewTasks(context.Background())
+	if promoted != 0 {
+		t.Errorf("promoted = %d, want 0", promoted)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("task status = %q, want 'reviewed'", tt.Status)
+			}
+			if tt.FailureReason != "review_retries_exhausted" {
+				t.Errorf("failure_reason = %q, want 'review_retries_exhausted'", tt.FailureReason)
+			}
+		}
+	}
+}
+
+func TestReviewClassifyOutcome_MaxTurns(t *testing.T) {
+	result := &AgentResult{
+		NumTurns:  10,
+		TotalCost: 0.5,
+		Result:    "partial review...",
+	}
+	status, reason, detail := classifyOutcome(result, 10, 2.0)
+	if status != "failed" || reason != "max_turns" {
+		t.Errorf("classifyOutcome = (%q, %q, %q), want (failed, max_turns, ...)", status, reason, detail)
+	}
+}
+
+func TestReviewClassifyOutcome_MaxBudget(t *testing.T) {
+	result := &AgentResult{
+		NumTurns:  3,
+		TotalCost: 1.95, // >= 2.0 * 0.95
+		Result:    "partial review...",
+	}
+	status, reason, detail := classifyOutcome(result, 10, 2.0)
+	if status != "failed" || reason != "max_budget" {
+		t.Errorf("classifyOutcome = (%q, %q, %q), want (failed, max_budget, ...)", status, reason, detail)
+	}
+}
+
+func TestReviewClassifyOutcome_Bail(t *testing.T) {
+	// nil result simulates agent that crashed/produced nothing.
+	status, reason, _ := classifyOutcome(nil, 10, 2.0)
+	if status != "" || reason != "" {
+		t.Errorf("classifyOutcome(nil) = (%q, %q), want empty (bail detected separately)", status, reason)
+	}
+}
+
+func TestReviewRetryHelpers(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+
+	if got := sup.getReviewRetries(42); got != 0 {
+		t.Errorf("initial retry count = %d, want 0", got)
+	}
+
+	sup.incrReviewRetry(42)
+	sup.incrReviewRetry(42)
+	if got := sup.getReviewRetries(42); got != 2 {
+		t.Errorf("retry count after 2 incrs = %d, want 2", got)
+	}
+
+	// Different task ID should be independent.
+	if got := sup.getReviewRetries(99); got != 0 {
+		t.Errorf("unrelated task retry count = %d, want 0", got)
+	}
+}
+
+func TestUpdateAutopilotTaskFailureInfo(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  42,
+		IssueTitle:   "Test failure info",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+
+	// Set failure info without changing status.
+	err := store.UpdateAutopilotTaskFailureInfo(task.ID, "max_turns", "used 10 of 10 turns")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			// Status should NOT have changed.
+			if tt.Status != "reviewing" {
+				t.Errorf("status = %q, want 'reviewing' (should not change)", tt.Status)
+			}
+			if tt.FailureReason != "max_turns" {
+				t.Errorf("failure_reason = %q, want 'max_turns'", tt.FailureReason)
+			}
+			if tt.FailureDetail != "used 10 of 10 turns" {
+				t.Errorf("failure_detail = %q, want 'used 10 of 10 turns'", tt.FailureDetail)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Review state transitions: reviewing → reviewed with failure classification
+// ---------------------------------------------------------------------------
+
+// TestReviewOutcome_MaxTurns_StoresFailureAndTransitions verifies that when a
+// review agent exhausts its turn limit, the task transitions to "reviewed" with
+// the failure_reason set to "max_turns" and failure_detail populated.
+func TestReviewOutcome_MaxTurns_StoresFailureAndTransitions(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	maxTurns := 10
+	project.AutopilotReviewMaxTurns = &maxTurns
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  55,
+		IssueTitle:   "Review max turns",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 200)
+
+	// Simulate what runReviewAgent does after agent completes with max turns.
+	result := &AgentResult{
+		NumTurns:  10,
+		TotalCost: 1.50,
+		Result:    "Partial review before running out of turns",
+	}
+	_, reason, detail := classifyOutcome(result, maxTurns, 2.0)
+
+	if reason != "max_turns" {
+		t.Fatalf("expected max_turns, got %q", reason)
+	}
+
+	_ = store.UpdateAutopilotTaskFailureInfo(task.ID, reason, detail)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+
+	// Verify DB state.
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+			if tt.FailureReason != "max_turns" {
+				t.Errorf("failure_reason = %q, want 'max_turns'", tt.FailureReason)
+			}
+			if !strings.Contains(tt.FailureDetail, "10") {
+				t.Errorf("failure_detail = %q, should mention turns used", tt.FailureDetail)
+			}
+		}
+	}
+}
+
+// TestReviewOutcome_MaxBudget_StoresFailureAndTransitions verifies budget
+// exhaustion stores the correct failure reason.
+func TestReviewOutcome_MaxBudget_StoresFailureAndTransitions(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	maxTurns := 20
+	project.AutopilotReviewMaxTurns = &maxTurns
+	maxBudget := 2.0
+	project.AutopilotReviewMaxBudgetUSD = &maxBudget
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  56,
+		IssueTitle:   "Review max budget",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 201)
+
+	result := &AgentResult{
+		NumTurns:  5,
+		TotalCost: 1.95, // >= 2.0 * 0.95
+		Result:    "Ran out of budget mid-review",
+	}
+	_, reason, detail := classifyOutcome(result, maxTurns, maxBudget)
+
+	if reason != "max_budget" {
+		t.Fatalf("expected max_budget, got %q", reason)
+	}
+
+	_ = store.UpdateAutopilotTaskFailureInfo(task.ID, reason, detail)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+			if tt.FailureReason != "max_budget" {
+				t.Errorf("failure_reason = %q, want 'max_budget'", tt.FailureReason)
+			}
+			if !strings.Contains(tt.FailureDetail, "$") {
+				t.Errorf("failure_detail = %q, should mention dollar amounts", tt.FailureDetail)
+			}
+		}
+	}
+}
+
+// TestReviewOutcome_Bail_NilResult verifies that a nil agent result (agent
+// crashed or never produced output) stores "review_bail" and transitions to reviewed.
+func TestReviewOutcome_Bail_NilResult(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  57,
+		IssueTitle:   "Review bail nil",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 202)
+
+	// nil result — agent crashed/no result event.
+	var result *AgentResult
+	_, reason, _ := classifyOutcome(result, 10, 2.0)
+
+	// classifyOutcome returns empty for nil — bail is detected separately.
+	if reason != "" {
+		t.Fatalf("expected empty reason for nil result, got %q", reason)
+	}
+
+	// Simulate the bail path in runReviewAgent.
+	_ = store.UpdateAutopilotTaskFailureInfo(task.ID, "review_bail", "reviewer produced no output")
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+			if tt.FailureReason != "review_bail" {
+				t.Errorf("failure_reason = %q, want 'review_bail'", tt.FailureReason)
+			}
+		}
+	}
+}
+
+// TestReviewOutcome_Bail_EmptyResult verifies that an agent result with empty
+// output text is treated as a bail.
+func TestReviewOutcome_Bail_EmptyResult(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  58,
+		IssueTitle:   "Review bail empty",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 203)
+
+	// Agent ran but produced no text output.
+	result := &AgentResult{
+		NumTurns:  3,
+		TotalCost: 0.20,
+		Result:    "",
+	}
+	_, reason, _ := classifyOutcome(result, 10, 2.0)
+	if reason != "" {
+		t.Fatalf("expected empty reason (no resource failure), got %q", reason)
+	}
+
+	// Empty result triggers bail path.
+	if result.Result != "" {
+		t.Fatal("expected empty result")
+	}
+
+	_ = store.UpdateAutopilotTaskFailureInfo(task.ID, "review_bail", "reviewer produced no output")
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+			if tt.FailureReason != "review_bail" {
+				t.Errorf("failure_reason = %q, want 'review_bail'", tt.FailureReason)
+			}
+		}
+	}
+}
+
+// TestReviewOutcome_Error_RevertsForRetry verifies that an explicit agent error
+// (IsError=true) reverts the task to "review" for retry, not to "reviewed".
+func TestReviewOutcome_Error_RevertsForRetry(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  59,
+		IssueTitle:   "Review error retry",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 204)
+
+	// Agent reported an explicit error.
+	result := &AgentResult{
+		NumTurns:  2,
+		TotalCost: 0.10,
+		IsError:   true,
+		Result:    "Something went wrong during review",
+	}
+	_, reason, _ := classifyOutcome(result, 10, 2.0)
+	if reason != "error" {
+		t.Fatalf("expected 'error' reason, got %q", reason)
+	}
+
+	// Simulate the transient-error path: increment retry, revert to review.
+	sup.incrReviewRetry(task.ID)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "review")
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "review" {
+				t.Errorf("status = %q, want 'review' (should revert for retry)", tt.Status)
+			}
+		}
+	}
+
+	// Retry counter should be 1.
+	if got := sup.getReviewRetries(task.ID); got != 1 {
+		t.Errorf("retry count = %d, want 1", got)
+	}
+}
+
+// TestReviewOutcome_Success_ParsesRisk verifies that a successful review
+// parses the risk level and transitions to "reviewed" with no failure info.
+func TestReviewOutcome_Success_ParsesRisk(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  60,
+		IssueTitle:   "Review success",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewing")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 205)
+
+	result := &AgentResult{
+		NumTurns:  5,
+		TotalCost: 0.80,
+		Result:    "## Risk Assessment\n\n**Risk level:** low\n\n**Summary:** Clean implementation, tests pass.",
+	}
+	_, reason, _ := classifyOutcome(result, 10, 2.0)
+	if reason != "" {
+		t.Fatalf("expected no failure, got reason %q", reason)
+	}
+
+	riskLevel := parseReviewRisk(result)
+	if riskLevel != "low" {
+		t.Fatalf("parseReviewRisk = %q, want 'low'", riskLevel)
+	}
+
+	_ = store.UpdateAutopilotTaskReview(task.ID, riskLevel, 0)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+			if tt.FailureReason != "" {
+				t.Errorf("failure_reason = %q, want empty (success)", tt.FailureReason)
+			}
+			if tt.ReviewRisk == nil || *tt.ReviewRisk != "low" {
+				t.Errorf("review_risk = %v, want 'low'", tt.ReviewRisk)
+			}
+		}
+	}
+}
+
+// TestReviewedTaskWithFailure_StillPromotesOnMerge verifies that a "reviewed"
+// task with a failure_reason (e.g., max_turns) still gets promoted to "done"
+// when its PR is merged. The failure info is historical — it shouldn't block
+// the merge-check path.
+func TestReviewedTaskWithFailure_StillPromotesOnMerge(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  61,
+		IssueTitle:   "Failed review but merged",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 206)
+	_ = store.UpdateAutopilotTaskFailureInfo(task.ID, "max_turns", "used 10 of 10 turns")
+
+	// checkReviewTasks will try to fetch PR status via GitHub API, which will
+	// fail with the fake token — so promoted will be 0. But the important thing
+	// is that the task enters the "reviewed" case and attempts the merge check,
+	// not that it's blocked by the failure_reason.
+	promoted := sup.checkReviewTasks(context.Background())
+
+	// We can't actually test promotion without a real GitHub API, but we verify
+	// the task is still in "reviewed" (not blocked or errored).
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed' (should remain, API call fails)", tt.Status)
+			}
+		}
+	}
+	_ = promoted // silence unused warning — the fetch fails so promoted is 0
+}
+
+// TestReviewRetries_BelowCap_AllowsSpawn verifies that when retry count is
+// below the cap, checkReviewTasks still attempts to spawn a review agent
+// (which will fail due to missing worktree/branch, but the point is it tries).
+func TestReviewRetries_BelowCap_AllowsSpawn(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	maxTurns := 10
+	project.AutopilotReviewMaxTurns = &maxTurns
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  62,
+		IssueTitle:   "Review retry below cap",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "review")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 207)
+
+	// Set retries to 1 below the cap.
+	for i := 0; i < defaultReviewMaxRetries-1; i++ {
+		sup.incrReviewRetry(task.ID)
+	}
+
+	// checkReviewTasks should try to spawn (will fail due to missing branch,
+	// but should NOT transition to "reviewed" — should stay in "review".
+	sup.checkReviewTasks(context.Background())
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status == "reviewed" {
+				t.Error("task should NOT be 'reviewed' — retries below cap, should still attempt spawn")
+			}
+		}
+	}
+}
+
+// TestReviewRetries_ExactlyAtCap_Exhausted verifies that when retry count
+// equals defaultReviewMaxRetries, the task transitions to "reviewed" with exhaustion.
+func TestReviewRetries_ExactlyAtCap_Exhausted(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	maxTurns := 10
+	project.AutopilotReviewMaxTurns = &maxTurns
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  63,
+		IssueTitle:   "Review retries exactly at cap",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "review")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 208)
+
+	// Set retries to exactly the cap.
+	for i := 0; i < defaultReviewMaxRetries; i++ {
+		sup.incrReviewRetry(task.ID)
+	}
+
+	sup.checkReviewTasks(context.Background())
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+			if tt.FailureReason != "review_retries_exhausted" {
+				t.Errorf("failure_reason = %q, want 'review_retries_exhausted'", tt.FailureReason)
+			}
+			if !strings.Contains(tt.FailureDetail, fmt.Sprintf("%d", defaultReviewMaxRetries)) {
+				t.Errorf("failure_detail = %q, should mention retry count", tt.FailureDetail)
+			}
+		}
+	}
+}
+
+// TestReviewOutcome_ErrorIsRetriable_NotBail verifies that an agent error
+// (IsError=true) does NOT get classified as a bail — it gets retried.
+func TestReviewOutcome_ErrorIsRetriable_NotBail(t *testing.T) {
+	result := &AgentResult{
+		NumTurns:  2,
+		TotalCost: 0.10,
+		IsError:   true,
+		Result:    "Permission denied accessing repository",
+	}
+	_, reason, _ := classifyOutcome(result, 10, 2.0)
+
+	// Should be classified as "error", NOT bail.
+	if reason != "error" {
+		t.Errorf("reason = %q, want 'error' (retriable)", reason)
+	}
+
+	// Also verify it has non-empty result so it wouldn't trigger the bail path.
+	if result.Result == "" {
+		t.Error("result text should be non-empty for this test case")
+	}
+}
+
+// TestReviewOutcome_ResourceExhaustion_NotRetriable verifies that max_turns
+// and max_budget failures are NOT treated as retriable errors.
+func TestReviewOutcome_ResourceExhaustion_NotRetriable(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    *AgentResult
+		maxTurns  int
+		maxBudget float64
+		wantRsn   string
+	}{
+		{
+			name:      "max_turns",
+			result:    &AgentResult{NumTurns: 10, TotalCost: 0.5, Result: "partial"},
+			maxTurns:  10,
+			maxBudget: 5.0,
+			wantRsn:   "max_turns",
+		},
+		{
+			name:      "max_budget",
+			result:    &AgentResult{NumTurns: 3, TotalCost: 4.80, Result: "partial"},
+			maxTurns:  50,
+			maxBudget: 5.0,
+			wantRsn:   "max_budget",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, reason, _ := classifyOutcome(tc.result, tc.maxTurns, tc.maxBudget)
+			if reason != tc.wantRsn {
+				t.Errorf("reason = %q, want %q", reason, tc.wantRsn)
+			}
+			// These should NOT trigger the error/retry path.
+			if reason == "error" {
+				t.Error("resource exhaustion should not be classified as retriable error")
+			}
+		})
+	}
+}
+
+// TestReviewedTaskKeepsLoopAlive verifies that tasks in "reviewed" status
+// keep the supervisor loop active (so merge checks continue).
+func TestReviewedTaskKeepsLoopAlive(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  64,
+		IssueTitle:   "Reviewed",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	_ = store.CreateAutopilotTask(task)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sup.Launch(ctx)
+
+	time.Sleep(200 * time.Millisecond)
+
+	if !sup.IsActive() {
+		t.Error("supervisor exited prematurely — should stay alive for reviewed tasks")
+	}
+
+	cancel()
+	<-sup.Done()
+}
+
+// TestReviewRetries_IndependentPerTask verifies that retry counters are
+// tracked independently per task ID.
+func TestReviewRetries_IndependentPerTask(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+
+	sup.incrReviewRetry(1)
+	sup.incrReviewRetry(1)
+	sup.incrReviewRetry(2)
+
+	if got := sup.getReviewRetries(1); got != 2 {
+		t.Errorf("task 1 retries = %d, want 2", got)
+	}
+	if got := sup.getReviewRetries(2); got != 1 {
+		t.Errorf("task 2 retries = %d, want 1", got)
+	}
+	if got := sup.getReviewRetries(3); got != 0 {
+		t.Errorf("task 3 retries = %d, want 0 (never incremented)", got)
+	}
+}
+
+// TestReviewMaxRetries_ProjectOverride verifies that the project-level
+// autopilot_review_max_retries setting overrides the default.
+func TestReviewMaxRetries_ProjectOverride(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	maxTurns := 10
+	project.AutopilotReviewMaxTurns = &maxTurns
+
+	// Default: 1 retry.
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+	if got := sup.reviewMaxRetries(); got != defaultReviewMaxRetries {
+		t.Errorf("default reviewMaxRetries = %d, want %d", got, defaultReviewMaxRetries)
+	}
+
+	// Override to 5.
+	five := 5
+	project.AutopilotReviewMaxRetries = &five
+	sup2 := New(store, project, nil, "/tmp/repo", "owner", "repo", "")
+	if got := sup2.reviewMaxRetries(); got != 5 {
+		t.Errorf("overridden reviewMaxRetries = %d, want 5", got)
+	}
+
+	// Override to 0 disables retries entirely.
+	zero := 0
+	project.AutopilotReviewMaxRetries = &zero
+	sup3 := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  70,
+		IssueTitle:   "Zero retries",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	_ = store.CreateAutopilotTask(task)
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "review")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 300)
+
+	// With zero max retries and zero current retries, should immediately exhaust.
+	sup3.checkReviewTasks(context.Background())
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed' (zero retries = immediate exhaustion)", tt.Status)
+			}
+			if tt.FailureReason != "review_retries_exhausted" {
+				t.Errorf("failure_reason = %q, want 'review_retries_exhausted'", tt.FailureReason)
+			}
+		}
+	}
+}
+
+// TestReviewOutcome_PermissionWarning_StillSucceeds verifies that permission
+// denials (a non-fatal warning) don't prevent a successful review — the risk
+// is still parsed and the task transitions to "reviewed" normally.
+func TestReviewOutcome_PermissionWarning_StillSucceeds(t *testing.T) {
+	result := &AgentResult{
+		NumTurns:          5,
+		TotalCost:         0.50,
+		Result:            "**Risk level:** medium\n\nSome concerns found.",
+		PermissionDenials: []json.RawMessage{json.RawMessage(`"Bash(rm -rf /)")`)},
+	}
+	status, reason, _ := classifyOutcome(result, 10, 2.0)
+
+	// Should be "warning", not "failed" — permissions are non-fatal.
+	if status != "warning" {
+		t.Errorf("status = %q, want 'warning'", status)
+	}
+	if reason != "permissions" {
+		t.Errorf("reason = %q, want 'permissions'", reason)
+	}
+
+	// The review risk should still be parseable.
+	risk := parseReviewRisk(result)
+	if risk != "medium" {
+		t.Errorf("parseReviewRisk = %q, want 'medium'", risk)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 

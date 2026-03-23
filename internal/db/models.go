@@ -38,6 +38,7 @@ type Project struct {
 	AutopilotAutoMerge          bool     `db:"autopilot_auto_merge"`
 	AutopilotReviewMaxTurns     *int     `db:"autopilot_review_max_turns"`
 	AutopilotReviewMaxBudgetUSD *float64 `db:"autopilot_review_max_budget_usd"`
+	AutopilotReviewMaxRetries   *int     `db:"autopilot_review_max_retries"`
 	CreatedAt                   string   `db:"created_at"`
 }
 
