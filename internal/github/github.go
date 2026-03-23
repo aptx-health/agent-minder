@@ -305,6 +305,17 @@ func (c *Client) RemoveLabel(ctx context.Context, owner, repo string, number int
 	_, _ = c.gh.Issues.RemoveLabelForIssue(ctx, owner, repo, number, label)
 }
 
+// CreateComment posts a comment on an issue or PR and returns the comment ID.
+func (c *Client) CreateComment(ctx context.Context, owner, repo string, number int, body string) (int64, error) {
+	comment, _, err := c.gh.Issues.CreateComment(ctx, owner, repo, number, &github.IssueComment{
+		Body: github.Ptr(body),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("create comment: %w", err)
+	}
+	return comment.GetID(), nil
+}
+
 // ListMilestones returns open milestones for a repo.
 func (c *Client) ListMilestones(ctx context.Context, owner, repo string) ([]RepoChoice, error) {
 	var all []RepoChoice

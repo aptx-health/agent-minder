@@ -2416,6 +2416,10 @@ func (s *Supervisor) promoteIfMerged(ctx context.Context, ghClient *ghpkg.Client
 	if item.State == "merged" || item.State == "closed" {
 		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+		// Clean up the risk label from the PR (if one was applied).
+		if task.ReviewRisk != nil && *task.ReviewRisk != "" {
+			ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, *task.ReviewRisk)
+		}
 		s.emitEvent("completed", fmt.Sprintf("PR #%d for issue #%d merged — dependents unblocked", task.PRNumber, task.IssueNumber), &task)
 		return true
 	}
@@ -2660,12 +2664,31 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 			task.IssueNumber, task.PRNumber, detail, s.getReviewRetries(task.ID), s.reviewMaxRetries()), task)
 
 	default:
-		// Success — parse risk and transition to reviewed.
+		// Success — parse risk, post structured comment, apply label, transition to reviewed.
 		riskLevel := parseReviewRisk(agentResult)
-		_ = s.store.UpdateAutopilotTaskReview(task.ID, riskLevel, 0)
+		label := riskToLabel(riskLevel)
+
+		// Post structured review comment to the PR and apply risk label.
+		var commentID int64
+		ghClient := ghpkg.NewClient(s.ghToken)
+		body := formatReviewComment(agentResult.Result, label)
+		if cid, err := ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber, body); err != nil {
+			s.emitEvent("error", fmt.Sprintf("Failed to post review comment on PR #%d: %v", task.PRNumber, err), task)
+		} else {
+			commentID = cid
+		}
+		// Remove any previously applied risk labels, then apply the current one.
+		for _, old := range riskLabels {
+			ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, old)
+		}
+		if err := ghClient.AddLabel(ctx, s.owner, s.repo, task.PRNumber, label); err != nil {
+			s.emitEvent("error", fmt.Sprintf("Failed to apply label %q to PR #%d: %v", label, task.PRNumber, err), task)
+		}
+
+		_ = s.store.UpdateAutopilotTaskReview(task.ID, label, commentID)
 		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
 		s.emitEvent("completed", fmt.Sprintf("Review agent finished #%d (PR #%d, risk: %s)",
-			task.IssueNumber, task.PRNumber, riskLevel), task)
+			task.IssueNumber, task.PRNumber, label), task)
 	}
 
 	// Clean up worktree after review — it can be restored again if needed.
@@ -2704,6 +2727,57 @@ func parseReviewRisk(result *AgentResult) string {
 	}
 
 	return "unknown"
+}
+
+// riskLabels is the set of all risk-tier labels that may be applied to a PR.
+// Used to remove stale labels before applying the current assessment.
+var riskLabels = []string{"low-risk", "needs-testing", "suspect"}
+
+// riskToLabel maps the reviewer agent's risk level to a PR label.
+// low → low-risk, medium → needs-testing, high → suspect.
+// Unknown or unrecognized levels map to "needs-testing" as the safe default.
+func riskToLabel(risk string) string {
+	switch risk {
+	case "low":
+		return "low-risk"
+	case "medium":
+		return "needs-testing"
+	case "high":
+		return "suspect"
+	default:
+		return "needs-testing"
+	}
+}
+
+// formatReviewComment builds a structured markdown comment for a PR review.
+// It wraps the reviewer agent's output with a prominent risk tier header.
+func formatReviewComment(agentOutput, label string) string {
+	var b strings.Builder
+
+	// Prominent risk tier header.
+	emoji := "⚠️"
+	recommendation := "Test first"
+	switch label {
+	case "low-risk":
+		emoji = "✅"
+		recommendation = "Merge"
+	case "needs-testing":
+		emoji = "⚠️"
+		recommendation = "Test first"
+	case "suspect":
+		emoji = "🔴"
+		recommendation = "Needs rework"
+	}
+
+	fmt.Fprintf(&b, "## %s Automated Review — `%s`\n\n", emoji, label)
+	fmt.Fprintf(&b, "**Recommendation:** %s\n\n", recommendation)
+	fmt.Fprintf(&b, "---\n\n")
+
+	// Include the agent's structured assessment.
+	b.WriteString(strings.TrimSpace(agentOutput))
+	b.WriteString("\n\n---\n*Reviewed by agent-minder autopilot reviewer*\n")
+
+	return b.String()
 }
 
 // unblockSatisfiedTasks re-evaluates blocked tasks and promotes them to queued
