@@ -140,6 +140,34 @@ tools: Bash, Read, Edit, Write, Glob, Grep
 ---
 ```
 
+### Artifact 4: `.claude/agents/reviewer.md`
+
+Generate a project-specific reviewer agent definition **only if** `.claude/agents/reviewer.md` does not already exist in the target repo.
+
+If one already exists, skip this artifact and tell the user.
+
+If a global reviewer template exists at `~/.claude/agents/reviewer.md`, use it as the base and customize it. Otherwise, generate a fresh definition using the standard reviewer structure below.
+
+Customize with:
+- A "Project-specific guidance" section listing:
+  - Test command(s) from the onboarding context
+  - Lint command(s) from the onboarding context
+  - Any special instructions (secrets, services, constraints)
+  - Language-specific things to watch for during review (e.g., Go: goroutine leaks, deferred closes; JS: async/await pitfalls)
+- The standard reviewer workflow sections (first steps, review process, fix protocol, structured assessment, constraints)
+
+Use the same YAML frontmatter format:
+
+```yaml
+---
+name: reviewer
+description: >
+  Reviews PRs for correctness, test coverage, issue alignment, and code quality.
+  Project-specific configuration for <project-name>.
+tools: Bash, Read, Edit, Write, Glob, Grep
+---
+```
+
 ## Step 3: Review with user
 
 Before writing any files, present all artifacts to the user in a clear format:
@@ -147,6 +175,7 @@ Before writing any files, present all artifacts to the user in a clear format:
 1. Show the updated onboarding file `context` and `permissions` sections
 2. Show the `.claude/settings.json` that will be derived from the permissions
 3. Show the autopilot agent definition (if generating one)
+4. Show the reviewer agent definition (if generating one)
 
 Ask: "Does this look correct? I'll write these files when you confirm. Let me know if you'd like to change anything."
 
@@ -157,6 +186,7 @@ After the user confirms:
 1. Write the updated onboarding file to the onboarding file path provided in your context
 2. Write `.claude/settings.json` to the repo directory (creating `.claude/` if needed)
 3. Write `.claude/agents/autopilot.md` to the repo directory (if generating one, creating directories if needed)
+4. Write `.claude/agents/reviewer.md` to the repo directory (if generating one, creating directories if needed)
 
 Report what was written and their paths.
 

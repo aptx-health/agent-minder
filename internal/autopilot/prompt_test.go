@@ -377,6 +377,25 @@ func TestDefaultAgentDefContent(t *testing.T) {
 	}
 }
 
+func TestDefaultReviewerDefContent(t *testing.T) {
+	checks := []string{
+		"name: reviewer",
+		"tools: Bash, Read, Edit, Write, Glob, Grep",
+		"Review process",
+		"Fix protocol",
+		"Risk Assessment",
+		"APPROVE | REQUEST_CHANGES",
+		"Structured assessment",
+		"Rebase and conflict resolution",
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(defaultReviewerDef, check) {
+			t.Errorf("defaultReviewerDef missing expected content: %q", check)
+		}
+	}
+}
+
 func TestDefaultAgentDefMatchesRepoFile(t *testing.T) {
 	// Ensure the embedded defaultAgentDef constant stays in sync with agents/autopilot.md.
 	// The repo file is at <project-root>/agents/autopilot.md; from this test package
@@ -388,6 +407,17 @@ func TestDefaultAgentDefMatchesRepoFile(t *testing.T) {
 	}
 	if string(data) != defaultAgentDef {
 		t.Error("defaultAgentDef constant has drifted from agents/autopilot.md — update one to match the other")
+	}
+}
+
+func TestDefaultReviewerDefMatchesRepoFile(t *testing.T) {
+	repoFile := filepath.Join("..", "..", "agents", "reviewer.md")
+	data, err := os.ReadFile(repoFile)
+	if err != nil {
+		t.Fatalf("cannot read repo reviewer def file %s: %v (run tests from project root)", repoFile, err)
+	}
+	if string(data) != defaultReviewerDef {
+		t.Error("defaultReviewerDef constant has drifted from agents/reviewer.md — update one to match the other")
 	}
 }
 
@@ -632,6 +662,203 @@ func TestBuildResumeClaudeArgs(t *testing.T) {
 	}
 }
 
+func TestDetectAgentDefByName(t *testing.T) {
+	fakeHome := t.TempDir()
+	origHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return fakeHome, nil }
+	t.Cleanup(func() { userHomeDir = origHomeDir })
+
+	t.Run("detects repo-level reviewer", func(t *testing.T) {
+		dir := t.TempDir()
+		agentDir := filepath.Join(dir, ".claude", "agents")
+		if err := os.MkdirAll(agentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(agentDir, "reviewer.md"), []byte("repo reviewer"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		if source := DetectAgentDefByName(dir, AgentReviewer); source != AgentDefRepo {
+			t.Errorf("expected %q, got %q", AgentDefRepo, source)
+		}
+	})
+
+	t.Run("detects user-level reviewer", func(t *testing.T) {
+		dir := t.TempDir()
+		userAgentDir := filepath.Join(fakeHome, ".claude", "agents")
+		if err := os.MkdirAll(userAgentDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userAgentDir, "reviewer.md"), []byte("user reviewer"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(filepath.Join(fakeHome, ".claude")) })
+
+		if source := DetectAgentDefByName(dir, AgentReviewer); source != AgentDefUser {
+			t.Errorf("expected %q, got %q", AgentDefUser, source)
+		}
+	})
+
+	t.Run("falls back to built-in for reviewer", func(t *testing.T) {
+		dir := t.TempDir()
+
+		if source := DetectAgentDefByName(dir, AgentReviewer); source != AgentDefBuiltIn {
+			t.Errorf("expected %q, got %q", AgentDefBuiltIn, source)
+		}
+	})
+}
+
+func TestEnsureAgentDefByName(t *testing.T) {
+	fakeHome := t.TempDir()
+	origHomeDir := userHomeDir
+	userHomeDir = func() (string, error) { return fakeHome, nil }
+	t.Cleanup(func() { userHomeDir = origHomeDir })
+
+	t.Run("installs reviewer built-in to worktree", func(t *testing.T) {
+		worktree := t.TempDir()
+
+		source, err := ensureAgentDefByName(worktree, AgentReviewer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if source != AgentDefBuiltIn {
+			t.Errorf("expected %q, got %q", AgentDefBuiltIn, source)
+		}
+
+		written := filepath.Join(worktree, ".claude", "agents", "reviewer.md")
+		data, err := os.ReadFile(written)
+		if err != nil {
+			t.Fatalf("reviewer def not written: %v", err)
+		}
+		if !strings.Contains(string(data), "name: reviewer") {
+			t.Error("written file missing reviewer frontmatter")
+		}
+		if !strings.Contains(string(data), "Review process") {
+			t.Error("written file missing review instructions")
+		}
+	})
+
+	t.Run("unknown agent name returns error", func(t *testing.T) {
+		worktree := t.TempDir()
+
+		_, err := ensureAgentDefByName(worktree, AgentName("nonexistent"))
+		if err == nil {
+			t.Error("expected error for unknown agent name")
+		}
+	})
+}
+
+func TestRenderReviewTaskContext(t *testing.T) {
+	task := &db.AutopilotTask{
+		IssueNumber:  42,
+		IssueTitle:   "Add user authentication",
+		IssueBody:    "Implement OAuth2 login flow",
+		WorktreePath: "/home/user/.agent-minder/worktrees/myproject/issue-42",
+		Branch:       "agent/issue-42",
+		PRNumber:     99,
+	}
+
+	ctx := renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform")
+
+	checks := []string{
+		"#99", // PR number
+		"#42", // Issue number
+		"Add user authentication",
+		"myorg/myrepo",
+		"agent/issue-42",
+		"main",
+		"OAuth2 login flow",
+		"Build a secure healthcare platform",
+		"gh pr diff 99",
+		"gh pr view 99",
+		"git fetch origin main",
+		"git rebase origin/main",
+	}
+
+	for _, check := range checks {
+		if !strings.Contains(ctx, check) {
+			t.Errorf("review task context missing: %q", check)
+		}
+	}
+}
+
+func TestRenderReviewTaskContextEmptyGoal(t *testing.T) {
+	task := &db.AutopilotTask{
+		IssueNumber:  10,
+		IssueTitle:   "Fix bug",
+		WorktreePath: "/tmp/wt",
+		Branch:       "agent/issue-10",
+		PRNumber:     15,
+	}
+
+	ctx := renderReviewTaskContext(task, "main", "org", "repo", "")
+
+	if strings.Contains(ctx, "Project Goal") {
+		t.Error("should not include project goal section when empty")
+	}
+}
+
+func TestBuildReviewClaudeArgs(t *testing.T) {
+	task := &db.AutopilotTask{
+		IssueNumber:  42,
+		IssueTitle:   "Test issue",
+		IssueBody:    "Body",
+		WorktreePath: "/tmp/wt",
+		Branch:       "agent/issue-42",
+		PRNumber:     99,
+	}
+
+	tools := []string{"Read", "Edit", "Write", "Bash(git *)"}
+	args := buildReviewClaudeArgs(task, "main", "org", "repo", "Project goal", 30, 2.00, tools)
+
+	// Should use --agent reviewer.
+	if args[0] != "--agent" || args[1] != "reviewer" {
+		t.Errorf("expected '--agent reviewer', got %q %q", args[0], args[1])
+	}
+
+	joined := strings.Join(args, " ")
+
+	if !strings.Contains(joined, "--output-format stream-json") {
+		t.Error("should include --output-format stream-json")
+	}
+	if !strings.Contains(joined, "--max-turns 30") {
+		t.Error("should include --max-turns 30")
+	}
+	if !strings.Contains(joined, "--max-budget-usd 2.00") {
+		t.Error("should include --max-budget-usd 2.00")
+	}
+
+	// Prompt should contain review context.
+	prompt := args[len(args)-1]
+	if !strings.Contains(prompt, "#99") {
+		t.Error("prompt should contain PR number")
+	}
+	if !strings.Contains(prompt, "#42") {
+		t.Error("prompt should contain issue number")
+	}
+	if !strings.Contains(prompt, "Project goal") {
+		t.Error("prompt should contain project goal")
+	}
+}
+
+func TestDescriptionFor(t *testing.T) {
+	tests := []struct {
+		source AgentDefSource
+		name   AgentName
+		want   string
+	}{
+		{AgentDefRepo, AgentAutopilot, "repo-level (.claude/agents/autopilot.md)"},
+		{AgentDefRepo, AgentReviewer, "repo-level (.claude/agents/reviewer.md)"},
+		{AgentDefUser, AgentReviewer, "user-level (~/.claude/agents/reviewer.md)"},
+		{AgentDefBuiltIn, AgentReviewer, "built-in default (will be installed to worktrees)"},
+	}
+	for _, tt := range tests {
+		if got := tt.source.DescriptionFor(tt.name); got != tt.want {
+			t.Errorf("DescriptionFor(%q, %q) = %q, want %q", tt.source, tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestPrintPrompts(t *testing.T) {
 	if os.Getenv("PRINT_PROMPTS") == "" {
 		t.Skip("set PRINT_PROMPTS=1 to print rendered prompts")
@@ -655,4 +882,11 @@ func TestPrintPrompts(t *testing.T) {
 
 	fmt.Printf("\n%s\n  BUILT-IN DEFAULT AGENT DEFINITION\n%s\n\n", sep, sep)
 	fmt.Print(defaultAgentDef)
+
+	fmt.Printf("\n%s\n  REVIEW TASK CONTEXT (used with --agent reviewer)\n%s\n\n", sep, sep)
+	task.PRNumber = 123
+	fmt.Println(renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform"))
+
+	fmt.Printf("\n%s\n  BUILT-IN DEFAULT REVIEWER DEFINITION\n%s\n\n", sep, sep)
+	fmt.Print(defaultReviewerDef)
 }
