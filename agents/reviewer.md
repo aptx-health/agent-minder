@@ -109,6 +109,8 @@ git log HEAD..origin/<base-branch> --oneline
 
 If there are upstream commits, perform a rebase before reviewing or pushing any fixes.
 
+**Note:** Rebasing rewrites commit SHAs, which invalidates any existing line-specific review comments on the PR. This is acceptable for automated reviews, but if human reviewers have left inline comments, mention in your rebase comment that prior line comments may be outdated.
+
 ### Rebase procedure
 
 1. Run the rebase using the commands from your task context:
