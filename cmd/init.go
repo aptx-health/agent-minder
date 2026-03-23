@@ -443,12 +443,31 @@ The permissions.allowed_tools list rules:
 - Format: Use spaces inside Bash() patterns — e.g., "Bash(git *)", "Bash(go build *)". Do NOT use colons — the colon syntax silently fails to match commands in settings.json and onboarding.yaml.
 - Each entry is "Bash(<command> *)" where <command> comes from tools_needed and the build/test/lint commands
 - For multi-word commands, use spaces between all words: "Bash(go build *)", "Bash(doppler run -- *)"
-- Always include "Bash(git *)" and "Bash(gh *)" — agents always need version control
-- Always include "Read", "Edit", "Write", "Glob", "Grep" — agents need file access
-- If a secrets manager is detected (e.g., doppler), include "Bash(doppler run -- *)" or the equivalent prefix
-- If a process manager is detected, include its command pattern
 - Do NOT include overly broad patterns like "Bash(*)" — be specific
-- Keep the list minimal but sufficient for the build/test/lint commands
+- Be THOROUGH — agents will be blocked if any needed permission is missing. It is much better to include a permission that isn't used than to omit one that is needed.
+
+Always include these baseline permissions:
+- "Read", "Edit", "Write", "Glob", "Grep" — agents need file access
+- "Bash(ls *)", "Bash(mkdir *)", "Bash(which *)", "Bash(wc *)" — basic filesystem operations
+- Git (use individual subcommands, not "Bash(git *)"): "Bash(git add *)", "Bash(git commit *)", "Bash(git checkout *)", "Bash(git log *)", "Bash(git diff *)", "Bash(git status *)", "Bash(git branch *)", "Bash(git show *)", "Bash(git remote *)", "Bash(git fetch *)", "Bash(git push *)", "Bash(git pull *)", "Bash(git rebase *)", "Bash(git worktree *)", "Bash(git stash *)", "Bash(git merge *)"
+- GitHub CLI: "Bash(gh issue *)", "Bash(gh pr *)", "Bash(gh api *)"
+
+Add language/framework-specific permissions based on detected inventory:
+- Go: "Bash(go test *)", "Bash(go build *)", "Bash(go vet *)", "Bash(go get *)", "Bash(go mod *)", "Bash(go fmt *)", "Bash(go doc *)", "Bash(go env *)", "Bash(go run *)", "Bash(gofmt *)"
+- Node/JS: "Bash(npm *)", "Bash(npx *)" (or yarn/pnpm equivalents), "Bash(node *)"
+- Python: "Bash(python *)", "Bash(pip *)", "Bash(pytest *)" (or poetry/uv equivalents)
+- Ruby: "Bash(bundle *)", "Bash(ruby *)", "Bash(rake *)"
+- Rust: "Bash(cargo *)", "Bash(rustc *)"
+
+Add tooling-specific permissions:
+- Linters: "Bash(golangci-lint *)", "Bash(eslint *)", "Bash(flake8 *)", etc.
+- Formatters: "Bash(prettier *)", "Bash(black *)", etc.
+- Pre-commit hooks: "Bash(lefthook *)", "Bash(pre-commit *)", "Bash(husky *)"
+- Build tools: "Bash(make *)", "Bash(cmake *)", etc.
+- Secrets manager if detected: "Bash(doppler run -- *)", "Bash(vault *)", etc.
+- Process manager if detected: "Bash(overmind *)", "Bash(foreman *)", etc.
+- Container tools if detected: "Bash(docker *)", "Bash(docker-compose *)", etc.
+- File search: "Bash(fd *)" or "Bash(find *)", "Bash(rg *)" if available
 
 Rules for updating the onboarding file:
 - Use the existing onboarding file structure — do NOT rewrite the inventory section
