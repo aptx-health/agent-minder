@@ -471,7 +471,11 @@ func (m Model) renderAutopilotCompletedContent() string {
 // Stores the sorted task list in m.autopilotTasks and pins cursor by issue number.
 func (m *Model) rebuildAutopilotTaskContent() {
 	tasks, err := m.store.GetAutopilotTasks(m.project.ID)
-	if err != nil || len(tasks) == 0 {
+	if err != nil {
+		// Transient DB error — keep existing display rather than clearing it.
+		return
+	}
+	if len(tasks) == 0 {
 		m.autopilotTasks = nil
 		m.autopilotTaskVP.SetContent(mutedStyle().Render("  (no tasks)"))
 		return
