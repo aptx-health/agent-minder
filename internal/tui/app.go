@@ -161,10 +161,11 @@ type idleCheckMsg time.Time
 
 // Tab constants.
 const (
-	tabOperations = 0
-	tabAnalysis   = 1
-	tabAutopilot  = 2
-	tabCount      = 3
+	tabOperations    = 0
+	tabAnalysis      = 1
+	tabAutopilot     = 2
+	tabObservability = 3
+	tabCount         = 4
 )
 
 // Model is the root bubbletea model for the dashboard.
@@ -176,7 +177,7 @@ type Model struct {
 	height  int
 
 	// Tab state.
-	activeTab       int  // tabOperations, tabAnalysis, or tabAutopilot
+	activeTab       int  // tabOperations, tabAnalysis, tabAutopilot, or tabObservability
 	analysisHasNew  bool // true when new analysis arrived while on Ops tab
 	autopilotHasNew bool // true when autopilot state changed while on another tab
 
@@ -261,6 +262,13 @@ type Model struct {
 	// Rebuild deps mode.
 	rebuildDepsInput  textarea.Model
 	rebuildDepsStatus string
+
+	// Observability tab (cached, refreshed on poll results and tab switch).
+	obsDailyCost      *db.CostSummary
+	obsWeeklyCost     *db.CostSummary
+	obsOverallCost    *db.CostSummary
+	obsDailyTaskCosts []db.TaskCostDetail
+	obsCostErr        error // non-nil if any cost query failed
 
 	// Auto-pause on idle.
 	lastUserInput time.Time
@@ -513,6 +521,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.polling = false
 			m.pollNotice = ""
 			m.refreshTrackedItems()
+			m.refreshObsCosts()
 			m.worktrees, _ = m.store.GetWorktreesForProject(m.project.ID)
 			// Flag new analysis if user is on Ops tab and this was an analysis result.
 			if m.activeTab == tabOperations && event.PollResult.Tier2Analysis != "" {
@@ -1262,6 +1271,11 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		m.activeTab = tabAutopilot
 		m.autopilotHasNew = false
+		m.resizeViewports()
+		return m, nil
+	case "4":
+		m.activeTab = tabObservability
+		m.refreshObsCosts()
 		m.resizeViewports()
 		return m, nil
 	case "tab":
@@ -2690,6 +2704,24 @@ func (m *Model) refreshTrackedItems() {
 	}
 }
 
+// refreshObsCosts reloads cost data for the observability tab.
+func (m *Model) refreshObsCosts() {
+	today := time.Now().Format("2006-01-02")
+	m.obsDailyCost, m.obsCostErr = m.store.DailyCost(m.project.ID, today)
+	if m.obsCostErr != nil {
+		return
+	}
+	m.obsWeeklyCost, m.obsCostErr = m.store.WeeklyCost(m.project.ID, today)
+	if m.obsCostErr != nil {
+		return
+	}
+	m.obsOverallCost, m.obsCostErr = m.store.OverallCost(m.project.ID)
+	if m.obsCostErr != nil {
+		return
+	}
+	m.obsDailyTaskCosts, m.obsCostErr = m.store.DailyTaskCosts(m.project.ID, today)
+}
+
 // effectiveStatus returns the display status for a tracked item, overlaying
 // bailed/failed autopilot status when applicable.
 func (m Model) effectiveStatus(item db.TrackedItem) string {
@@ -2712,6 +2744,8 @@ func (m *Model) clearTabIndicator() {
 		m.analysisHasNew = false
 	case tabAutopilot:
 		m.autopilotHasNew = false
+	case tabObservability:
+		m.refreshObsCosts()
 	}
 }
 
