@@ -26,8 +26,8 @@ type Project struct {
 	AnalysisIntervalSec         int      `db:"analysis_interval_sec"`
 	IdlePauseSec                int      `db:"idle_pause_sec"`
 	AnalyzerFocus               string   `db:"analyzer_focus"`
-	AutopilotFilterType         string   `db:"autopilot_filter_type"`  // deprecated, unused
-	AutopilotFilterValue        string   `db:"autopilot_filter_value"` // deprecated, unused
+	AutopilotFilterType         string   `db:"autopilot_filter_type"`  // "milestone" or "label" for watch mode
+	AutopilotFilterValue        string   `db:"autopilot_filter_value"` // filter value for watch mode
 	AutopilotMaxAgents          int      `db:"autopilot_max_agents"`
 	AutopilotMaxTurns           int      `db:"autopilot_max_turns"`
 	AutopilotMaxBudgetUSD       float64  `db:"autopilot_max_budget_usd"`
@@ -39,6 +39,9 @@ type Project struct {
 	AutopilotReviewMaxTurns     *int     `db:"autopilot_review_max_turns"`
 	AutopilotReviewMaxBudgetUSD *float64 `db:"autopilot_review_max_budget_usd"`
 	AutopilotReviewMaxRetries   *int     `db:"autopilot_review_max_retries"`
+	WebhookURL                  string   `db:"webhook_url"`
+	WebhookFormat               string   `db:"webhook_format"`
+	WebhookEvents               string   `db:"webhook_events"` // comma-separated event types, empty = all
 	CreatedAt                   string   `db:"created_at"`
 }
 
