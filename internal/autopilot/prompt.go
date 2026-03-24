@@ -681,7 +681,7 @@ func renderManualSessionPrompt(task *db.AutopilotTask, owner, repo, projectGoal 
 
 // renderReviewSessionPrompt builds a prompt for an interactive review session.
 // All context is pre-loaded so the agent starts ready for conversation.
-func renderReviewSessionPrompt(task *db.AutopilotTask, owner, repo, projectGoal string, rw *relatedWork, issueComments, prDetails, prDiff, claudeMD string) string {
+func renderReviewSessionPrompt(task *db.AutopilotTask, owner, repo, projectGoal string, rw *relatedWork, issueComments, prDetails, prComments, prDiff, claudeMD string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "You are starting a review session for PR #%d (issue #%d) in %s/%s.\n", task.PRNumber, task.IssueNumber, owner, repo)
@@ -704,6 +704,12 @@ func renderReviewSessionPrompt(task *db.AutopilotTask, owner, repo, projectGoal 
 	if prDetails != "" {
 		fmt.Fprintf(&b, "## PR #%d Details\n\n", task.PRNumber)
 		b.WriteString(prDetails)
+		b.WriteString("\n\n")
+	}
+
+	if prComments != "" {
+		fmt.Fprintf(&b, "## PR #%d Comments\n\n", task.PRNumber)
+		b.WriteString(prComments)
 		b.WriteString("\n\n")
 	}
 
