@@ -64,6 +64,8 @@ func (m Model) View() tea.View {
 		b.WriteString(m.renderOperationsTab())
 	} else if m.activeTab == tabAnalysis {
 		b.WriteString(m.renderAnalysisTab())
+	} else if m.activeTab == tabObservability {
+		b.WriteString(m.renderObservabilityTab())
 	} else {
 		b.WriteString(m.renderAutopilotTab())
 	}
@@ -87,6 +89,7 @@ func (m Model) renderTabBar() string {
 		{1, "Operations", false},
 		{2, "Analysis", m.analysisHasNew},
 		{3, "Autopilot", m.autopilotHasNew},
+		{4, "Observability", false},
 	}
 
 	var b strings.Builder
@@ -200,6 +203,81 @@ func (m Model) renderAnalysisTab() string {
 		}
 		b.WriteString(mutedStyle().Render(statusParts))
 		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// renderObservabilityTab renders the Observability tab with cost breakdowns.
+func (m Model) renderObservabilityTab() string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle().Render("Cost Overview"))
+	b.WriteString("\n\n")
+
+	today := time.Now().Format("2006-01-02")
+
+	// Daily cost.
+	daily, dailyErr := m.store.DailyCost(m.project.ID, today)
+	b.WriteString("  ")
+	b.WriteString(headerStyle().Render("Today"))
+	b.WriteString("\n")
+	if dailyErr != nil {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", dailyErr)))
+	} else {
+		fmt.Fprintf(&b, "    $%.2f across %d tasks", daily.TotalCost, daily.TaskCount)
+	}
+	b.WriteString("\n\n")
+
+	// Weekly cost.
+	weekly, weeklyErr := m.store.WeeklyCost(m.project.ID, today)
+	b.WriteString("  ")
+	b.WriteString(headerStyle().Render("This Week"))
+	b.WriteString("\n")
+	if weeklyErr != nil {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", weeklyErr)))
+	} else {
+		fmt.Fprintf(&b, "    $%.2f across %d tasks", weekly.TotalCost, weekly.TaskCount)
+	}
+	b.WriteString("\n\n")
+
+	// Overall cost.
+	overall, overallErr := m.store.OverallCost(m.project.ID)
+	b.WriteString("  ")
+	b.WriteString(headerStyle().Render("Overall"))
+	b.WriteString("\n")
+	if overallErr != nil {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", overallErr)))
+	} else {
+		fmt.Fprintf(&b, "    $%.2f across %d tasks", overall.TotalCost, overall.TaskCount)
+	}
+	b.WriteString("\n\n")
+
+	// Per-task breakdown for today.
+	details, detailsErr := m.store.DailyTaskCosts(m.project.ID, today)
+	b.WriteString("  ")
+	b.WriteString(headerStyle().Render("Task Breakdown (Today)"))
+	b.WriteString("\n")
+	if detailsErr != nil {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", detailsErr)))
+		b.WriteString("\n")
+	} else if len(details) == 0 {
+		b.WriteString(mutedStyle().Render("    No task costs recorded today."))
+		b.WriteString("\n")
+	} else {
+		for _, d := range details {
+			title := d.IssueTitle
+			maxTitle := m.width - 40
+			if maxTitle < 20 {
+				maxTitle = 20
+			}
+			if len(title) > maxTitle {
+				title = title[:maxTitle-3] + "..."
+			}
+			line := fmt.Sprintf("    #%-5d $%.2f  %-8s  %s", d.IssueNumber, d.CostUSD, d.Status, title)
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
 	}
 
 	return b.String()
@@ -2169,7 +2247,7 @@ func (m Model) renderHelpBar() string {
 	switch activeTab {
 	case tabAnalysis:
 		condensed = []hint{
-			{"1/2/3", "tabs"},
+			{"1-4", "tabs"},
 			{"r", "analyze"},
 			{"b", "batch track"},
 			{"u", "user msg"},
@@ -2254,7 +2332,7 @@ func (m Model) renderHelpBar() string {
 			)
 		default:
 			condensed = []hint{
-				{"1/2/3", "tabs"},
+				{"1-4", "tabs"},
 				{"a", "start"},
 				{"A", "stop"},
 				{"e", "expand"},
@@ -2262,9 +2340,16 @@ func (m Model) renderHelpBar() string {
 				{"?", "help"},
 			}
 		}
+	case tabObservability:
+		condensed = []hint{
+			{"1-4", "tabs"},
+			{"r", "refresh"},
+			{"q", "quit"},
+			{"?", "help"},
+		}
 	default:
 		condensed = []hint{
-			{"1/2/3", "tabs"},
+			{"1-4", "tabs"},
 			{"p", "pause"},
 			{"r", "poll"},
 			{"i", "track"},
@@ -2295,7 +2380,7 @@ type helpHint struct {
 // Help hint groups for the columnar overlay.
 var (
 	globalHints = []helpHint{
-		{"1/2/3", "switch tabs"},
+		{"1/2/3/4", "switch tabs"},
 		{"s", "settings"},
 		{"t", "theme"},
 		{"\u2191/\u2193", "scroll"},
@@ -2335,12 +2420,16 @@ var (
 		{"l", "view log"},
 		{"e", "expand tasks"},
 	}
+
+	observabilityHints = []helpHint{
+		{"r", "refresh costs"},
+	}
 )
 
 // helpOverlayHeight returns the number of lines the help body occupies.
 func helpOverlayHeight() int {
 	maxRows := len(globalHints)
-	for _, h := range [][]helpHint{opsHints, analysisHints, autopilotHints} {
+	for _, h := range [][]helpHint{opsHints, analysisHints, autopilotHints, observabilityHints} {
 		if len(h) > maxRows {
 			maxRows = len(h)
 		}
@@ -2357,6 +2446,8 @@ func tabHints(tab int) []helpHint {
 		return analysisHints
 	case tabAutopilot:
 		return autopilotHints
+	case tabObservability:
+		return observabilityHints
 	default:
 		return opsHints
 	}
@@ -2371,6 +2462,8 @@ func tabLabel(tab int) string {
 		return "Analysis"
 	case tabAutopilot:
 		return "Autopilot"
+	case tabObservability:
+		return "Observability"
 	default:
 		return "Operations"
 	}

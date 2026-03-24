@@ -161,10 +161,11 @@ type idleCheckMsg time.Time
 
 // Tab constants.
 const (
-	tabOperations = 0
-	tabAnalysis   = 1
-	tabAutopilot  = 2
-	tabCount      = 3
+	tabOperations    = 0
+	tabAnalysis      = 1
+	tabAutopilot     = 2
+	tabObservability = 3
+	tabCount         = 4
 )
 
 // Model is the root bubbletea model for the dashboard.
@@ -1262,6 +1263,10 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		m.activeTab = tabAutopilot
 		m.autopilotHasNew = false
+		m.resizeViewports()
+		return m, nil
+	case "4":
+		m.activeTab = tabObservability
 		m.resizeViewports()
 		return m, nil
 	case "tab":

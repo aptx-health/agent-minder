@@ -200,29 +200,36 @@ func TestTabSwitching_TabKey(t *testing.T) {
 		t.Errorf("after 2nd tab: activeTab = %d, want %d", m.activeTab, tabAutopilot)
 	}
 
+	// tab → tabObservability (3)
+	result, _ = m.Update(specialKey(tea.KeyTab))
+	m = result.(Model)
+	if m.activeTab != tabObservability {
+		t.Errorf("after 3rd tab: activeTab = %d, want %d", m.activeTab, tabObservability)
+	}
+
 	// tab → wraps to tabOperations (0)
 	result, _ = m.Update(specialKey(tea.KeyTab))
 	m = result.(Model)
 	if m.activeTab != tabOperations {
-		t.Errorf("after 3rd tab: activeTab = %d, want %d", m.activeTab, tabOperations)
+		t.Errorf("after 4th tab: activeTab = %d, want %d", m.activeTab, tabOperations)
 	}
 }
 
 func TestTabSwitching_ShiftTab(t *testing.T) {
 	m := testModel(t)
 
-	// shift+tab from tabOperations (0) → wraps to tabAutopilot (2)
+	// shift+tab from tabOperations (0) → wraps to tabObservability (3)
 	result, _ := m.Update(shiftTabKey())
 	m = result.(Model)
-	if m.activeTab != tabAutopilot {
-		t.Errorf("after shift+tab: activeTab = %d, want %d", m.activeTab, tabAutopilot)
+	if m.activeTab != tabObservability {
+		t.Errorf("after shift+tab: activeTab = %d, want %d", m.activeTab, tabObservability)
 	}
 
-	// shift+tab → tabAnalysis (1)
+	// shift+tab → tabAutopilot (2)
 	result, _ = m.Update(shiftTabKey())
 	m = result.(Model)
-	if m.activeTab != tabAnalysis {
-		t.Errorf("after 2nd shift+tab: activeTab = %d, want %d", m.activeTab, tabAnalysis)
+	if m.activeTab != tabAutopilot {
+		t.Errorf("after 2nd shift+tab: activeTab = %d, want %d", m.activeTab, tabAutopilot)
 	}
 }
 

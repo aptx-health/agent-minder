@@ -345,7 +345,7 @@ func TestRenderTabBar_ContainsTabNames(t *testing.T) {
 	m.width = 120
 
 	tabBar := m.renderTabBar()
-	for _, name := range []string{"Operations", "Analysis", "Autopilot"} {
+	for _, name := range []string{"Operations", "Analysis", "Autopilot", "Observability"} {
 		if !strings.Contains(tabBar, name) {
 			t.Errorf("renderTabBar() should contain tab name %q", name)
 		}
@@ -357,7 +357,7 @@ func TestRenderTabBar_ContainsNumbers(t *testing.T) {
 	m.width = 120
 
 	tabBar := m.renderTabBar()
-	for _, num := range []string{"1:", "2:", "3:"} {
+	for _, num := range []string{"1:", "2:", "3:", "4:"} {
 		if !strings.Contains(tabBar, num) {
 			t.Errorf("renderTabBar() should contain tab number %q", num)
 		}
@@ -671,7 +671,7 @@ func TestRenderHelpOverlay_ContainsCloseHint(t *testing.T) {
 
 func TestRenderHelpOverlay_DifferentTabs(t *testing.T) {
 	// Just verify it doesn't panic for each tab.
-	for _, tab := range []int{tabOperations, tabAnalysis, tabAutopilot} {
+	for _, tab := range []int{tabOperations, tabAnalysis, tabAutopilot, tabObservability} {
 		result := renderHelpOverlay(120, tab)
 		if result == "" {
 			t.Errorf("renderHelpOverlay(120, %d) returned empty", tab)
