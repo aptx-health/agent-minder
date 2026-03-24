@@ -9,8 +9,10 @@ import (
 	"syscall"
 
 	"github.com/dustinlange/agent-minder/internal/api"
+	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/discord"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var (
@@ -57,23 +59,34 @@ func init() {
 }
 
 func runDiscord(_ *cobra.Command, _ []string) error {
-	// Resolve config from flags and environment.
+	// Resolve config from flags → env → config/keychain.
+	_, _ = config.Load()
+
 	token := discordToken
 	if token == "" {
 		token = os.Getenv("DISCORD_BOT_TOKEN")
 	}
 	if token == "" {
-		return fmt.Errorf("discord bot token required — set --token or DISCORD_BOT_TOKEN")
+		token = config.GetIntegrationToken("discord")
+	}
+	if token == "" {
+		return fmt.Errorf("discord bot token required — set --token, DISCORD_BOT_TOKEN, or run 'agent-minder setup'")
 	}
 
 	channelID := discordChannelID
 	if channelID == "" {
 		channelID = os.Getenv("DISCORD_CHANNEL_ID")
 	}
+	if channelID == "" {
+		channelID = viper.GetString("integrations.discord.channel_id")
+	}
 
 	guildID := discordGuildID
 	if guildID == "" {
 		guildID = os.Getenv("DISCORD_GUILD_ID")
+	}
+	if guildID == "" {
+		guildID = viper.GetString("integrations.discord.guild_id")
 	}
 
 	remote := deployRemote
