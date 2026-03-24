@@ -2601,3 +2601,108 @@ func TestMigrateV23_ReviewAutomationColumns(t *testing.T) {
 		t.Errorf("ReviewTasks returned %d tasks, want 1", len(reviewTasks))
 	}
 }
+
+func TestBankAndClearAutopilotTasks(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "bank-clear")
+
+	createTaskWithCost(t, store, p.ID, 1, "done", 2.50, "2026-01-15 10:00:00")
+	createTaskWithCost(t, store, p.ID, 2, "running", 1.00, "")
+	createTaskWithCost(t, store, p.ID, 3, "bailed", 0.75, "2026-01-16 10:00:00")
+
+	if err := store.BankAndClearAutopilotTasks(p.ID); err != nil {
+		t.Fatalf("BankAndClearAutopilotTasks: %v", err)
+	}
+
+	// Tasks should be gone.
+	tasks, _ := store.GetAutopilotTasks(p.ID)
+	if len(tasks) != 0 {
+		t.Errorf("expected 0 tasks after clear, got %d", len(tasks))
+	}
+
+	// Carried cost should reflect banked amount.
+	proj, err := store.GetProjectByID(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectByID: %v", err)
+	}
+	if proj.CarriedCostUSD != 4.25 {
+		t.Errorf("CarriedCostUSD = %f, want 4.25", proj.CarriedCostUSD)
+	}
+}
+
+func TestBankAndClearAccumulates(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "bank-accum")
+
+	// First batch.
+	createTaskWithCost(t, store, p.ID, 1, "done", 3.00, "2026-01-15 10:00:00")
+	if err := store.BankAndClearAutopilotTasks(p.ID); err != nil {
+		t.Fatalf("first BankAndClear: %v", err)
+	}
+
+	// Second batch.
+	createTaskWithCost(t, store, p.ID, 2, "done", 2.00, "2026-01-16 10:00:00")
+	if err := store.BankAndClearAutopilotTasks(p.ID); err != nil {
+		t.Fatalf("second BankAndClear: %v", err)
+	}
+
+	proj, err := store.GetProjectByID(p.ID)
+	if err != nil {
+		t.Fatalf("GetProjectByID: %v", err)
+	}
+	if proj.CarriedCostUSD != 5.00 {
+		t.Errorf("CarriedCostUSD = %f, want 5.00 (3.00 + 2.00)", proj.CarriedCostUSD)
+	}
+}
+
+func TestTotalSpendIncludesCarriedCost(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "total-carried")
+
+	// Create and bank first batch.
+	createTaskWithCost(t, store, p.ID, 1, "done", 5.00, "2026-01-15 10:00:00")
+	if err := store.BankAndClearAutopilotTasks(p.ID); err != nil {
+		t.Fatalf("BankAndClear: %v", err)
+	}
+
+	// Create new tasks.
+	createTaskWithCost(t, store, p.ID, 2, "done", 2.00, "2026-01-16 10:00:00")
+	createTaskWithCost(t, store, p.ID, 3, "running", 1.00, "")
+
+	total, err := store.TotalSpend(p.ID)
+	if err != nil {
+		t.Fatalf("TotalSpend: %v", err)
+	}
+	// 5.00 carried + 2.00 + 1.00 current = 8.00
+	if total != 8.00 {
+		t.Errorf("TotalSpend = %f, want 8.00", total)
+	}
+}
+
+func TestOverallCostIncludesCarriedCost(t *testing.T) {
+	store := openTestDB(t)
+	p := createCostTestProject(t, store, "overall-carried")
+
+	// Bank a batch.
+	createTaskWithCost(t, store, p.ID, 1, "done", 3.00, "2026-01-15 10:00:00")
+	if err := store.BankAndClearAutopilotTasks(p.ID); err != nil {
+		t.Fatalf("BankAndClear: %v", err)
+	}
+
+	// New terminal tasks.
+	createTaskWithCost(t, store, p.ID, 2, "done", 1.50, "2026-01-16 10:00:00")
+	createTaskWithCost(t, store, p.ID, 3, "running", 0.50, "") // excluded from OverallCost
+
+	cs, err := store.OverallCost(p.ID)
+	if err != nil {
+		t.Fatalf("OverallCost: %v", err)
+	}
+	// 3.00 carried + 1.50 terminal = 4.50
+	if cs.TotalCost != 4.50 {
+		t.Errorf("TotalCost = %f, want 4.50", cs.TotalCost)
+	}
+	// Task count is current session only.
+	if cs.TaskCount != 1 {
+		t.Errorf("TaskCount = %d, want 1", cs.TaskCount)
+	}
+}

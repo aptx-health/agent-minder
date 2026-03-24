@@ -404,11 +404,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	statusCounts := make(map[string]int)
-	var totalCost float64
 	for _, t := range tasks {
 		statusCounts[t.Status]++
-		totalCost += t.CostUSD
 	}
+
+	totalCost, _ := s.store.TotalSpend(s.projectID)
 
 	doneCount := statusCounts["done"]
 	bailedCount := statusCounts["bailed"]

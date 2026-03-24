@@ -218,13 +218,7 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		fmt.Printf("\nMax agents: %d | Max turns: %d | Max budget: $%.2f\n", maxAgents, maxTurns, maxBudget)
-		if totalBudget > 0 {
-			fmt.Printf("Total budget ceiling: $%.2f", totalBudget)
-			if budgetPauseRunning {
-				fmt.Print(" (will stop running agents)")
-			}
-			fmt.Println()
-		}
+		printBudgetCeiling(totalBudget, budgetPauseRunning)
 		fmt.Printf("Poll interval: %ds\n", watchInterval)
 		fmt.Println("\nNo agents launched (--dry-run)")
 		return nil
@@ -312,13 +306,7 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	fmt.Printf("\nMax agents: %d | Max turns: %d | Max budget: $%.2f\n", maxAgents, maxTurns, maxBudget)
-	if totalBudget > 0 {
-		fmt.Printf("Total budget ceiling: $%.2f", totalBudget)
-		if budgetPauseRunning {
-			fmt.Print(" (will stop running agents)")
-		}
-		fmt.Println()
-	}
+	printBudgetCeiling(totalBudget, budgetPauseRunning)
 	fmt.Printf("Poll interval: %ds\n", watchInterval)
 	fmt.Printf("\nLog:    %s\n", deploy.LogPath(id))
 	fmt.Printf("Status: agent-minder deploy status %s\n", id)
@@ -329,6 +317,16 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 // runWatchDaemon is the long-lived daemon process for deploy watch.
 // It continuously polls GitHub for new issues matching the stored filter,
 // queues them as autopilot tasks, and launches/re-launches the supervisor.
+func printBudgetCeiling(totalBudget float64, pauseRunning bool) {
+	if totalBudget > 0 {
+		fmt.Printf("Total budget ceiling: $%.2f", totalBudget)
+		if pauseRunning {
+			fmt.Print(" (will stop running agents)")
+		}
+		fmt.Println()
+	}
+}
+
 func runWatchDaemon() error {
 	if watchDeployID == "" {
 		return fmt.Errorf("--deploy-id required in daemon mode")

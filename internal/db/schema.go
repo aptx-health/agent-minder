@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 26
+const currentVersion = 27
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS projects (
 	webhook_events               TEXT DEFAULT '',
 	total_budget_usd             REAL DEFAULT 0,
 	budget_pause_running         INTEGER DEFAULT 0,
+	carried_cost_usd             REAL DEFAULT 0,
 	created_at                   TEXT DEFAULT (datetime('now'))
 );
 
@@ -366,6 +367,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 26 {
 		if err := migrateV26(db); err != nil {
 			return fmt.Errorf("apply migration v26: %w", err)
+		}
+	}
+
+	if version < 27 {
+		if err := migrateV27(db); err != nil {
+			return fmt.Errorf("apply migration v27: %w", err)
 		}
 	}
 
@@ -789,6 +796,14 @@ func migrateV26(db *sqlx.DB) error {
 		if _, err := db.Exec(s.ddl); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("add %s: %w", s.col, err)
 		}
+	}
+	return nil
+}
+
+func migrateV27(db *sqlx.DB) error {
+	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN carried_cost_usd REAL DEFAULT 0`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("add carried_cost_usd: %w", err)
 	}
 	return nil
 }

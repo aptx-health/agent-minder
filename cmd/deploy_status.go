@@ -84,16 +84,13 @@ func runDeployStatus(_ *cobra.Command, args []string) error {
 
 	printTaskTable(tasks)
 
-	// Show budget ceiling info if configured.
+	// Show budget ceiling info if configured (includes carried cost from prior runs).
 	if project.TotalBudgetUSD > 0 {
-		var totalCost float64
+		totalCost := project.CarriedCostUSD
 		for _, t := range tasks {
 			totalCost += t.CostUSD
 		}
-		pct := 0.0
-		if project.TotalBudgetUSD > 0 {
-			pct = (totalCost / project.TotalBudgetUSD) * 100
-		}
+		pct := (totalCost / project.TotalBudgetUSD) * 100
 		fmt.Printf("Budget ceiling: $%.2f / $%.2f (%.0f%%)\n", totalCost, project.TotalBudgetUSD, pct)
 	}
 	return nil

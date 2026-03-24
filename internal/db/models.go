@@ -44,6 +44,7 @@ type Project struct {
 	WebhookEvents               string   `db:"webhook_events"`       // comma-separated event types, empty = all
 	TotalBudgetUSD              float64  `db:"total_budget_usd"`     // total spend ceiling; 0 = no limit
 	BudgetPauseRunning          bool     `db:"budget_pause_running"` // true = also stop running agents when ceiling hit
+	CarriedCostUSD              float64  `db:"carried_cost_usd"`     // accumulated cost from cleared task batches
 	CreatedAt                   string   `db:"created_at"`
 }
 

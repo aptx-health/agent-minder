@@ -661,9 +661,9 @@ func (s *Supervisor) prepareWithExisting(ctx context.Context, existingTasks []db
 
 // prepareFresh runs the full fresh prepare flow: clear old tasks, convert tracked items, build dep graph.
 func (s *Supervisor) prepareFresh(ctx context.Context, guidance string, agentDef AgentDefSource) (*PrepareResult, error) {
-	// Clean up any leftovers.
-	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
-		return nil, fmt.Errorf("clear autopilot tasks: %w", err)
+	// Bank existing task costs and clean up.
+	if err := s.store.BankAndClearAutopilotTasks(s.project.ID); err != nil {
+		return nil, fmt.Errorf("bank and clear autopilot tasks: %w", err)
 	}
 	_ = s.store.DeleteDepGraph(s.project.ID)
 	s.cleanOrphanedWorktrees()
@@ -1483,20 +1483,31 @@ func (s *Supervisor) checkBudgetCeiling() bool {
 		return false
 	}
 
-	// 80% warning threshold.
 	warningThreshold := ceiling * 0.8
+
+	// Single lock acquisition to atomically check-and-set flags, avoiding TOCTOU races
+	// between concurrent calls from fillSlots and inspectOutcome.
 	s.mu.Lock()
-	alreadyWarned := s.budgetWarned
-	alreadyPaused := s.budgetPaused
+	var sendWarning, sendPause, shouldStopRunning bool
+
+	if totalSpend >= warningThreshold && !s.budgetWarned && !s.budgetPaused {
+		s.budgetWarned = true
+		sendWarning = true
+	}
+
+	if totalSpend >= ceiling && !s.budgetPaused {
+		s.budgetPaused = true
+		sendPause = true
+		shouldStopRunning = s.project.BudgetPauseRunning
+	}
+
+	exceeded := s.budgetPaused
 	s.mu.Unlock()
 
-	if totalSpend >= warningThreshold && !alreadyWarned && !alreadyPaused {
-		s.mu.Lock()
-		s.budgetWarned = true
-		s.mu.Unlock()
+	// Emit events and notifications outside the lock.
+	if sendWarning {
 		msg := fmt.Sprintf("Budget warning: $%.2f of $%.2f spent (%.0f%%)", totalSpend, ceiling, (totalSpend/ceiling)*100)
 		s.emitEvent("warning", msg, nil)
-
 		if s.notifier != nil {
 			s.notifier.Notify(notify.Event{
 				Type:      notify.EventBudgetLimit,
@@ -1507,36 +1518,23 @@ func (s *Supervisor) checkBudgetCeiling() bool {
 		}
 	}
 
-	// At or over ceiling — pause.
-	if totalSpend >= ceiling {
-		s.mu.Lock()
-		if !s.budgetPaused {
-			s.budgetPaused = true
-			s.mu.Unlock()
-
-			msg := fmt.Sprintf("Budget ceiling hit: $%.2f of $%.2f — pausing new task launches", totalSpend, ceiling)
-			s.emitEvent("warning", msg, nil)
-
-			if s.notifier != nil {
-				s.notifier.Notify(notify.Event{
-					Type:      notify.EventBudgetLimit,
-					Project:   s.project.Name,
-					Summary:   msg,
-					Timestamp: time.Now(),
-				})
-			}
-
-			// If configured, also stop running agents.
-			if s.project.BudgetPauseRunning {
-				s.stopRunningAgents()
-			}
-		} else {
-			s.mu.Unlock()
+	if sendPause {
+		msg := fmt.Sprintf("Budget ceiling hit: $%.2f of $%.2f — pausing new task launches", totalSpend, ceiling)
+		s.emitEvent("warning", msg, nil)
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:      notify.EventBudgetLimit,
+				Project:   s.project.Name,
+				Summary:   msg,
+				Timestamp: time.Now(),
+			})
 		}
-		return true
+		if shouldStopRunning {
+			s.stopRunningAgents()
+		}
 	}
 
-	return false
+	return exceeded
 }
 
 // stopRunningAgents cancels all currently running agent slots.
@@ -2096,7 +2094,7 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 		s.mu.Unlock()
 		exceeded := s.checkBudgetCeiling()
 		s.mu.Lock()
-		if exceeded {
+		if exceeded || s.paused || s.budgetPaused || ctx.Err() != nil {
 			return
 		}
 	}

@@ -936,6 +936,34 @@ func (s *Store) ClearAutopilotTasks(projectID int64) error {
 	return err
 }
 
+// BankAndClearAutopilotTasks atomically adds all task costs to the project's
+// carried_cost_usd, then deletes the tasks. This preserves the cost history
+// across task clears (e.g., prepareFresh).
+func (s *Store) BankAndClearAutopilotTasks(projectID int64) error {
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var costSum float64
+	if err := tx.Get(&costSum, `SELECT COALESCE(SUM(cost_usd), 0) FROM autopilot_tasks WHERE project_id = ?`, projectID); err != nil {
+		return fmt.Errorf("sum costs: %w", err)
+	}
+
+	if costSum > 0 {
+		if _, err := tx.Exec(`UPDATE projects SET carried_cost_usd = carried_cost_usd + ? WHERE id = ?`, costSum, projectID); err != nil {
+			return fmt.Errorf("bank costs: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(`DELETE FROM autopilot_tasks WHERE project_id = ?`, projectID); err != nil {
+		return fmt.Errorf("clear tasks: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // ResetStaleAutopilotTasks resets interrupted tasks back to "queued".
 // "running" tasks are always reset (the process is gone).
 // "bailed" tasks are only reset if completed_at is NULL (interrupted before finishing).
@@ -1123,14 +1151,15 @@ func (s *Store) ReviewTasks(projectID int64) ([]AutopilotTask, error) {
 
 // --- Cost Aggregation ---
 
-// TotalSpend returns the sum of cost_usd across ALL tasks for a project,
-// including running tasks. This reflects the actual total spend for budget ceiling checks.
+// TotalSpend returns the cumulative spend for a project: carried cost from
+// previous task batches plus current task costs. Used for budget ceiling checks.
 func (s *Store) TotalSpend(projectID int64) (float64, error) {
 	var total float64
 	err := s.db.Get(&total, `
-		SELECT COALESCE(SUM(cost_usd), 0)
-		FROM autopilot_tasks
-		WHERE project_id = ?
+		SELECT COALESCE(p.carried_cost_usd, 0) + COALESCE(SUM(t.cost_usd), 0)
+		FROM projects p
+		LEFT JOIN autopilot_tasks t ON t.project_id = p.id
+		WHERE p.id = ?
 	`, projectID)
 	if err != nil {
 		return 0, fmt.Errorf("total spend: %w", err)
@@ -1175,15 +1204,17 @@ func (s *Store) WeeklyCost(projectID int64, endDate string) (*CostSummary, error
 	return &cs, nil
 }
 
-// OverallCost returns the aggregated cost for all terminal tasks in a project.
+// OverallCost returns the aggregated cost for all terminal tasks in a project,
+// plus carried cost from previous task batches. Task count reflects current session only.
 func (s *Store) OverallCost(projectID int64) (*CostSummary, error) {
 	var cs CostSummary
 	err := s.db.Get(&cs, `
-		SELECT COALESCE(SUM(cost_usd), 0) AS total_cost,
-		       COUNT(*) AS task_count
-		FROM autopilot_tasks
-		WHERE project_id = ?
-		  AND status IN ('done', 'bailed', 'failed', 'stopped')
+		SELECT COALESCE(p.carried_cost_usd, 0) + COALESCE(SUM(t.cost_usd), 0) AS total_cost,
+		       COUNT(t.id) AS task_count
+		FROM projects p
+		LEFT JOIN autopilot_tasks t ON t.project_id = p.id
+		  AND t.status IN ('done', 'bailed', 'failed', 'stopped')
+		WHERE p.id = ?
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("overall cost: %w", err)
