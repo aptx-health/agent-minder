@@ -58,8 +58,8 @@ sudo useradd -m -s /bin/bash minder
 ### 3. Build and Install
 
 ```bash
-git clone https://github.com/aptx-health/agent-minder.git /opt/agent-minder/repo
-cd /opt/agent-minder/repo
+git clone https://github.com/aptx-health/agent-minder.git /tmp/agent-minder-src
+cd /tmp/agent-minder-src
 go build -o /usr/local/bin/agent-minder .
 ```
 

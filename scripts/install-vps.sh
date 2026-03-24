@@ -16,7 +16,7 @@ set -euo pipefail
 # --- Configuration ---
 MINDER_USER="${MINDER_USER:-minder}"
 MINDER_HOME="/home/${MINDER_USER}"
-REPO_DIR="/opt/agent-minder/repo"
+DEPLOY_ASSETS="/opt/agent-minder/deploy"
 GO_VERSION="${GO_VERSION:-1.25.0}"
 NODE_VERSION="${NODE_VERSION:-22}"
 
@@ -94,23 +94,18 @@ else
 fi
 
 # --- Step 6: Clone and build agent-minder ---
-info "Setting up agent-minder..."
-mkdir -p /opt/agent-minder
-if [[ -d "${REPO_DIR}" ]]; then
-    info "Repo directory exists, pulling latest..."
-    cd "${REPO_DIR}"
-    git pull --ff-only
-else
-    info "Cloning agent-minder..."
-    git clone https://github.com/aptx-health/agent-minder.git "${REPO_DIR}"
-    cd "${REPO_DIR}"
-fi
-
 info "Building agent-minder..."
+BUILD_DIR=$(mktemp -d)
+trap "rm -rf ${BUILD_DIR}" EXIT
+git clone --depth 1 https://github.com/aptx-health/agent-minder.git "${BUILD_DIR}"
 export PATH=$PATH:/usr/local/go/bin
-cd "${REPO_DIR}"
+cd "${BUILD_DIR}"
 go build -o /usr/local/bin/agent-minder .
 chmod +x /usr/local/bin/agent-minder
+
+# Copy deploy assets for later steps
+mkdir -p /opt/agent-minder
+cp -r "${BUILD_DIR}/deploy" "${DEPLOY_ASSETS}"
 
 # --- Step 7: Set up directories ---
 info "Setting up directories..."
@@ -121,7 +116,7 @@ sudo -u "${MINDER_USER}" mkdir -p "${MINDER_HOME}/.agent-minder/agents"
 info "Setting up configuration..."
 mkdir -p /etc/agent-minder
 if [[ ! -f /etc/agent-minder/agent-minder.env ]]; then
-    cp "${REPO_DIR}/deploy/agent-minder.env.example" /etc/agent-minder/agent-minder.env
+    cp "${DEPLOY_ASSETS}/agent-minder.env.example" /etc/agent-minder/agent-minder.env
     chmod 0600 /etc/agent-minder/agent-minder.env
     chown root:"${MINDER_USER}" /etc/agent-minder/agent-minder.env
     warn "Created /etc/agent-minder/agent-minder.env — edit this file with your secrets!"
@@ -131,13 +126,13 @@ fi
 
 # --- Step 9: Install systemd units ---
 info "Installing systemd service units..."
-cp "${REPO_DIR}/deploy/agent-minder-daemon.service" /etc/systemd/system/
-cp "${REPO_DIR}/deploy/agent-minder-discord.service" /etc/systemd/system/
+cp "${DEPLOY_ASSETS}/agent-minder-daemon.service" /etc/systemd/system/
+cp "${DEPLOY_ASSETS}/agent-minder-discord.service" /etc/systemd/system/
 systemctl daemon-reload
 
 # --- Step 10: Install logrotate config ---
 info "Installing logrotate config..."
-cp "${REPO_DIR}/deploy/logrotate.d/agent-minder" /etc/logrotate.d/agent-minder
+cp "${DEPLOY_ASSETS}/logrotate.d/agent-minder" /etc/logrotate.d/agent-minder
 
 # --- Step 11: Firewall ---
 info "Configuring firewall..."
