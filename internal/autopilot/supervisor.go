@@ -988,18 +988,33 @@ func (s *Supervisor) prepareWithExisting(ctx context.Context, existingTasks []db
 
 // prepareFresh runs the full fresh prepare flow: clear old tasks, convert tracked items, build dep graph.
 func (s *Supervisor) prepareFresh(ctx context.Context, guidance string, agentDef AgentDefSource) (*PrepareResult, error) {
-	// Bank existing task costs and clean up.
-	if err := s.store.BankAndClearAutopilotTasks(s.project.ID); err != nil {
-		return nil, fmt.Errorf("bank and clear autopilot tasks: %w", err)
+	// Bank existing task costs and clean up — but preserve tasks created via track (i key).
+	if err := s.store.BankAndClearTerminalAutopilotTasks(s.project.ID); err != nil {
+		return nil, fmt.Errorf("bank and clear terminal tasks: %w", err)
 	}
 	_ = s.store.DeleteDepGraph(s.project.ID)
 	s.cleanOrphanedWorktrees()
 
-	// Convert tracked items to autopilot tasks.
-	tasks, err := s.convertTrackedItems(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("convert tracked items: %w", err)
+	// Check if tasks already exist (created via i/b/watch before Prepare).
+	existing, _ := s.store.GetAutopilotTasks(s.project.ID)
+	var tasks []*db.AutopilotTask
+	hasActive := false
+	for i := range existing {
+		if existing[i].Status != "removed" {
+			hasActive = true
+		}
+		tasks = append(tasks, &existing[i])
 	}
+
+	// Fall back to converting tracked items only if no tasks exist yet.
+	if !hasActive {
+		converted, err := s.convertTrackedItems(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("convert tracked items: %w", err)
+		}
+		tasks = converted
+	}
+
 	if len(tasks) == 0 {
 		return &PrepareResult{AgentDef: agentDef}, nil
 	}
@@ -2019,7 +2034,7 @@ func (s *Supervisor) DepGraph() string {
 	b.WriteString("## Autopilot Dependency Graph\n")
 	fmt.Fprintf(&b, "Generated: %s ago\n", time.Since(preparedAt).Round(time.Second))
 
-	// Summary counts.
+	// Summary counts (removed tasks excluded).
 	var dQueued, dRunning, dReview, dDone, dBailed, dManual int
 	for _, t := range tasks {
 		switch t.Status {
@@ -2035,6 +2050,8 @@ func (s *Supervisor) DepGraph() string {
 			dBailed++
 		case "manual":
 			dManual++
+		case "removed":
+			// excluded from counts
 		}
 	}
 	depSummary := fmt.Sprintf("Tasks: %d queued, %d running, %d review, %d done, %d bailed", dQueued, dRunning, dReview, dDone, dBailed)
@@ -2045,7 +2062,7 @@ func (s *Supervisor) DepGraph() string {
 
 	// Compact adjacency list: #N (status) → [deps]
 	for _, t := range tasks {
-		if t.Status == "done" || t.Status == "skipped" {
+		if t.Status == "done" || t.Status == "skipped" || t.Status == "removed" {
 			continue
 		}
 		var deps []int
@@ -2202,12 +2219,15 @@ func (sm skipMatcher) matches(labels []string) bool {
 }
 
 func (s *Supervisor) buildDepOptions(ctx context.Context, tasks []*db.AutopilotTask, guidance string) ([]DepOption, error) {
-	// Separate agent tasks from manual tasks.
+	// Separate agent tasks from manual tasks; skip removed tasks entirely.
 	var agentTasks, manualTasks []*db.AutopilotTask
 	for _, t := range tasks {
-		if t.Status == "manual" {
+		switch t.Status {
+		case "removed":
+			continue
+		case "manual":
 			manualTasks = append(manualTasks, t)
-		} else {
+		default:
 			agentTasks = append(agentTasks, t)
 		}
 	}
@@ -2468,12 +2488,15 @@ type daemonDepGraphResponse struct {
 // Unlike buildDepOptions which returns 3 options for interactive selection, this uses --json-schema
 // to produce a single conservative strategy and auto-applies it.
 func (s *Supervisor) BuildDaemonDepGraph(ctx context.Context, tasks []*db.AutopilotTask) (*DepOption, string, float64, error) {
-	// Separate agent tasks from manual tasks.
+	// Separate agent tasks from manual tasks; skip removed tasks entirely.
 	var agentTasks, manualTasks []*db.AutopilotTask
 	for _, t := range tasks {
-		if t.Status == "manual" {
+		switch t.Status {
+		case "removed":
+			continue
+		case "manual":
 			manualTasks = append(manualTasks, t)
-		} else {
+		default:
 			agentTasks = append(agentTasks, t)
 		}
 	}
@@ -4311,10 +4334,13 @@ func (s *Supervisor) RebuildDependencies(ctx context.Context, userComment string
 	// Partition tasks: rebuildable (queued + blocked + skipped + manual) vs context-only (running, done, bailed, stopped, review).
 	// Skipped tasks are included so the user can un-skip them via guidance.
 	// Manual tasks are included so the LLM can wire them into the dep graph.
+	// Removed tasks are excluded entirely — the user explicitly dropped them.
 	var rebuildable []*db.AutopilotTask
 	var contextTasks []*db.AutopilotTask
 	for i := range allTasks {
 		switch allTasks[i].Status {
+		case "removed":
+			continue
 		case "queued", "blocked", "skipped", "manual":
 			rebuildable = append(rebuildable, &allTasks[i])
 		default:

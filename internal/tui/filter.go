@@ -556,7 +556,7 @@ func (m Model) renderFilterView() string {
 		}
 
 	case filterStepConflict:
-		b.WriteString(textStyle().Render(fmt.Sprintf("  %d existing tracked items found.", len(m.trackedItems))))
+		b.WriteString(textStyle().Render(fmt.Sprintf("  %d existing tasks found.", len(m.operationsTasks))))
 		b.WriteString("\n\n")
 		conflictOptions := []string{
 			"update (add new, remove closed/merged)",

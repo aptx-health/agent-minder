@@ -722,7 +722,7 @@ func (s *Store) ClearNonTerminalAutopilotTasks(projectID int64) error {
 // TransitionAutopilotTasksForReprepare transitions tasks for a full rebuild re-prepare:
 // review/failed/bailed/stopped/running → manual; done/manual/skipped unchanged; queued/blocked cleared.
 func (s *Store) TransitionAutopilotTasksForReprepare(projectID int64) error {
-	// Transition non-terminal active statuses to manual.
+	// Transition non-terminal active statuses to manual. Removed tasks stay removed.
 	_, err := s.db.Exec(`
 		UPDATE autopilot_tasks SET status = 'manual'
 		WHERE project_id = ? AND status IN ('review', 'failed', 'bailed', 'stopped', 'running')
@@ -887,15 +887,7 @@ func (s *Store) QueuedUnblockedTasks(projectID int64) ([]AutopilotTask, error) {
 		statusMap[t.IssueNumber] = t.Status
 	}
 
-	// Build a map of tracked item number → state for external dep checks.
-	// If a dep isn't an autopilot task but IS a tracked open issue, it blocks.
-	trackedItems, _ := s.GetTrackedItems(projectID)
-	trackedState := make(map[int]string, len(trackedItems))
-	for _, item := range trackedItems {
-		trackedState[item.Number] = item.State
-	}
-
-	// Filter queued tasks where all deps are done.
+	// Filter queued tasks where all deps are done or removed.
 	var unblocked []AutopilotTask
 	for _, t := range allTasks {
 		if t.Status != "queued" {
@@ -905,20 +897,13 @@ func (s *Store) QueuedUnblockedTasks(projectID int64) ([]AutopilotTask, error) {
 		allDone := true
 		for _, dep := range deps {
 			if taskStatus, ok := statusMap[dep]; ok {
-				// Dep is an autopilot task — must be done.
-				if taskStatus != "done" {
-					allDone = false
-					break
-				}
-			} else if state, ok := trackedState[dep]; ok {
-				// Dep is a tracked item but not an autopilot task (e.g., skipped via no-agent).
-				// Block unless the issue is closed/merged.
-				if state == "open" {
+				// Dep is an autopilot task — must be done or removed.
+				if taskStatus != "done" && taskStatus != "removed" {
 					allDone = false
 					break
 				}
 			}
-			// If dep isn't tracked at all, treat as non-blocking.
+			// If dep isn't a task at all, treat as non-blocking.
 		}
 		if allDone {
 			unblocked = append(unblocked, t)
@@ -942,6 +927,23 @@ func (s *Store) RunningAutopilotTasks(projectID int64) ([]AutopilotTask, error) 
 func (s *Store) DeleteAutopilotTask(id int64) error {
 	_, err := s.db.Exec(`DELETE FROM autopilot_tasks WHERE id = ?`, id)
 	return err
+}
+
+// RemoveAutopilotTaskByIssue marks an autopilot task as "removed" by project and issue number.
+// The row is kept so that watch polling dedup still sees it and won't re-add the issue.
+func (s *Store) RemoveAutopilotTaskByIssue(projectID int64, issueNumber int) error {
+	result, err := s.db.Exec(`
+		UPDATE autopilot_tasks SET status = 'removed', completed_at = datetime('now')
+		WHERE project_id = ? AND issue_number = ?
+	`, projectID, issueNumber)
+	if err != nil {
+		return fmt.Errorf("remove autopilot task: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return nil // no matching task — that's fine
+	}
+	return nil
 }
 
 // ClearAutopilotTasks removes all autopilot tasks for a project.
@@ -973,6 +975,38 @@ func (s *Store) BankAndClearAutopilotTasks(projectID int64) error {
 
 	if _, err := tx.Exec(`DELETE FROM autopilot_tasks WHERE project_id = ?`, projectID); err != nil {
 		return fmt.Errorf("clear tasks: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// BankAndClearTerminalAutopilotTasks banks costs from terminal tasks (done, skipped, removed)
+// and deletes them, preserving active tasks (queued, blocked, manual, running, etc.).
+func (s *Store) BankAndClearTerminalAutopilotTasks(projectID int64) error {
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var costSum float64
+	if err := tx.Get(&costSum, `
+		SELECT COALESCE(SUM(cost_usd), 0) FROM autopilot_tasks
+		WHERE project_id = ? AND status IN ('done', 'skipped', 'removed')
+	`, projectID); err != nil {
+		return fmt.Errorf("sum costs: %w", err)
+	}
+
+	if costSum > 0 {
+		if _, err := tx.Exec(`UPDATE projects SET carried_cost_usd = carried_cost_usd + ? WHERE id = ?`, costSum, projectID); err != nil {
+			return fmt.Errorf("bank costs: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(`
+		DELETE FROM autopilot_tasks WHERE project_id = ? AND status IN ('done', 'skipped', 'removed')
+	`, projectID); err != nil {
+		return fmt.Errorf("clear terminal tasks: %w", err)
 	}
 
 	return tx.Commit()

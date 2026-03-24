@@ -18,10 +18,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/dustinlange/agent-minder/internal/claudecli"
-	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
-	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/msgbus"
 )
 
@@ -106,26 +104,17 @@ type Event struct {
 	PollResult *PollResult
 }
 
-// TrackedItemChange records a status change for a tracked item.
-type TrackedItemChange struct {
-	Ref       string // "owner/repo#number"
-	Title     string
-	OldStatus string
-	NewStatus string
-}
-
 // PollResult holds the outcome of a single poll cycle.
 type PollResult struct {
-	NewCommits         int
-	NewMessages        int
-	NewWorktrees       int
-	TrackedItemChanges []TrackedItemChange
-	Tier1Summary       string
-	Tier2Analysis      string
-	BusMessageSent     string
-	Duration           time.Duration
-	StatusOnly         bool // true for status-only polls (no LLM analysis)
-	NoNewActivity      bool // true when manual poll found nothing new
+	NewCommits     int
+	NewMessages    int
+	NewWorktrees   int
+	Tier1Summary   string
+	Tier2Analysis  string
+	BusMessageSent string
+	Duration       time.Duration
+	StatusOnly     bool // true for status-only polls (no LLM analysis)
+	NoNewActivity  bool // true when manual poll found nothing new
 }
 
 // LLMResponse returns the best available response for display.
@@ -528,14 +517,10 @@ func (p *Poller) run(ctx context.Context) {
 
 // gatherResult holds the output of the gather phase, shared between status and analysis polls.
 type gatherResult struct {
-	result          *PollResult
-	repos           []db.Repo
-	gitSummary      string
-	msgSummary      string
-	trackedItems    []db.TrackedItem
-	trackedChanges  string
-	sweepResults    []SweepResult
-	sweepHadUpdates bool
+	result     *PollResult
+	repos      []db.Repo
+	gitSummary string
+	msgSummary string
 }
 
 // gatherActivity runs the mechanical status checks: git, bus, tracked items, PR status.
@@ -704,52 +689,11 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 
 	debugLog("gather complete", "stage", "gather", "step", "complete", "component", "bus", "messages", result.NewMessages)
 
-	// Sweep tracked items: fetch metadata + content, hash check, Haiku summarize.
-	trackedItems, err := p.store.GetTrackedItems(p.project.ID)
-	if err != nil {
-		p.emit("error", fmt.Sprintf("loading tracked items: %v", err), nil)
-	}
-	var sweepResults []SweepResult
-	var trackedChanges string
-	if len(trackedItems) > 0 {
-		token := config.GetIntegrationToken("github")
-		if token != "" {
-			gh := ghpkg.NewClient(token)
-			sweepResults, trackedChanges = p.sweepTrackedItems(ctx, trackedItems, gh, repos)
-			for _, sr := range sweepResults {
-				if sr.Changed {
-					result.TrackedItemChanges = append(result.TrackedItemChanges, TrackedItemChange{
-						Ref:       sr.Item.DisplayRef(),
-						Title:     sr.Item.Title,
-						OldStatus: sr.OldStatus,
-						NewStatus: sr.NewStatus,
-					})
-					// Emit per-item status change event for the TUI event log.
-					p.emit("tracked", fmt.Sprintf("%s: %s → %s", sr.Item.DisplayRef(), sr.OldStatus, sr.NewStatus), nil)
-				}
-			}
-		}
-	}
-	debugLog("sweep complete", "stage", "sweep", "step", "complete", "items", len(sweepResults))
-
-	// Check if any tracked items had content updates (Haiku ran).
-	sweepHadUpdates := false
-	for _, sr := range sweepResults {
-		if sr.HaikuRan || sr.Changed {
-			sweepHadUpdates = true
-			break
-		}
-	}
-
 	return &gatherResult{
-		result:          result,
-		repos:           repos,
-		gitSummary:      gitSummary.String(),
-		msgSummary:      msgSummary.String(),
-		trackedItems:    trackedItems,
-		trackedChanges:  trackedChanges,
-		sweepResults:    sweepResults,
-		sweepHadUpdates: sweepHadUpdates,
+		result:     result,
+		repos:      repos,
+		gitSummary: gitSummary.String(),
+		msgSummary: msgSummary.String(),
 	}, nil
 }
 
@@ -767,7 +711,7 @@ func (p *Poller) doStatusPoll(ctx context.Context) (*PollResult, error) {
 	result.StatusOnly = true
 	result.Duration = time.Since(start)
 
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates {
+	if result.NewCommits == 0 && result.NewMessages == 0 {
 		result.Tier1Summary = "No new activity."
 		debugLog("status poll skip", "stage", "status", "step", "skip", "project", p.project.Name)
 	} else {
@@ -797,16 +741,13 @@ func (p *Poller) doPoll(ctx context.Context) (*PollResult, error) {
 	if gathered.msgSummary != "" {
 		tier1Parts = append(tier1Parts, gathered.msgSummary)
 	}
-	if gathered.trackedChanges != "" {
-		tier1Parts = append(tier1Parts, "Tracked item status changes: "+gathered.trackedChanges)
-	}
 	if len(tier1Parts) == 0 {
 		tier1Parts = append(tier1Parts, "No new activity.")
 	}
 	result.Tier1Summary = strings.Join(tier1Parts, "\n\n")
 
 	// Skip analyzer if there's nothing new.
-	if result.NewCommits == 0 && result.NewMessages == 0 && len(result.TrackedItemChanges) == 0 && !gathered.sweepHadUpdates {
+	if result.NewCommits == 0 && result.NewMessages == 0 {
 		result.NoNewActivity = true
 		result.Duration = time.Since(start)
 		debugLog("poll skip", "stage", "analysis", "step", "skip", "reason", "no new activity")
@@ -967,15 +908,6 @@ When the operator asks questions, answer from your accumulated context.
 const DefaultAnalyzerFocus = `Focus on cross-repo coordination and engineering progress. Be concise, evidence-based, and actionable. Prioritize blockers and coordination needs. Use direct, professional language.`
 
 func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, completedItems []db.CompletedItem, autopilotTasks []db.AutopilotTask) string {
-	trackedItems := gathered.trackedItems
-
-	// Build lookup of autopilot-managed issues: owner/repo#number → status.
-	autopilotIndex := make(map[string]string, len(autopilotTasks))
-	for _, t := range autopilotTasks {
-		key := fmt.Sprintf("%s/%s#%d", t.Owner, t.Repo, t.IssueNumber)
-		autopilotIndex[key] = t.Status
-	}
-
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Current time: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
@@ -991,41 +923,25 @@ func (p *Poller) buildAnalysisPrompt(gathered *gatherResult, completedItems []db
 	if gathered.msgSummary != "" {
 		fmt.Fprintf(&b, "## Message Bus Activity\n%s\n\n", gathered.msgSummary)
 	}
-	// Include tracked item status changes.
-	if gathered.trackedChanges != "" {
-		fmt.Fprintf(&b, "## Tracked Item Status Changes\n%s\n\n", gathered.trackedChanges)
-	}
 
-	// Tracked items with autopilot/manual tags.
-	if len(trackedItems) > 0 {
-		b.WriteString("## Tracked Issues/PRs\n")
-		displayedItems, itemOverflow := truncateSlice(trackedItems, MaxTrackedItemsForTier2)
-		for _, item := range displayedItems {
-			typeTag := "issue"
-			if item.ItemType == "pull_request" {
-				typeTag = "PR"
-			}
-			// Tag as autopilot-managed or manual.
-			ref := item.DisplayRef()
-			managedTag := "manual"
-			if apStatus, ok := autopilotIndex[ref]; ok {
-				managedTag = "autopilot:" + apStatus
-			}
-			fmt.Fprintf(&b, "- [%s] [%s] [%s] %s: %s\n", item.LastStatus, typeTag, managedTag, ref, item.Title)
-			if item.ItemType == "pull_request" && item.State == "open" {
-				if item.IsDraft {
-					b.WriteString("  Draft: yes\n")
-				}
-				if item.ReviewState != "" {
-					fmt.Fprintf(&b, "  Review: %s\n", item.ReviewState)
-				}
-			}
-			if item.ProgressSummary != "" {
-				fmt.Fprintf(&b, "  Progress: %s\n", item.ProgressSummary)
+	// Autopilot tasks — single source of truth for what's being worked on.
+	var activeTasks []db.AutopilotTask
+	for _, t := range autopilotTasks {
+		if t.Status != "removed" && t.Status != "done" && t.Status != "skipped" {
+			activeTasks = append(activeTasks, t)
+		}
+	}
+	if len(activeTasks) > 0 {
+		b.WriteString("## Active Tasks\n")
+		displayedTasks, taskOverflow := truncateSlice(activeTasks, MaxTrackedItemsForTier2)
+		for _, t := range displayedTasks {
+			fmt.Fprintf(&b, "- [%s] %s/%s#%d: %s\n", t.Status, t.Owner, t.Repo, t.IssueNumber, t.IssueTitle)
+			if t.PRNumber > 0 {
+				fmt.Fprintf(&b, "  PR: #%d\n", t.PRNumber)
 			}
 		}
-		if itemOverflow != "" {
-			fmt.Fprintf(&b, "%s\n", itemOverflow)
+		if taskOverflow != "" {
+			fmt.Fprintf(&b, "%s\n", taskOverflow)
 		}
 		b.WriteString("\n")
 	}
@@ -1073,9 +989,6 @@ func (p *Poller) summarize(result *PollResult) string {
 	}
 	if result.NewWorktrees > 0 {
 		parts = append(parts, fmt.Sprintf("%d new worktrees", result.NewWorktrees))
-	}
-	if len(result.TrackedItemChanges) > 0 {
-		parts = append(parts, fmt.Sprintf("%d tracked item changes", len(result.TrackedItemChanges)))
 	}
 	if result.BusMessageSent != "" {
 		parts = append(parts, "bus message sent")

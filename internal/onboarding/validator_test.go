@@ -209,14 +209,10 @@ func TestParseValidationLog_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	if result.NumTurns != 4 {
+		t.Errorf("NumTurns = %d, want 4", result.NumTurns)
 	}
-	r := *result
-	if r.NumTurns != 4 {
-		t.Errorf("NumTurns = %d, want 4", r.NumTurns)
-	}
-	if r.IsError {
+	if result.IsError {
 		t.Error("IsError should be false")
 	}
 	if len(result.PermissionDenials) != 0 {

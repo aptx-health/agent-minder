@@ -23,21 +23,17 @@ func TestParseAgentLog_ResultEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
+	if result.NumTurns != 5 {
+		t.Errorf("NumTurns = %d, want 5", result.NumTurns)
 	}
-	r := *result
-	if r.NumTurns != 5 {
-		t.Errorf("NumTurns = %d, want 5", r.NumTurns)
+	if result.TotalCost != 0.42 {
+		t.Errorf("TotalCost = %f, want 0.42", result.TotalCost)
 	}
-	if r.TotalCost != 0.42 {
-		t.Errorf("TotalCost = %f, want 0.42", r.TotalCost)
+	if result.Result != "Done!" {
+		t.Errorf("Result = %q, want %q", result.Result, "Done!")
 	}
-	if r.Result != "Done!" {
-		t.Errorf("Result = %q, want %q", r.Result, "Done!")
-	}
-	if r.SessionID != "abc-123" {
-		t.Errorf("SessionID = %q, want %q", r.SessionID, "abc-123")
+	if result.SessionID != "abc-123" {
+		t.Errorf("SessionID = %q, want %q", result.SessionID, "abc-123")
 	}
 	if result.IsError {
 		t.Error("IsError should be false")
@@ -100,12 +96,8 @@ more garbage
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result == nil {
-		t.Fatal("should still find result event among garbage lines")
-	}
-	r2 := *result
-	if r2.NumTurns != 3 {
-		t.Errorf("NumTurns = %d, want 3", r2.NumTurns)
+	if result.NumTurns != 3 {
+		t.Errorf("NumTurns = %d, want 3", result.NumTurns)
 	}
 }
 
