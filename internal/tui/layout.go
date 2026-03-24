@@ -2399,6 +2399,7 @@ var (
 		{"A", "stop all agents"},
 		{"S", "stop selected"},
 		{"r", "restart/review/spinoff"},
+		{"g", "design interview"},
 		{"b", "bump task limits"},
 		{"c", "copy worktree path"},
 		{"+", "add slot"},
