@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/api"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/deploy"
 	"github.com/spf13/cobra"
@@ -20,7 +21,12 @@ func init() {
 	deployCmd.AddCommand(deployListCmd)
 }
 
-func runDeployList(cmd *cobra.Command, args []string) error {
+func runDeployList(_ *cobra.Command, _ []string) error {
+	// Remote mode: query the daemon's HTTP API.
+	if client := remoteClient(); client != nil {
+		return runDeployListRemote(client)
+	}
+
 	conn, err := db.Open(db.DefaultDBPath())
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
@@ -85,5 +91,59 @@ func runDeployList(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%-20s %-25s %7d  %-12s %s\n",
 			p.Name, truncate(repoRef, 25), len(tasks), statusStr, age)
 	}
+	return nil
+}
+
+func runDeployListRemote(client *api.Client) error {
+	status, err := client.GetStatus()
+	if err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
+
+	tasks, err := client.GetTasks()
+	if err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
+
+	// Determine repo from tasks.
+	repoRef := ""
+	if len(tasks) > 0 && tasks[0].Owner != "" {
+		repoRef = tasks[0].Owner + "/" + tasks[0].Repo
+	}
+
+	// Summarize task status.
+	counts := map[string]int{}
+	for _, t := range tasks {
+		counts[t.Status]++
+	}
+	var statusStr string
+	if !status.Alive {
+		statusStr = "completed"
+	} else if running := counts["running"]; running > 0 {
+		statusStr = fmt.Sprintf("%d running", running)
+	} else {
+		statusStr = "idle"
+	}
+
+	// Uptime as age.
+	age := ""
+	if status.StartedAt != "" {
+		started, err := time.Parse(time.RFC3339, status.StartedAt)
+		if err == nil {
+			d := time.Since(started)
+			switch {
+			case d < time.Hour:
+				age = fmt.Sprintf("%dm ago", int(d.Minutes()))
+			case d < 24*time.Hour:
+				age = fmt.Sprintf("%dh ago", int(d.Hours()))
+			default:
+				age = fmt.Sprintf("%dd ago", int(d.Hours()/24))
+			}
+		}
+	}
+
+	fmt.Printf("%-20s %-25s %7s  %-12s %s\n", "ID", "REPO", "ISSUES", "STATUS", "STARTED")
+	fmt.Printf("%-20s %-25s %7d  %-12s %s\n",
+		status.DeployID, truncate(repoRef, 25), len(tasks), statusStr, age)
 	return nil
 }

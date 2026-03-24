@@ -367,6 +367,48 @@ func TestCORS_PreflightRequest(t *testing.T) {
 	}
 }
 
+func TestStopEndpoint_NotWired(t *testing.T) {
+	srv, _, _ := setupTestServer(t)
+	rr := doRequest(t, srv, http.MethodPost, "/stop")
+	if rr.Code != http.StatusNotImplemented {
+		t.Errorf("expected 501, got %d", rr.Code)
+	}
+}
+
+func TestStopEndpoint_Wired(t *testing.T) {
+	store := openTestDB(t)
+	project := &db.Project{
+		Name:                "stop-deploy",
+		IsDeploy:            true,
+		GoalType:            "deploy",
+		RefreshIntervalSec:  300,
+		StatusIntervalSec:   300,
+		AnalysisIntervalSec: 1800,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	stopped := make(chan struct{}, 1)
+	srv := New(Config{
+		Store:     store,
+		ProjectID: project.ID,
+		DeployID:  "stop-deploy",
+		APIKey:    "",
+		StopDaemon: func() {
+			stopped <- struct{}{}
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/stop", nil)
+	rr := httptest.NewRecorder()
+	srv.middleware(srv.mux).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Errorf("expected 202, got %d", rr.Code)
+	}
+}
+
 func TestTaskLogEndpoint_NoLog(t *testing.T) {
 	srv, store, projectID := setupTestServer(t)
 

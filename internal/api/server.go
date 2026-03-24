@@ -30,6 +30,10 @@ type Server struct {
 	// triggerPoll is called to trigger a manual analysis poll cycle.
 	// May be nil if not wired up.
 	triggerPoll func()
+
+	// stopDaemon is called to initiate graceful daemon shutdown.
+	// May be nil if not wired up.
+	stopDaemon func()
 }
 
 // Config holds configuration for the API server.
@@ -40,6 +44,7 @@ type Config struct {
 	APIKey      string
 	BindAddr    string
 	TriggerPoll func()
+	StopDaemon  func()
 }
 
 // New creates a new API server with the given configuration.
@@ -52,6 +57,7 @@ func New(cfg Config) *Server {
 		startTime:   time.Now(),
 		mux:         http.NewServeMux(),
 		triggerPoll: cfg.TriggerPoll,
+		stopDaemon:  cfg.StopDaemon,
 	}
 
 	s.mux.HandleFunc("GET /status", s.handleStatus)
@@ -62,6 +68,7 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /analysis", s.handleAnalysis)
 	s.mux.HandleFunc("POST /analysis/poll", s.handleTriggerPoll)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	s.mux.HandleFunc("POST /stop", s.handleStop)
 
 	s.srv = &http.Server{
 		Handler:      s.middleware(s.mux),
@@ -340,6 +347,16 @@ func (s *Server) handleTriggerPoll(w http.ResponseWriter, _ *http.Request) {
 	}
 	s.triggerPoll()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "poll triggered"})
+}
+
+func (s *Server) handleStop(w http.ResponseWriter, _ *http.Request) {
+	if s.stopDaemon == nil {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{"not_implemented", "stop not wired up"})
+		return
+	}
+	// Trigger stop in background so we can send the response first.
+	go s.stopDaemon()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "stop signal sent"})
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {

@@ -34,6 +34,7 @@ var (
 	deployProject   string
 	deployServe     string
 	deployAPIKey    string
+	deployRemote    string
 )
 
 var deployCmd = &cobra.Command{
@@ -59,7 +60,11 @@ creates an ephemeral deployment. Use subcommands to monitor progress.`,
   # Check deployment status
   agent-minder deploy list
   agent-minder deploy status <deploy-id>
-  agent-minder deploy stop <deploy-id>`,
+  agent-minder deploy stop <deploy-id>
+
+  # Query a remote daemon
+  agent-minder deploy list --remote vps:7749
+  agent-minder deploy status <deploy-id> --remote vps:7749 --api-key secret`,
 	Args: cobra.MinimumNArgs(0),
 	RunE: runDeploy,
 }
@@ -74,7 +79,10 @@ func init() {
 	deployCmd.Flags().StringVar(&deployProject, "project", "", "Inherit settings (agents, turns, budget, skip label, base branch) from an existing project")
 
 	deployCmd.Flags().StringVar(&deployServe, "serve", "", "Enable HTTP API server on the given address (e.g. :7749)")
-	deployCmd.Flags().StringVar(&deployAPIKey, "api-key", "", "API key for HTTP server authentication (or set MINDER_API_KEY)")
+
+	// Persistent flags shared by all subcommands (list, status, stop).
+	deployCmd.PersistentFlags().StringVar(&deployRemote, "remote", "", "Query a remote daemon at host:port (or set MINDER_REMOTE)")
+	deployCmd.PersistentFlags().StringVar(&deployAPIKey, "api-key", "", "API key for HTTP server authentication (or set MINDER_API_KEY)")
 
 	// Hidden flags for daemon re-exec.
 	deployCmd.Flags().BoolVar(&deployDaemon, "daemon", false, "Run as background daemon")
@@ -460,6 +468,11 @@ func runDeployDaemon() error {
 			DeployID:  deployID,
 			APIKey:    apiKeyVal,
 			BindAddr:  serveAddr,
+			StopDaemon: func() {
+				log.Printf("Stop requested via API")
+				supervisor.Stop()
+				cancel()
+			},
 		})
 		go func() {
 			if err := apiServer.ListenAndServe(serveAddr); err != nil && err != http.ErrServerClosed {
@@ -499,4 +512,21 @@ func runDeployDaemon() error {
 	}
 
 	return nil
+}
+
+// remoteClient returns an API client if --remote (or MINDER_REMOTE) is set,
+// or nil if the command should use the local database.
+func remoteClient() *api.Client {
+	addr := deployRemote
+	if addr == "" {
+		addr = os.Getenv("MINDER_REMOTE")
+	}
+	if addr == "" {
+		return nil
+	}
+	apiKey := deployAPIKey
+	if apiKey == "" {
+		apiKey = os.Getenv("MINDER_API_KEY")
+	}
+	return api.NewClient(addr, apiKey)
 }
