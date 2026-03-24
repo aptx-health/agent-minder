@@ -148,3 +148,85 @@ func TestClient_ServerError(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, err.Error())
 	}
 }
+
+func TestClient_TriggerPoll(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/analysis/poll" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"poll triggered"}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "")
+	err := client.TriggerPoll()
+	if err != nil {
+		t.Fatalf("TriggerPoll: %v", err)
+	}
+	if !called {
+		t.Error("trigger handler was not called")
+	}
+}
+
+func TestClient_TriggerPoll_Conflict(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(errorResponse{"conflict", "analysis already in progress"})
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "")
+	err := client.TriggerPoll()
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	expected := "remote error (409): analysis already in progress"
+	if err.Error() != expected {
+		t.Errorf("expected %q, got %q", expected, err.Error())
+	}
+}
+
+func TestClient_GetAnalysis(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/analysis" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("limit") != "3" {
+			t.Errorf("expected limit=3, got %s", r.URL.Query().Get("limit"))
+		}
+		results := []AnalysisResponse{
+			{
+				ID:         1,
+				NewCommits: 5,
+				Analysis:   "All systems nominal",
+				PolledAt:   "2026-03-24 12:00:00",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(results)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.URL, "")
+	results, err := client.GetAnalysis(3)
+	if err != nil {
+		t.Fatalf("GetAnalysis: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Analysis != "All systems nominal" {
+		t.Errorf("unexpected analysis: %s", results[0].Analysis)
+	}
+	if results[0].NewCommits != 5 {
+		t.Errorf("expected 5 commits, got %d", results[0].NewCommits)
+	}
+}

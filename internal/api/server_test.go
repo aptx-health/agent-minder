@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -337,7 +338,7 @@ func TestTriggerPoll_Wired(t *testing.T) {
 		ProjectID:   project.ID,
 		DeployID:    "poll-deploy",
 		APIKey:      "",
-		TriggerPoll: func() { triggered = true },
+		TriggerPoll: func() error { triggered = true; return nil },
 	})
 
 	req := httptest.NewRequest(http.MethodPost, "/analysis/poll", nil)
@@ -349,6 +350,44 @@ func TestTriggerPoll_Wired(t *testing.T) {
 	}
 	if !triggered {
 		t.Error("expected triggerPoll to be called")
+	}
+}
+
+func TestTriggerPoll_InProgress(t *testing.T) {
+	store := openTestDB(t)
+	project := &db.Project{
+		Name:                "poll-busy",
+		IsDeploy:            true,
+		GoalType:            "deploy",
+		RefreshIntervalSec:  300,
+		StatusIntervalSec:   300,
+		AnalysisIntervalSec: 1800,
+	}
+	if err := store.CreateProject(project); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	srv := New(Config{
+		Store:     store,
+		ProjectID: project.ID,
+		DeployID:  "poll-busy",
+		APIKey:    "",
+		TriggerPoll: func() error {
+			return fmt.Errorf("analysis already in progress")
+		},
+	})
+
+	rr := doRequest(t, srv, http.MethodPost, "/analysis/poll")
+	if rr.Code != http.StatusConflict {
+		t.Errorf("expected 409, got %d", rr.Code)
+	}
+
+	var resp errorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error != "conflict" {
+		t.Errorf("expected error 'conflict', got %q", resp.Error)
 	}
 }
 
