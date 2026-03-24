@@ -209,78 +209,54 @@ func (m Model) renderAnalysisTab() string {
 }
 
 // renderObservabilityTab renders the Observability tab with cost breakdowns.
+// All data is read from cached Model fields (refreshed via refreshObsCosts).
 func (m Model) renderObservabilityTab() string {
 	var b strings.Builder
 
 	b.WriteString(headerStyle().Render("Cost Overview"))
 	b.WriteString("\n\n")
 
-	today := time.Now().Format("2006-01-02")
-
-	// Daily cost.
-	daily, dailyErr := m.store.DailyCost(m.project.ID, today)
-	b.WriteString("  ")
-	b.WriteString(headerStyle().Render("Today"))
-	b.WriteString("\n")
-	if dailyErr != nil {
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", dailyErr)))
-	} else {
-		fmt.Fprintf(&b, "    $%.2f across %d tasks", daily.TotalCost, daily.TaskCount)
+	if m.obsCostErr != nil {
+		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", m.obsCostErr)))
+		b.WriteString("\n")
+		return b.String()
 	}
-	b.WriteString("\n\n")
 
-	// Weekly cost.
-	weekly, weeklyErr := m.store.WeeklyCost(m.project.ID, today)
-	b.WriteString("  ")
-	b.WriteString(headerStyle().Render("This Week"))
-	b.WriteString("\n")
-	if weeklyErr != nil {
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", weeklyErr)))
-	} else {
-		fmt.Fprintf(&b, "    $%.2f across %d tasks", weekly.TotalCost, weekly.TaskCount)
-	}
-	b.WriteString("\n\n")
+	renderCostSection(&b, "Today", m.obsDailyCost)
+	renderCostSection(&b, "This Week", m.obsWeeklyCost)
+	renderCostSection(&b, "Overall", m.obsOverallCost)
 
-	// Overall cost.
-	overall, overallErr := m.store.OverallCost(m.project.ID)
-	b.WriteString("  ")
-	b.WriteString(headerStyle().Render("Overall"))
-	b.WriteString("\n")
-	if overallErr != nil {
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", overallErr)))
-	} else {
-		fmt.Fprintf(&b, "    $%.2f across %d tasks", overall.TotalCost, overall.TaskCount)
-	}
-	b.WriteString("\n\n")
-
-	// Per-task breakdown for today.
-	details, detailsErr := m.store.DailyTaskCosts(m.project.ID, today)
 	b.WriteString("  ")
 	b.WriteString(headerStyle().Render("Task Breakdown (Today)"))
 	b.WriteString("\n")
-	if detailsErr != nil {
-		b.WriteString(mutedStyle().Render(fmt.Sprintf("    error: %v", detailsErr)))
-		b.WriteString("\n")
-	} else if len(details) == 0 {
+	if len(m.obsDailyTaskCosts) == 0 {
 		b.WriteString(mutedStyle().Render("    No task costs recorded today."))
 		b.WriteString("\n")
 	} else {
-		for _, d := range details {
-			title := d.IssueTitle
-			maxTitle := m.width - 40
-			if maxTitle < 20 {
-				maxTitle = 20
-			}
-			if len(title) > maxTitle {
-				title = title[:maxTitle-3] + "..."
-			}
-			line := fmt.Sprintf("    #%-5d $%.2f  %-8s  %s", d.IssueNumber, d.CostUSD, d.Status, title)
-			b.WriteString(line)
-			b.WriteString("\n")
+		maxTitle := m.width - 40
+		if maxTitle < 20 {
+			maxTitle = 20
+		}
+		for _, d := range m.obsDailyTaskCosts {
+			title := truncateLine(d.IssueTitle, maxTitle)
+			fmt.Fprintf(&b, "    #%-5d $%.2f  %-8s  %s\n", d.IssueNumber, d.CostUSD, d.Status, title)
 		}
 	}
 
 	return b.String()
+}
+
+// renderCostSection writes a labeled cost summary block.
+func renderCostSection(b *strings.Builder, label string, cs *db.CostSummary) {
+	b.WriteString("  ")
+	b.WriteString(headerStyle().Render(label))
+	b.WriteString("\n")
+	if cs == nil {
+		b.WriteString(mutedStyle().Render("    no data"))
+	} else {
+		fmt.Fprintf(b, "    $%.2f across %d tasks", cs.TotalCost, cs.TaskCount)
+	}
+	b.WriteString("\n\n")
 }
 
 // renderAutopilotTab renders the Autopilot tab content.
