@@ -55,11 +55,14 @@ func TestStartHeartbeatUpdates(t *testing.T) {
 	stop := StartHeartbeat(id, 50*time.Millisecond)
 	defer stop()
 
-	// Give it time to write at least once.
-	time.Sleep(100 * time.Millisecond)
+	// StartHeartbeat writes synchronously before returning, so the file
+	// should exist immediately — no sleep needed.
 	hb := ReadHeartbeat(id)
 	if hb.IsZero() {
-		t.Fatal("expected heartbeat to be written by ticker")
+		t.Fatal("expected heartbeat to be written by StartHeartbeat")
+	}
+	if time.Since(hb) > 5*time.Second {
+		t.Fatalf("heartbeat too old: %v", hb)
 	}
 }
 

@@ -43,11 +43,11 @@ func RemoveHeartbeat(id string) {
 // StartHeartbeat starts a goroutine that writes heartbeat every interval.
 // Returns a stop function.
 func StartHeartbeat(id string, interval time.Duration) func() {
+	_ = WriteHeartbeat(id) // write synchronously before spawning goroutine
 	stop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		_ = WriteHeartbeat(id) // write immediately
 		for {
 			select {
 			case <-stop:
@@ -124,8 +124,9 @@ func RecoverDaemonState(store *db.Store, project *db.Project, repoDir string) (i
 	return recovered, nil
 }
 
-// cleanOrphanedWorktrees removes worktree directories that don't correspond to
-// any active (running/review/queued) task. Returns the count cleaned.
+// cleanOrphanedWorktrees removes all worktree directories for a project.
+// After crash recovery, stale tasks have been reset so all worktrees are
+// considered orphaned — the supervisor will recreate them as needed.
 func cleanOrphanedWorktrees(projectName, repoDir string) int {
 	home, err := os.UserHomeDir()
 	if err != nil {
