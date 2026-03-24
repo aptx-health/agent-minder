@@ -268,9 +268,15 @@ func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSe
 		}
 	}
 
+	// Ensure the reviewer agent definition exists so --agent reviewer works.
+	if _, err := ensureAgentDefByName(task.WorktreePath, AgentReviewer); err != nil {
+		return nil, fmt.Errorf("resolve reviewer agent def: %w", err)
+	}
+
 	// Pre-fetch all context so the agent starts ready for conversation.
 	issueComments := s.fetchIssueComments(ctx, task.IssueNumber, task.WorktreePath)
 	prDetails := s.fetchPRDetails(ctx, task.PRNumber, task.WorktreePath)
+	prComments := s.fetchPRComments(ctx, task.PRNumber, task.WorktreePath)
 	prDiff := s.fetchPRDiff(ctx, task.PRNumber, task.WorktreePath)
 	claudeMD := s.readClaudeMD(task.WorktreePath)
 
@@ -285,10 +291,11 @@ func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSe
 		rw.siblingTasks = tasks
 	}
 
-	prompt := renderReviewSessionPrompt(task, s.owner, s.repo, s.project.GoalDescription, rw, issueComments, prDetails, prDiff, claudeMD)
+	prompt := renderReviewSessionPrompt(task, s.owner, s.repo, s.project.GoalDescription, rw, issueComments, prDetails, prComments, prDiff, claudeMD)
 
 	allowedTools := resolveAllowedTools(s.repoDir)
 	args := []string{
+		"--agent", "reviewer",
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
@@ -648,6 +655,21 @@ func (s *Supervisor) fetchPRDiff(ctx context.Context, prNumber int, workDir stri
 	out, err := cmd.Output()
 	if err != nil {
 		debugLog("review-session: fetch PR diff", "error", err, "pr", prNumber)
+		return ""
+	}
+	return string(out)
+}
+
+// fetchPRComments shells out to gh to get PR comments (both review comments and conversation).
+// Returns empty string on any error — the review session still works, just with less context.
+func (s *Supervisor) fetchPRComments(ctx context.Context, prNumber int, workDir string) string {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(prNumber),
+		"--comments", "-R", s.owner+"/"+s.repo)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+	out, err := cmd.Output()
+	if err != nil {
+		debugLog("review-session: fetch PR comments", "error", err, "pr", prNumber)
 		return ""
 	}
 	return string(out)
