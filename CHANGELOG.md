@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Remote TUI client**: `agent-minder deploy tui --remote host:port` launches a k9s-like live dashboard for monitoring remote deploy daemons. Features: live-updating task table with color-coded statuses, dependency graph visualization, analysis results viewer, agent log streaming with auto-tail, and action keys for refresh/poll/stop. Configurable poll intervals via `--task-poll` and `--analysis-poll` flags. Auth via `--api-key` flag or `MINDER_API_KEY` env var. New `internal/remotetui` package with bubbletea v2 model. (#282)
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
