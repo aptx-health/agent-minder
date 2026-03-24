@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
+
 ### Changed
 - **Long-lived supervisor**: Supervisor stays alive after all tasks complete instead of exiting — both daemon and TUI modes. Watch loop creates supervisor once at startup; new tasks are inserted as `pending` and ingested by the supervisor's 30-second ticker with incremental dep analysis. TUI autopilot mode stays active with idle slots visible until user explicitly presses `A` to stop. Eliminates dual-goroutine dep graph race conditions. (#336)
 

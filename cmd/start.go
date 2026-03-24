@@ -36,6 +36,8 @@ o=onboard, a=autopilot, A=stop autopilot, t=theme, q=quit.`,
 }
 
 func init() {
+	startCmd.Flags().String("watch-milestone", "", "Watch a GitHub milestone for new issues during autopilot (e.g., \"v1.0\")")
+	startCmd.Flags().String("watch-label", "", "Watch a GitHub label for new issues during autopilot (e.g., \"ready-for-agent\")")
 	rootCmd.AddCommand(startCmd)
 }
 
@@ -62,6 +64,28 @@ func runStart(cmd *cobra.Command, args []string) error {
 	project, err := store.GetProject(projectName)
 	if err != nil {
 		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
+	}
+
+	// Apply optional watch filter flags.
+	watchMilestone, _ := cmd.Flags().GetString("watch-milestone")
+	watchLabel, _ := cmd.Flags().GetString("watch-label")
+	if watchMilestone != "" && watchLabel != "" {
+		return fmt.Errorf("cannot specify both --watch-milestone and --watch-label")
+	}
+	if watchMilestone != "" {
+		project.AutopilotFilterType = "milestone"
+		project.AutopilotFilterValue = watchMilestone
+		if err := store.UpdateProject(project); err != nil {
+			return fmt.Errorf("saving watch filter: %w", err)
+		}
+		log.Printf("Watch filter: milestone %q", watchMilestone)
+	} else if watchLabel != "" {
+		project.AutopilotFilterType = "label"
+		project.AutopilotFilterValue = watchLabel
+		if err := store.UpdateProject(project); err != nil {
+			return fmt.Errorf("saving watch filter: %w", err)
+		}
+		log.Printf("Watch filter: label %q", watchLabel)
 	}
 
 	// Create Claude CLI completer for all LLM calls.
