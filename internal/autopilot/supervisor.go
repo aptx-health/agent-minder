@@ -1687,6 +1687,20 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		// discover new tracked items, fill new slots.
 		reviewCheckTicker := time.NewTicker(30 * time.Second)
 		defer reviewCheckTicker.Stop()
+
+		// Watch ticker: polls GitHub for new issues matching the project's filter.
+		// Uses the project's refresh interval (default 2 min) as the watch poll interval.
+		watchInterval := s.project.RefreshInterval()
+		if watchInterval < 60*time.Second {
+			watchInterval = 60 * time.Second
+		}
+		watchTicker := time.NewTicker(watchInterval)
+		defer watchTicker.Stop()
+		// Do an initial watch poll right away if a filter is configured.
+		if s.project.AutopilotFilterType != "" && s.project.AutopilotFilterValue != "" {
+			s.watchPoll(ctx)
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -1695,6 +1709,17 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.mu.Unlock()
 				s.emitEvent("finished", "Autopilot cancelled", nil)
 				return
+			case <-watchTicker.C:
+				discovered := s.watchPoll(ctx)
+				if discovered > 0 {
+					// The next reviewCheckTicker will ingest pending tasks.
+					// But trigger immediate ingestion for responsiveness.
+					ingested := s.ingestPendingTasks(ctx)
+					unblocked := s.unblockSatisfiedTasks()
+					if ingested > 0 || unblocked > 0 {
+						s.fillSlots(ctx)
+					}
+				}
 			case <-reviewCheckTicker.C:
 				s.checkReviewTasks(ctx)
 				s.checkManualTasks(ctx)
@@ -3819,6 +3844,127 @@ func (s *Supervisor) ingestPendingTasks(ctx context.Context) int {
 	}
 
 	return len(pending)
+}
+
+// watchPoll queries GitHub for issues matching the project's watch filter
+// (milestone or label), creates autopilot_tasks with status "pending" for any
+// new issues not already in the task table, and returns the count of newly
+// created tasks. This is the TUI equivalent of watchPollAndQueue in deploy_watch.go.
+//
+// No-op if the project has no filter configured.
+func (s *Supervisor) watchPoll(ctx context.Context) int {
+	filterType := s.project.AutopilotFilterType
+	filterValue := s.project.AutopilotFilterValue
+	if filterType == "" || filterValue == "" {
+		return 0
+	}
+
+	ghClient := s.newGHClient()
+
+	var items []ghpkg.ItemStatus
+	var err error
+	switch filterType {
+	case "milestone":
+		milestones, mErr := ghClient.ListMilestones(ctx, s.owner, s.repo)
+		if mErr != nil {
+			debugLog("watchPoll: list milestones failed", "error", mErr.Error())
+			return 0
+		}
+		var msNum int
+		for _, ms := range milestones {
+			if ms.Value == filterValue {
+				msNum = ms.ID
+				break
+			}
+		}
+		if msNum == 0 {
+			debugLog("watchPoll: milestone not found", "milestone", filterValue)
+			return 0
+		}
+		result, sErr := ghClient.ListIssuesByMilestone(ctx, s.owner, s.repo, msNum)
+		if sErr != nil {
+			debugLog("watchPoll: search by milestone failed", "error", sErr.Error())
+			return 0
+		}
+		items = result.Items
+	case "label":
+		result, sErr := ghClient.SearchIssues(ctx, s.owner, s.repo, ghpkg.FilterLabel, filterValue)
+		if sErr != nil {
+			debugLog("watchPoll: search by label failed", "error", sErr.Error())
+			return 0
+		}
+		items = result.Items
+	default:
+		debugLog("watchPoll: unknown filter type", "filter_type", filterType)
+		return 0
+	}
+
+	// Deduplicate against existing tasks.
+	existingTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		debugLog("watchPoll: get existing tasks failed", "error", err.Error())
+		return 0
+	}
+	tracked := make(map[int]bool, len(existingTasks))
+	for _, t := range existingTasks {
+		tracked[t.IssueNumber] = true
+	}
+
+	skipLabel := s.project.AutopilotSkipLabel
+	queued := 0
+
+	for _, issue := range items {
+		if tracked[issue.Number] {
+			continue
+		}
+		// Skip if the issue has the skip label.
+		skip := false
+		for _, l := range issue.Labels {
+			if l == skipLabel {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		if issue.State != "open" {
+			continue
+		}
+
+		// Fetch full issue body if truncated.
+		body := issue.Body
+		if body == "" {
+			fetched, fetchErr := ghClient.FetchItem(ctx, s.owner, s.repo, issue.Number)
+			if fetchErr != nil {
+				debugLog("watchPoll: fetch body failed", "issue", issue.Number, "error", fetchErr.Error())
+			} else {
+				body = fetched.Body
+			}
+		}
+
+		task := &db.AutopilotTask{
+			ProjectID:    s.project.ID,
+			Owner:        s.owner,
+			Repo:         s.repo,
+			IssueNumber:  issue.Number,
+			IssueTitle:   issue.Title,
+			IssueBody:    body,
+			Dependencies: "[]",
+			Status:       "pending",
+		}
+		if createErr := s.store.CreateAutopilotTask(task); createErr != nil {
+			debugLog("watchPoll: create task failed", "issue", issue.Number, "error", createErr.Error())
+			continue
+		}
+		queued++
+	}
+
+	if queued > 0 {
+		filterDesc := fmt.Sprintf("%s %s", filterType, filterValue)
+		s.emitEvent("discovered", fmt.Sprintf("Discovered %d new issue(s) from %s", queued, filterDesc), nil)
+	}
+	return queued
 }
 
 func (s *Supervisor) unblockSatisfiedTasks() int {

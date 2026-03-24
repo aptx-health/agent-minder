@@ -423,6 +423,13 @@ func (m Model) renderAutopilotTab() string {
 func (m Model) renderAutopilotRunningContent() string {
 	var b strings.Builder
 
+	// Watch indicator: show when a milestone/label filter is active.
+	if m.project.AutopilotFilterType != "" && m.project.AutopilotFilterValue != "" {
+		watchLabel := fmt.Sprintf("watching: %s %s", m.project.AutopilotFilterType, m.project.AutopilotFilterValue)
+		b.WriteString(broadcastStyle().Render("  👁 " + watchLabel))
+		b.WriteString("\n\n")
+	}
+
 	// Slot section (compact, top of tab).
 	if m.autopilotSupervisor != nil {
 		slots := m.autopilotSupervisor.SlotStatus()

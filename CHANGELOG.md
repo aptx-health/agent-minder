@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
+
 ### Fixed
 - **Max turns fallback detection**: When an agent's stream-json result event is missing (nil result), the supervisor now counts assistant events from the log file to detect turn limit exhaustion. Previously these agents were misclassified as "bailed" instead of "failed" with reason "max_turns". (#340)
 - **Autopilot settings display**: Settings panel and autopilot confirm screen now show effective defaults (150 turns, $10.00 budget) instead of raw DB zeros when no override is configured. Bumped default fallbacks from 50→150 turns and $3.00→$10.00. (#341)
