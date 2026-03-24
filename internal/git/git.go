@@ -263,6 +263,12 @@ func WorktreeRemove(repoDir, worktreePath string) error {
 	return err
 }
 
+// WorktreePrune runs git worktree prune to clean up stale bookkeeping entries.
+func WorktreePrune(repoDir string) error {
+	_, err := run(repoDir, "worktree", "prune")
+	return err
+}
+
 // DeleteBranch deletes a local branch.
 func DeleteBranch(repoDir, branch string) error {
 	_, err := run(repoDir, "branch", "-D", branch)

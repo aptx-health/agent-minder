@@ -260,6 +260,7 @@ func (c *Client) SearchIssues(ctx context.Context, owner, repo string, filterTyp
 		items = append(items, ItemStatus{
 			Number:   issue.GetNumber(),
 			Title:    issue.GetTitle(),
+			Body:     issue.GetBody(),
 			State:    issue.GetState(),
 			Labels:   extractLabels(issue.Labels),
 			ItemType: "issue",
@@ -418,6 +419,7 @@ func (c *Client) ListIssuesByMilestone(ctx context.Context, owner, repo string, 
 		allItems = append(allItems, ItemStatus{
 			Number:   issue.GetNumber(),
 			Title:    issue.GetTitle(),
+			Body:     issue.GetBody(),
 			State:    issue.GetState(),
 			Labels:   extractLabels(issue.Labels),
 			ItemType: "issue",
