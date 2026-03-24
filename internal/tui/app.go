@@ -993,6 +993,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case filterWatchSetMsg:
+		if msg.err != nil {
+			m.filterStatus = fmt.Sprintf("Error setting watch: %v", msg.err)
+		} else {
+			m.filterStatus = fmt.Sprintf("Watching %s: %s", msg.filterType, msg.filterValue)
+		}
+		return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+			return clearFilterStatusMsg{}
+		})
+
 	case filterSearchResultMsg:
 		if m.filterState != nil {
 			if msg.err != nil {
@@ -1033,6 +1043,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case clearFilterStatusMsg:
 		m.filterStatus = ""
+		return m, nil
+
+	case settingsWatchChoicesMsg:
+		if m.settingsState != nil {
+			if msg.err != nil {
+				m.settingsState.err = fmt.Sprintf("Fetch failed: %v", msg.err)
+				m.settingsState.step = settingsStepWatchType
+			} else if len(msg.choices) == 0 {
+				m.settingsState.err = "No choices found"
+				m.settingsState.step = settingsStepWatchType
+			} else {
+				m.settingsState.watchChoices = msg.choices
+				m.settingsState.watchIdx = 0
+				m.settingsState.step = settingsStepWatchChoice
+			}
+		}
 		return m, nil
 
 	case settingsSavedMsg:

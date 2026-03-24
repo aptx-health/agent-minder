@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
+	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	"github.com/dustinlange/agent-minder/internal/poller"
 )
 
@@ -20,6 +22,9 @@ const (
 	settingsStepSelectField settingsStep = iota
 	settingsStepEditValue
 	settingsStepEditTextarea
+	settingsStepWatchType   // selecting none/label/milestone
+	settingsStepWatchFetch  // fetching choices from GitHub
+	settingsStepWatchChoice // selecting a specific label/milestone
 )
 
 // settingsField represents a configurable project setting.
@@ -64,6 +69,24 @@ type settingsState struct {
 	input    textinput.Model
 	textarea textarea.Model
 	err      string
+
+	// Watch filter sub-flow state.
+	watchTypeIdx int                // 0=none, 1=label, 2=milestone
+	watchChoices []ghpkg.RepoChoice // fetched choices for selected type
+	watchIdx     int                // selected choice index
+}
+
+// settingsWatchChoicesMsg is sent when watch filter choices are fetched.
+type settingsWatchChoicesMsg struct {
+	choices []ghpkg.RepoChoice
+	err     error
+}
+
+// Watch type options for the settings sub-flow.
+var watchTypeLabels = []string{"none", "label", "milestone"}
+var watchTypeToFilter = map[string]string{
+	"label":     "label",
+	"milestone": "milestone",
 }
 
 // settingsSavedMsg is sent when settings are persisted.
@@ -160,8 +183,21 @@ func newSettingsState(project *db.Project) *settingsState {
 				value:       boolOnOff(project.AutopilotAutoMerge),
 				toggle:      true,
 			},
+			{
+				label:       "Watch filter",
+				description: "Auto-discover issues by label or milestone",
+				value:       watchFilterDisplay(project.AutopilotFilterType, project.AutopilotFilterValue),
+			},
 		},
 	}
+}
+
+// watchFilterDisplay returns a human-readable display string for the watch filter.
+func watchFilterDisplay(filterType, filterValue string) string {
+	if filterType == "" || filterValue == "" {
+		return "none"
+	}
+	return filterType + ": " + filterValue
 }
 
 // updateSettings handles keypresses for the settings mode.
@@ -179,6 +215,16 @@ func (m Model) updateSettings(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateSettingsEditValue(msg)
 	case settingsStepEditTextarea:
 		return m.updateSettingsEditTextarea(msg)
+	case settingsStepWatchType:
+		return m.updateSettingsWatchType(msg)
+	case settingsStepWatchFetch:
+		// Waiting for async fetch — ignore keys except esc.
+		if msg.String() == "esc" {
+			ss.step = settingsStepSelectField
+		}
+		return m, nil
+	case settingsStepWatchChoice:
+		return m.updateSettingsWatchChoice(msg)
 	}
 
 	return m, nil
@@ -206,6 +252,11 @@ func (m Model) updateSettingsSelectField(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 	case "enter":
 		field := ss.fields[ss.fieldIdx]
 		ss.err = ""
+		if field.label == "Watch filter" {
+			ss.step = settingsStepWatchType
+			ss.watchTypeIdx = 0
+			return m, nil
+		}
 		if field.toggle {
 			m.project.AutopilotAutoMerge = !m.project.AutopilotAutoMerge
 			ss.fields[ss.fieldIdx].value = boolOnOff(m.project.AutopilotAutoMerge)
@@ -408,6 +459,99 @@ func (m Model) updateSettingsEditTextarea(msg tea.KeyPressMsg) (tea.Model, tea.C
 	return m, cmd
 }
 
+func (m Model) updateSettingsWatchType(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	ss := m.settingsState
+	switch msg.String() {
+	case "esc":
+		ss.step = settingsStepSelectField
+		return m, nil
+	case "up", "k":
+		if ss.watchTypeIdx > 0 {
+			ss.watchTypeIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if ss.watchTypeIdx < len(watchTypeLabels)-1 {
+			ss.watchTypeIdx++
+		}
+		return m, nil
+	case "enter":
+		selected := watchTypeLabels[ss.watchTypeIdx]
+		if selected == "none" {
+			// Clear the watch filter.
+			m.project.AutopilotFilterType = ""
+			m.project.AutopilotFilterValue = ""
+			ss.fields[ss.fieldIdx].value = "none"
+			ss.step = settingsStepSelectField
+			return m, func() tea.Msg {
+				err := m.store.UpdateProject(m.project)
+				return settingsSavedMsg{field: "Watch filter", err: err}
+			}
+		}
+		// Fetch choices for label/milestone.
+		ss.step = settingsStepWatchFetch
+		ss.watchChoices = nil
+		ss.watchIdx = 0
+		filterType := watchTypeToFilter[selected]
+
+		p := m.poller
+		ghRepos := p.GitHubRepos()
+		if len(ghRepos) == 0 {
+			ss.err = "No GitHub repos enrolled"
+			ss.step = settingsStepSelectField
+			return m, nil
+		}
+		owner := ghRepos[0].Owner
+		repo := ghRepos[0].Repo
+		var ft ghpkg.FilterType
+		if filterType == "label" {
+			ft = ghpkg.FilterLabel
+		} else {
+			ft = ghpkg.FilterMilestone
+		}
+
+		return m, func() tea.Msg {
+			choices, err := p.FetchFilterChoices(context.Background(), owner, repo, ft)
+			return settingsWatchChoicesMsg{choices: choices, err: err}
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateSettingsWatchChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	ss := m.settingsState
+	switch msg.String() {
+	case "esc":
+		ss.step = settingsStepWatchType
+		return m, nil
+	case "up", "k":
+		if ss.watchIdx > 0 {
+			ss.watchIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if ss.watchIdx < len(ss.watchChoices)-1 {
+			ss.watchIdx++
+		}
+		return m, nil
+	case "enter":
+		if ss.watchIdx >= len(ss.watchChoices) {
+			return m, nil
+		}
+		choice := ss.watchChoices[ss.watchIdx]
+		filterType := watchTypeLabels[ss.watchTypeIdx]
+		m.project.AutopilotFilterType = filterType
+		m.project.AutopilotFilterValue = choice.Value
+		ss.fields[ss.fieldIdx].value = watchFilterDisplay(filterType, choice.Value)
+		ss.step = settingsStepSelectField
+		return m, func() tea.Msg {
+			err := m.store.UpdateProject(m.project)
+			return settingsSavedMsg{field: "Watch filter", err: err}
+		}
+	}
+	return m, nil
+}
+
 // saveSettingsField is a common helper for saving a simple text/numeric setting.
 func (m Model) saveSettingsField(ss *settingsState, label, displayValue string) (tea.Model, tea.Cmd) {
 	ss.fields[ss.fieldIdx].value = displayValue
@@ -511,6 +655,50 @@ func (m Model) renderSettingsView() string {
 		if ss.err != "" {
 			b.WriteString("  ")
 			b.WriteString(errorStyle().Render(ss.err))
+			b.WriteString("\n")
+		}
+
+	case settingsStepWatchType:
+		b.WriteString(textStyle().Render("  Select watch filter type:"))
+		b.WriteString("\n")
+		for i, label := range watchTypeLabels {
+			prefix := "    "
+			if i == ss.watchTypeIdx {
+				prefix = "  > "
+			}
+			entry := prefix + label
+			if i == ss.watchTypeIdx {
+				b.WriteString(headerStyle().Render(entry))
+			} else {
+				b.WriteString(textStyle().Render(entry))
+			}
+			b.WriteString("\n")
+		}
+		if ss.err != "" {
+			b.WriteString("  ")
+			b.WriteString(errorStyle().Render(ss.err))
+			b.WriteString("\n")
+		}
+
+	case settingsStepWatchFetch:
+		b.WriteString(textStyle().Render("  Fetching choices..."))
+		b.WriteString("\n")
+
+	case settingsStepWatchChoice:
+		filterType := watchTypeLabels[ss.watchTypeIdx]
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Select %s:", filterType)))
+		b.WriteString("\n")
+		for i, choice := range ss.watchChoices {
+			prefix := "    "
+			if i == ss.watchIdx {
+				prefix = "  > "
+			}
+			entry := prefix + choice.Value
+			if i == ss.watchIdx {
+				b.WriteString(headerStyle().Render(entry))
+			} else {
+				b.WriteString(textStyle().Render(entry))
+			}
 			b.WriteString("\n")
 		}
 	}

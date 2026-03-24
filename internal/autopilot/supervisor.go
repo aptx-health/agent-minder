@@ -929,11 +929,21 @@ func (s *Supervisor) Prepare(ctx context.Context, guidance string) (*PrepareResu
 		return nil, fmt.Errorf("get existing tasks: %w", err)
 	}
 
-	if len(existingTasks) > 0 {
+	// Only consider non-terminal tasks as "existing" — done/removed/skipped
+	// are effectively cleared and shouldn't trigger the reprepare flow.
+	hasNonTerminal := false
+	for _, t := range existingTasks {
+		if t.Status != "done" && t.Status != "removed" && t.Status != "skipped" {
+			hasNonTerminal = true
+			break
+		}
+	}
+
+	if hasNonTerminal {
 		return s.prepareWithExisting(ctx, existingTasks, agentDef)
 	}
 
-	// No existing tasks — fresh prepare.
+	// No active tasks — fresh prepare.
 	return s.prepareFresh(ctx, guidance, agentDef)
 }
 
@@ -1013,6 +1023,20 @@ func (s *Supervisor) prepareFresh(ctx context.Context, guidance string, agentDef
 			return nil, fmt.Errorf("convert tracked items: %w", err)
 		}
 		tasks = converted
+	}
+
+	// If still no tasks and a watch filter is configured, poll now to discover issues.
+	if len(tasks) == 0 && s.project.AutopilotFilterType != "" && s.project.AutopilotFilterValue != "" {
+		discovered := s.watchPoll(ctx)
+		if discovered > 0 {
+			freshTasks, _ := s.store.GetAutopilotTasks(s.project.ID)
+			tasks = make([]*db.AutopilotTask, 0, len(freshTasks))
+			for i := range freshTasks {
+				if freshTasks[i].Status != "removed" {
+					tasks = append(tasks, &freshTasks[i])
+				}
+			}
+		}
 	}
 
 	if len(tasks) == 0 {
@@ -1704,11 +1728,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		defer reviewCheckTicker.Stop()
 
 		// Watch ticker: polls GitHub for new issues matching the project's filter.
-		// Uses the project's refresh interval (default 2 min) as the watch poll interval.
-		watchInterval := s.project.RefreshInterval()
-		if watchInterval < 60*time.Second {
-			watchInterval = 60 * time.Second
-		}
+		watchInterval := 2 * time.Minute
 		watchTicker := time.NewTicker(watchInterval)
 		defer watchTicker.Stop()
 		// Do an initial watch poll right away if a filter is configured.
