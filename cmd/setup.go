@@ -9,6 +9,7 @@ import (
 	"github.com/dustinlange/agent-minder/internal/config"
 	"github.com/dustinlange/agent-minder/internal/secrets"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"golang.org/x/term"
 )
 
@@ -84,6 +85,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 
 	setupGitHub(reader)
 
+	// --- Discord ---
+	fmt.Println("\n── Discord ──")
+	fmt.Println("Configure a Discord bot for deploy daemon notifications and slash commands.")
+
+	setupDiscord(reader)
+
 	// Save.
 	if err := config.Save(); err != nil {
 		return fmt.Errorf("saving config: %w", err)
@@ -125,7 +132,7 @@ func runShowProviders() error {
 			fmt.Printf("%-12s %-10s %s\n", p, src, status)
 		}
 	}
-	for _, i := range []string{"github"} {
+	for _, i := range []string{"github", "discord"} {
 		src := config.TokenSource("integration", i)
 		if src == "" {
 			fmt.Printf("%-12s %-10s %s\n", i, "-", "not configured")
@@ -151,6 +158,7 @@ func migrateCredentials(reader *bufio.Reader) {
 		{"provider", "anthropic", "Anthropic API key"},
 		{"provider", "openai", "OpenAI API key"},
 		{"integration", "github", "GitHub token"},
+		{"integration", "discord", "Discord bot token"},
 	}
 
 	migrated := false
@@ -299,6 +307,85 @@ func setupGitHub(reader *bufio.Reader) {
 	} else {
 		config.SetIntegrationToken("github", token)
 		fmt.Printf("  ✓ GitHub configured (config file)\n")
+	}
+}
+
+func setupDiscord(reader *bufio.Reader) {
+	existing := config.GetIntegrationToken("discord")
+	if existing != "" {
+		fmt.Printf("\nDiscord bot token: configured [%s]\n", maskKey(existing))
+		fmt.Printf("  Update? [y/N]: ")
+		if !readYes(reader) {
+			setupDiscordExtras(reader)
+			return
+		}
+	} else {
+		fmt.Printf("\nDiscord bot token: not configured\n")
+		fmt.Println("  Used for the Discord bot (slash commands + notifications).")
+		fmt.Println()
+		fmt.Println("  Create a Discord bot:")
+		fmt.Println("    1. Go to: https://discord.com/developers/applications")
+		fmt.Println("    2. New Application → Bot tab → Reset Token")
+		fmt.Println("    3. OAuth2 → scopes: bot, applications.commands")
+		fmt.Println("    4. Bot permissions: Send Messages, Embed Links, Use Slash Commands")
+		fmt.Println("    5. Invite the bot to your server with the generated URL")
+		fmt.Println()
+		fmt.Println("  See docs/discord-setup.md for full instructions.")
+		fmt.Println()
+		fmt.Printf("  Configure now? [Y/n]: ")
+		if readNo(reader) {
+			return
+		}
+	}
+
+	fmt.Printf("  Bot token: ")
+	token := readLineSensitive(reader)
+	if token == "" {
+		fmt.Println("  Skipped.")
+		setupDiscordExtras(reader)
+		return
+	}
+
+	if secrets.Available() {
+		if err := config.SetIntegrationTokenSecure("discord", token); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: keychain write failed: %v — falling back to config file\n", err)
+			config.SetIntegrationToken("discord", token)
+			fmt.Printf("  ✓ Discord bot token configured (config file)\n")
+		} else {
+			config.RemoveIntegrationTokenFromConfig("discord")
+			fmt.Printf("  ✓ Discord bot token configured (keychain)\n")
+		}
+	} else {
+		config.SetIntegrationToken("discord", token)
+		fmt.Printf("  ✓ Discord bot token configured (config file)\n")
+	}
+
+	setupDiscordExtras(reader)
+}
+
+func setupDiscordExtras(reader *bufio.Reader) {
+	// Channel ID.
+	existingChannel := viper.GetString("integrations.discord.channel_id")
+	if existingChannel != "" {
+		fmt.Printf("  Channel ID [%s]: ", existingChannel)
+	} else {
+		fmt.Printf("  Channel ID (for notifications, blank to skip): ")
+	}
+	channelID := readLine(reader)
+	if channelID != "" {
+		viper.Set("integrations.discord.channel_id", channelID)
+	}
+
+	// Guild ID.
+	existingGuild := viper.GetString("integrations.discord.guild_id")
+	if existingGuild != "" {
+		fmt.Printf("  Guild ID [%s]: ", existingGuild)
+	} else {
+		fmt.Printf("  Guild ID (for fast command registration, blank for global): ")
+	}
+	guildID := readLine(reader)
+	if guildID != "" {
+		viper.Set("integrations.discord.guild_id", guildID)
 	}
 }
 

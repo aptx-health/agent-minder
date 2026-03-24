@@ -158,7 +158,21 @@ Launch agents on specific GitHub issues as a background daemon. Infers repo from
 | `--remote HOST:PORT` | — | Query remote daemon |
 | `--api-key KEY` | — | API key for HTTP auth |
 
-**Subcommands:** `deploy list`, `deploy status <id>`, `deploy open <id>`, `deploy stop <id>`, `deploy respawn <id>`, `deploy watch <id>`
+**Subcommands:** `deploy list`, `deploy status <id>`, `deploy open <id>`, `deploy stop <id>`, `deploy respawn <id>`, `deploy watch <id>`, `deploy analyze`
+
+### `agent-minder discord`
+
+Run a Discord bot that connects to a remote deploy daemon and exposes slash commands (`/analysis`, `/status`, `/settings`, `/cost`) plus push notifications for task events.
+
+See [docs/discord-setup.md](docs/discord-setup.md) for full setup instructions.
+
+| Flag | Env Var | Description |
+|------|---------|-------------|
+| `--token` | `DISCORD_BOT_TOKEN` | Discord bot token |
+| `--channel` | `DISCORD_CHANNEL_ID` | Channel for notifications |
+| `--guild` | `DISCORD_GUILD_ID` | Guild for slash commands (omit for global) |
+| `--remote` | `MINDER_REMOTE` | Deploy daemon address |
+| `--api-key` | `MINDER_API_KEY` | API key for daemon auth |
 
 ### `agent-minder version`
 
