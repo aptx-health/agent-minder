@@ -118,6 +118,7 @@ type Supervisor struct {
 	ghToken   string
 
 	mu              sync.Mutex
+	gitSetupMu      sync.Mutex   // serializes git branch/worktree ops to avoid ref lock contention
 	slots           []*slotState // len == maxAgents; nil = idle
 	active          bool
 	paused          bool // when true, fillSlots returns early
@@ -2179,6 +2180,10 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	}
 
 	if !isResume {
+		// Serialize git branch/worktree operations across concurrent agents to
+		// avoid ref lock contention that causes ~15% of fresh launches to fail.
+		s.gitSetupMu.Lock()
+
 		// Clean up stale branch from previous run if it exists.
 		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
 
@@ -2186,8 +2191,11 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		// not here, to avoid concurrent fetch races on the same repo.
 
 		// Create worktree from the latest remote base branch.
-		if err := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch, "origin/"+baseBranch); err != nil {
-			s.emitEvent("error", fmt.Sprintf("Failed to create worktree for #%d: %v", task.IssueNumber, err), task)
+		gitErr := gitpkg.WorktreeAdd(s.repoDir, task.WorktreePath, task.Branch, "origin/"+baseBranch)
+		s.gitSetupMu.Unlock()
+
+		if gitErr != nil {
+			s.emitEvent("error", fmt.Sprintf("Failed to create worktree for #%d: %v", task.IssueNumber, gitErr), task)
 			_ = s.store.UpdateAutopilotTaskStatus(task.ID, failStatus)
 			return
 		}
@@ -2999,6 +3007,10 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 }
 
 func (s *Supervisor) cleanup(task *db.AutopilotTask, deleteBranch bool) {
+	// Serialize with git setup operations to avoid ref lock contention.
+	s.gitSetupMu.Lock()
+	defer s.gitSetupMu.Unlock()
+
 	// Remove worktree.
 	_ = gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath)
 
