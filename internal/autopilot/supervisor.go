@@ -2574,6 +2574,7 @@ func (s *Supervisor) spawnReviewAgent(ctx context.Context, task db.AutopilotTask
 		s.emitEvent("error", fmt.Sprintf("Failed to update task #%d to reviewing: %v", task.IssueNumber, err), &task)
 		return
 	}
+	task.Status = "reviewing"
 
 	slotCtx, slotCancel := context.WithCancel(ctx)
 	s.slots[slotIdx] = &slotState{
