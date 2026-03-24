@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 24
+const currentVersion = 25
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS projects (
 	autopilot_auto_merge         INTEGER DEFAULT 0,
 	autopilot_review_max_turns   INTEGER,
 	autopilot_review_max_budget_usd REAL,
+	webhook_url                  TEXT DEFAULT '',
+	webhook_format               TEXT DEFAULT 'slack',
+	webhook_events               TEXT DEFAULT '',
 	created_at                   TEXT DEFAULT (datetime('now'))
 );
 
@@ -349,6 +352,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 24 {
 		if err := migrateV24(db); err != nil {
 			return fmt.Errorf("apply migration v24: %w", err)
+		}
+	}
+
+	if version < 25 {
+		if err := migrateV25(db); err != nil {
+			return fmt.Errorf("apply migration v25: %w", err)
 		}
 	}
 
@@ -745,6 +754,20 @@ func migrateV24(db *sqlx.DB) error {
 	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN autopilot_review_max_retries INTEGER`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("add autopilot_review_max_retries: %w", err)
+	}
+	return nil
+}
+
+func migrateV25(db *sqlx.DB) error {
+	stmts := []struct{ col, ddl string }{
+		{"webhook_url", `ALTER TABLE projects ADD COLUMN webhook_url TEXT DEFAULT ''`},
+		{"webhook_format", `ALTER TABLE projects ADD COLUMN webhook_format TEXT DEFAULT 'slack'`},
+		{"webhook_events", `ALTER TABLE projects ADD COLUMN webhook_events TEXT DEFAULT ''`},
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s.ddl); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("add %s: %w", s.col, err)
+		}
 	}
 	return nil
 }
