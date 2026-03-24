@@ -2396,6 +2396,13 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 			}
 
 		case "reviewed":
+			// Auto-merge if enabled and review risk is low.
+			if s.project.AutopilotAutoMerge && task.ReviewRisk != nil && *task.ReviewRisk == "low-risk" {
+				if s.tryAutoMerge(ctx, ghClient, task) {
+					promoted++
+					continue
+				}
+			}
 			// Review agent finished — check if PR was merged.
 			if ok := s.promoteIfMerged(ctx, ghClient, task); ok {
 				promoted++
@@ -2424,6 +2431,37 @@ func (s *Supervisor) promoteIfMerged(ctx context.Context, ghClient *ghpkg.Client
 		return true
 	}
 	return false
+}
+
+// tryAutoMerge attempts to auto-merge a reviewed PR that was assessed as low-risk.
+// Posts a comment noting the auto-merge, then squash-merges. On failure, it posts
+// an error comment and leaves the task in "reviewed" for manual intervention.
+// Returns true if the merge succeeded and the task was promoted to "done".
+func (s *Supervisor) tryAutoMerge(ctx context.Context, ghClient *ghpkg.Client, task db.AutopilotTask) bool {
+	commitMsg := fmt.Sprintf("Auto-merge PR #%d for issue #%d", task.PRNumber, task.IssueNumber)
+
+	// Post a comment before merging.
+	_, _ = ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber,
+		"Auto-merged: reviewed as low-risk by review agent")
+
+	if err := ghClient.MergePR(ctx, s.owner, s.repo, task.PRNumber, "squash", commitMsg); err != nil {
+		// Merge failed — post error comment and leave in reviewed.
+		_, _ = ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber,
+			fmt.Sprintf("Auto-merge failed: %v\n\nPlease merge manually or investigate the failure.", err))
+		s.emitEvent("error", fmt.Sprintf("Auto-merge failed for PR #%d (issue #%d): %v",
+			task.PRNumber, task.IssueNumber, err), &task)
+		return false
+	}
+
+	// Merge succeeded — promote to done.
+	_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
+	ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+	if task.ReviewRisk != nil && *task.ReviewRisk != "" {
+		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, *task.ReviewRisk)
+	}
+	s.emitEvent("completed", fmt.Sprintf("Auto-merged PR #%d for issue #%d (low-risk) — dependents unblocked",
+		task.PRNumber, task.IssueNumber), &task)
+	return true
 }
 
 // incrReviewRetry increments the in-memory retry counter for a review task.

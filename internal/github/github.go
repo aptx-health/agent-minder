@@ -316,6 +316,20 @@ func (c *Client) CreateComment(ctx context.Context, owner, repo string, number i
 	return comment.GetID(), nil
 }
 
+// MergePR merges a pull request using the specified method (merge, squash, rebase).
+// Returns nil on success, or an error describing why the merge failed.
+func (c *Client) MergePR(ctx context.Context, owner, repo string, number int, method string, commitMsg string) error {
+	opts := &github.PullRequestOptions{
+		MergeMethod: method,
+		CommitTitle: commitMsg,
+	}
+	_, _, err := c.gh.PullRequests.Merge(ctx, owner, repo, number, "", opts)
+	if err != nil {
+		return fmt.Errorf("merge PR #%d: %w", number, err)
+	}
+	return nil
+}
+
 // ListMilestones returns open milestones for a repo.
 func (c *Client) ListMilestones(ctx context.Context, owner, repo string) ([]RepoChoice, error) {
 	var all []RepoChoice
