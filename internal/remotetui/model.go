@@ -217,13 +217,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab", "right":
 		m.activeTab = (m.activeTab + 1) % len(tabNames)
 		if m.activeTab == tabLog {
-			return m, m.enterLogTab()
+			return m.enterLogTab()
 		}
 
 	case "shift+tab", "left":
 		m.activeTab = (m.activeTab - 1 + len(tabNames)) % len(tabNames)
 		if m.activeTab == tabLog {
-			return m, m.enterLogTab()
+			return m.enterLogTab()
 		}
 
 	case "1":
@@ -234,7 +234,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.activeTab = tabAnalysis
 	case "4":
 		m.activeTab = tabLog
-		return m, m.enterLogTab()
+		return m.enterLogTab()
 
 	// Task navigation.
 	case "up", "k":
@@ -299,16 +299,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.logOffset = 0
 			m.logAutoTail = true
 			m.activeTab = tabLog
-			return m, m.enterLogTab()
+			return m.enterLogTab()
 		}
 	}
 
 	return m, nil
 }
 
-func (m Model) enterLogTab() tea.Cmd {
+func (m Model) enterLogTab() (Model, tea.Cmd) {
 	if m.logTaskID == 0 && len(m.tasks) > 0 {
-		// Default to first running task, or cursor task.
 		for _, t := range m.tasks {
 			if t.Status == "running" {
 				m.logTaskID = t.IssueNumber
@@ -320,9 +319,9 @@ func (m Model) enterLogTab() tea.Cmd {
 		}
 	}
 	if m.logTaskID > 0 {
-		return tea.Batch(m.fetchTaskLog(m.logTaskID), m.logTick())
+		return m, tea.Batch(m.fetchTaskLog(m.logTaskID), m.logTick())
 	}
-	return nil
+	return m, nil
 }
 
 // --- View ---
