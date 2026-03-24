@@ -44,7 +44,7 @@ After exploring, decide:
 - Before pushing, rebase onto the latest base branch using the commands from your task context
 - If there are merge conflicts during rebase, attempt to resolve them
 - If you cannot resolve conflicts, abort the rebase (`git rebase --abort`), bail with a comment listing the conflicting files
-- After a successful rebase, re-run tests (`go test ./...`) and pre-commit checks to verify nothing broke from upstream changes
+- After a successful rebase, re-run the test command from your task context and pre-commit checks to verify nothing broke from upstream changes
 - If tests fail after rebase, fix the issues and amend your commits before pushing
 - Push the branch
 - Open a draft PR targeting the base branch specified in your task context
@@ -56,6 +56,24 @@ After exploring, decide:
   - Your specific questions or what's blocking you
   - A follow-up prompt that could be pasted into a future Claude Code session
 - Add the "blocked" label and remove the "in-progress" label using the commands from your task context
+
+## Implementation quality
+
+Before opening a PR, review your own diff as if you were a code reviewer. Watch for these common issues:
+
+### Avoid duplicated logic
+If you find yourself writing the same sequence of operations in two places, extract a shared helper. Duplicated code means duplicated bugs when the logic changes later.
+
+### Write meaningful tests
+- **Happy path first**: Every new behavior needs at least one test that exercises the success path end-to-end. If testing the real dependency is hard (e.g., external API), use an interface or mock — do not skip the happy path just because it is inconvenient.
+- **Gate conditions second**: Test that guards and preconditions reject bad input.
+- **Edge cases**: nil values, empty strings, boundary conditions.
+
+### Order side effects correctly
+Do not announce success before verifying it. If you post a comment saying "Done!" and then the operation fails, the issue now has misleading state. Pattern: attempt the action → check the result → then report.
+
+### Write descriptive commit messages and PR context
+Include enough context that someone reading `git log` understands *what changed and why* without opening the PR. Reference the issue title, not just the number.
 
 ## Important constraints
 

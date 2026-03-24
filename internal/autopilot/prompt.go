@@ -101,7 +101,7 @@ After exploring, decide:
 - Before pushing, rebase onto the latest base branch using the commands from your task context
 - If there are merge conflicts during rebase, attempt to resolve them
 - If you cannot resolve conflicts, abort the rebase (` + "`git rebase --abort`" + `), bail with a comment listing the conflicting files
-- After a successful rebase, re-run tests (` + "`go test ./...`" + `) and pre-commit checks to verify nothing broke from upstream changes
+- After a successful rebase, re-run the test command from your task context and pre-commit checks to verify nothing broke from upstream changes
 - If tests fail after rebase, fix the issues and amend your commits before pushing
 - Push the branch
 - Open a draft PR targeting the base branch specified in your task context
@@ -113,6 +113,24 @@ After exploring, decide:
   - Your specific questions or what's blocking you
   - A follow-up prompt that could be pasted into a future Claude Code session
 - Add the "blocked" label and remove the "in-progress" label using the commands from your task context
+
+## Implementation quality
+
+Before opening a PR, review your own diff as if you were a code reviewer. Watch for these common issues:
+
+### Avoid duplicated logic
+If you find yourself writing the same sequence of operations in two places, extract a shared helper. Duplicated code means duplicated bugs when the logic changes later.
+
+### Write meaningful tests
+- **Happy path first**: Every new behavior needs at least one test that exercises the success path end-to-end. If testing the real dependency is hard (e.g., external API), use an interface or mock — do not skip the happy path just because it is inconvenient.
+- **Gate conditions second**: Test that guards and preconditions reject bad input.
+- **Edge cases**: nil values, empty strings, boundary conditions.
+
+### Order side effects correctly
+Do not announce success before verifying it. If you post a comment saying "Done!" and then the operation fails, the issue now has misleading state. Pattern: attempt the action → check the result → then report.
+
+### Write descriptive commit messages and PR context
+Include enough context that someone reading ` + "`git log`" + ` understands *what changed and why* without opening the PR. Reference the issue title, not just the number.
 
 ## Important constraints
 
@@ -414,7 +432,7 @@ func toCliAllowedTools(tools []string) string {
 
 // renderTaskContext builds a minimal prompt with only dynamic per-task context.
 // Used when a .claude/agents/autopilot.md agent definition provides the behavioral instructions.
-func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) string {
+func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, rw *relatedWork) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Task Context\n\n")
@@ -429,6 +447,15 @@ func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) s
 	fmt.Fprintf(&b, "**Worktree:** %s\n", task.WorktreePath)
 	fmt.Fprintf(&b, "**Branch:** %s (already checked out)\n", task.Branch)
 	fmt.Fprintf(&b, "**Base branch:** %s\n\n", baseBranch)
+
+	if testCommand != "" {
+		fmt.Fprintf(&b, "## Test command\n\n")
+		fmt.Fprintf(&b, "Run tests: `%s`\n\n", testCommand)
+	}
+
+	if related := renderRelatedWork(task, rw); related != "" {
+		b.WriteString(related)
+	}
 
 	fmt.Fprintf(&b, "## Commands for this task\n\n")
 	fmt.Fprintf(&b, "Label in-progress: gh issue edit %d --add-label \"in-progress\" -R %s/%s\n", task.IssueNumber, owner, repo)
@@ -446,7 +473,7 @@ func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) s
 
 // renderResumeTaskContext builds a continuation prompt for resuming work in an existing worktree.
 // It includes context about the prior failure and instructs the agent to pick up where it left off.
-func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo string) string {
+func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, rw *relatedWork) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Resuming Previous Work\n\n")
@@ -462,13 +489,13 @@ func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo str
 	b.WriteString("continue from where it left off, and open a PR when ready.\n\n")
 
 	// Include the standard task context.
-	b.WriteString(renderTaskContext(task, baseBranch, owner, repo))
+	b.WriteString(renderTaskContext(task, baseBranch, owner, repo, testCommand, rw))
 
 	return b.String()
 }
 
-// reviewRelatedWork holds dependency graph and sibling task context for the reviewer.
-type reviewRelatedWork struct {
+// relatedWork holds dependency graph and sibling task context for autopilot and reviewer agents.
+type relatedWork struct {
 	// depGraph is the raw JSON dependency graph (issue→[deps]) from autopilot_dep_graphs.
 	depGraph string
 	// siblingTasks is the list of all autopilot tasks in the same project.
@@ -478,7 +505,7 @@ type reviewRelatedWork struct {
 // renderRelatedWork formats the dependency graph and sibling task statuses
 // into a "Related Work" section for the review prompt. Returns empty string
 // if no useful context is available.
-func renderRelatedWork(task *db.AutopilotTask, rw *reviewRelatedWork) string {
+func renderRelatedWork(task *db.AutopilotTask, rw *relatedWork) string {
 	if rw == nil {
 		return ""
 	}
@@ -565,7 +592,7 @@ func detectTestCommand(repoDir string) string {
 // renderReviewTaskContext builds a prompt with review-specific context for the reviewer agent.
 // It provides the PR number, issue details, project goal, test command, dependency graph,
 // sibling task statuses, and commands for the review workflow.
-func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, rw *reviewRelatedWork) string {
+func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, rw *relatedWork) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Review Context\n\n")
@@ -608,7 +635,7 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 }
 
 // buildReviewClaudeArgs constructs the CLI arguments for launching a reviewer agent.
-func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *reviewRelatedWork) []string {
+func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork) []string {
 	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, testCommand, rw)
 	return []string{
 		"--agent", "reviewer",

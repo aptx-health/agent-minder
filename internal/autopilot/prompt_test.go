@@ -101,7 +101,7 @@ func TestRenderTaskContext(t *testing.T) {
 		Branch:       "agent/issue-42",
 	}
 
-	ctx := renderTaskContext(task, "main", "myorg", "myrepo")
+	ctx := renderTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil)
 
 	checks := []string{
 		"#42",
@@ -120,12 +120,20 @@ func TestRenderTaskContext(t *testing.T) {
 		"--add-label \"blocked\"",
 		"--remove-label \"in-progress\"",
 		"-R myorg/myrepo",
+		"go test ./...",
+		"## Test command",
 	}
 
 	for _, check := range checks {
 		if !strings.Contains(ctx, check) {
 			t.Errorf("task context missing expected content: %q", check)
 		}
+	}
+
+	// Empty test command should omit the section entirely.
+	ctxNoTest := renderTaskContext(task, "main", "myorg", "myrepo", "", nil)
+	if strings.Contains(ctxNoTest, "## Test command") {
+		t.Error("task context should omit test command section when empty")
 	}
 }
 
@@ -138,7 +146,7 @@ func TestRenderTaskContextEmptyBody(t *testing.T) {
 		Branch:       "agent/issue-1",
 	}
 
-	ctx := renderTaskContext(task, "main", "owner", "repo")
+	ctx := renderTaskContext(task, "main", "owner", "repo", "", nil)
 
 	if strings.Contains(ctx, "\n\n\n\n") {
 		t.Error("task context has excessive blank lines when body is empty")
@@ -157,7 +165,7 @@ func TestRenderTaskContextNoBehavioralInstructions(t *testing.T) {
 		Branch:       "agent/issue-42",
 	}
 
-	ctx := renderTaskContext(task, "main", "org", "repo")
+	ctx := renderTaskContext(task, "main", "org", "repo", "", nil)
 
 	// Task context must NOT contain behavioral instructions — those belong in the agent definition.
 	behavioral := []string{
@@ -295,7 +303,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 
 	t.Run("always uses --agent autopilot", func(t *testing.T) {
 		tools := []string{"Read", "Edit", "Write", "Bash(git *)"}
-		args := buildClaudeArgs(task, "main", "org", "repo", 50, 3.00, tools)
+		args := buildClaudeArgs(task, "main", "org", "repo", "go test ./...", 50, 3.00, tools, nil)
 
 		// Should always use --agent autopilot as first args.
 		if args[0] != "--agent" || args[1] != "autopilot" {
@@ -346,7 +354,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 	})
 
 	t.Run("includes max turns and budget", func(t *testing.T) {
-		args := buildClaudeArgs(task, "main", "org", "repo", 75, 5.50, defaultAllowedTools)
+		args := buildClaudeArgs(task, "main", "org", "repo", "", 75, 5.50, defaultAllowedTools, nil)
 		joined := strings.Join(args, " ")
 
 		if !strings.Contains(joined, "--max-turns 75") {
@@ -721,7 +729,7 @@ func TestRenderResumeTaskContext(t *testing.T) {
 		FailureDetail: "used 50 of 50 turns",
 	}
 
-	prompt := renderResumeTaskContext(task, "main", "myorg", "myrepo")
+	prompt := renderResumeTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil)
 
 	// Should contain resume header.
 	if !strings.Contains(prompt, "Resuming Previous Work") {
@@ -760,7 +768,7 @@ func TestRenderResumeTaskContextNoFailure(t *testing.T) {
 		Branch:       "agent/issue-10",
 	}
 
-	prompt := renderResumeTaskContext(task, "main", "org", "repo")
+	prompt := renderResumeTaskContext(task, "main", "org", "repo", "", nil)
 
 	if !strings.Contains(prompt, "Resuming Previous Work") {
 		t.Error("should contain resume header")
@@ -787,7 +795,7 @@ func TestBuildResumeClaudeArgs(t *testing.T) {
 		FailureDetail: "spent $3.00 of $3.00 budget",
 	}
 
-	args := buildResumeClaudeArgs(task, "main", "org", "repo", 50, 3.00, defaultAllowedTools)
+	args := buildResumeClaudeArgs(task, "main", "org", "repo", "go test ./...", 50, 3.00, defaultAllowedTools, nil)
 	joined := strings.Join(args, " ")
 
 	// Should use --agent autopilot.
@@ -1004,14 +1012,14 @@ func TestRenderRelatedWork(t *testing.T) {
 	})
 
 	t.Run("empty struct returns empty", func(t *testing.T) {
-		rw := &reviewRelatedWork{}
+		rw := &relatedWork{}
 		if got := renderRelatedWork(task, rw); got != "" {
 			t.Errorf("expected empty, got %q", got)
 		}
 	})
 
 	t.Run("dep graph only", func(t *testing.T) {
-		rw := &reviewRelatedWork{
+		rw := &relatedWork{
 			depGraph: `{"42":[],"38":[42]}`,
 		}
 		got := renderRelatedWork(task, rw)
@@ -1027,7 +1035,7 @@ func TestRenderRelatedWork(t *testing.T) {
 	})
 
 	t.Run("sibling tasks only", func(t *testing.T) {
-		rw := &reviewRelatedWork{
+		rw := &relatedWork{
 			siblingTasks: []db.AutopilotTask{
 				{IssueNumber: 42, IssueTitle: "Current task", Status: "reviewing"},
 				{IssueNumber: 38, IssueTitle: "Dependency task", Status: "done", PRNumber: 50},
@@ -1057,7 +1065,7 @@ func TestRenderRelatedWork(t *testing.T) {
 	})
 
 	t.Run("both dep graph and tasks", func(t *testing.T) {
-		rw := &reviewRelatedWork{
+		rw := &relatedWork{
 			depGraph: `{"42":[],"38":[42]}`,
 			siblingTasks: []db.AutopilotTask{
 				{IssueNumber: 38, IssueTitle: "Other", Status: "queued"},
@@ -1083,7 +1091,7 @@ func TestRenderReviewTaskContextWithRelatedWork(t *testing.T) {
 		PRNumber:     99,
 	}
 
-	rw := &reviewRelatedWork{
+	rw := &relatedWork{
 		depGraph: `{"42":[]}`,
 		siblingTasks: []db.AutopilotTask{
 			{IssueNumber: 10, IssueTitle: "Setup DB", Status: "done", PRNumber: 20},
@@ -1140,7 +1148,7 @@ func TestPrintPrompts(t *testing.T) {
 	fmt.Println(renderPrompt(task, "main", "myorg", "myrepo"))
 
 	fmt.Printf("\n%s\n  TASK CONTEXT (used with --agent autopilot)\n%s\n\n", sep, sep)
-	fmt.Println(renderTaskContext(task, "main", "myorg", "myrepo"))
+	fmt.Println(renderTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil))
 
 	fmt.Printf("\n%s\n  BUILT-IN DEFAULT AGENT DEFINITION\n%s\n\n", sep, sep)
 	fmt.Print(defaultAgentDef)
