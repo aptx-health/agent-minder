@@ -1934,9 +1934,9 @@ func TestEffectiveMaxTurns(t *testing.T) {
 		t.Errorf("got %d, want 100", got)
 	}
 
-	// No override, zero project default falls back to 50.
-	if got := task.EffectiveMaxTurns(0); got != 50 {
-		t.Errorf("got %d, want 50 (hardcoded fallback)", got)
+	// No override, zero project default falls back to DefaultMaxTurns.
+	if got := task.EffectiveMaxTurns(0); got != DefaultMaxTurns {
+		t.Errorf("got %d, want %d (hardcoded fallback)", got, DefaultMaxTurns)
 	}
 
 	// Override takes precedence.
@@ -1955,9 +1955,9 @@ func TestEffectiveMaxBudget(t *testing.T) {
 		t.Errorf("got %f, want 5.00", got)
 	}
 
-	// No override, zero project default falls back to 3.00.
-	if got := task.EffectiveMaxBudget(0); got != 3.00 {
-		t.Errorf("got %f, want 3.00 (hardcoded fallback)", got)
+	// No override, zero project default falls back to DefaultMaxBudgetUSD.
+	if got := task.EffectiveMaxBudget(0); got != DefaultMaxBudgetUSD {
+		t.Errorf("got %f, want %.2f (hardcoded fallback)", got, DefaultMaxBudgetUSD)
 	}
 
 	// Override takes precedence.
