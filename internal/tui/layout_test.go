@@ -391,13 +391,13 @@ func TestRenderTrackedStrip_EmptyState(t *testing.T) {
 func TestRenderTrackedStrip_ShowsCount(t *testing.T) {
 	m := testModel(t)
 	m.width = 120
-	m.trackedItems = []db.TrackedItem{
-		{Number: 1, Owner: "org", Repo: "repo", LastStatus: "Open", Title: "Issue 1"},
-		{Number: 2, Owner: "org", Repo: "repo", LastStatus: "Open", Title: "Issue 2"},
+	m.operationsTasks = []db.AutopilotTask{
+		{IssueNumber: 1, Owner: "org", Repo: "repo", Status: "queued", IssueTitle: "Issue 1"},
+		{IssueNumber: 2, Owner: "org", Repo: "repo", Status: "queued", IssueTitle: "Issue 2"},
 	}
 
 	result := m.renderTrackedStrip()
-	if !strings.Contains(result, "Tracked (2)") {
+	if !strings.Contains(result, "Tasks (2)") {
 		t.Errorf("renderTrackedStrip() should show count, got: %q", result)
 	}
 }
@@ -405,9 +405,9 @@ func TestRenderTrackedStrip_ShowsCount(t *testing.T) {
 func TestRenderTrackedStrip_ShowsIssueNumbers(t *testing.T) {
 	m := testModel(t)
 	m.width = 120
-	m.trackedItems = []db.TrackedItem{
-		{Number: 42, Owner: "org", Repo: "repo", LastStatus: "Open"},
-		{Number: 99, Owner: "org", Repo: "repo", LastStatus: "InProg"},
+	m.operationsTasks = []db.AutopilotTask{
+		{IssueNumber: 42, Owner: "org", Repo: "repo", Status: "queued"},
+		{IssueNumber: 99, Owner: "org", Repo: "repo", Status: "running"},
 	}
 
 	result := m.renderTrackedStrip()
@@ -423,8 +423,8 @@ func TestRenderTrackedStrip_ExpandedShowsTitles(t *testing.T) {
 	m := testModel(t)
 	m.width = 120
 	m.trackedExpanded = true
-	m.trackedItems = []db.TrackedItem{
-		{Number: 1, Owner: "org", Repo: "repo", LastStatus: "Open", Title: "First issue title"},
+	m.operationsTasks = []db.AutopilotTask{
+		{IssueNumber: 1, Owner: "org", Repo: "repo", Status: "queued", IssueTitle: "First issue title"},
 	}
 
 	result := m.renderTrackedStrip()
@@ -436,8 +436,8 @@ func TestRenderTrackedStrip_ExpandedShowsTitles(t *testing.T) {
 func TestRenderTrackedStrip_ToggleHint(t *testing.T) {
 	m := testModel(t)
 	m.width = 120
-	m.trackedItems = []db.TrackedItem{
-		{Number: 1, Owner: "org", Repo: "repo", LastStatus: "Open"},
+	m.operationsTasks = []db.AutopilotTask{
+		{IssueNumber: 1, Owner: "org", Repo: "repo", Status: "queued"},
 	}
 
 	result := m.renderTrackedStrip()

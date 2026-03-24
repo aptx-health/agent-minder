@@ -126,6 +126,25 @@ func runTrack(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		// Also create an autopilot_task for open issues.
+		if status.ItemType == "issue" && status.State == "open" {
+			body := ""
+			if content, fetchErr := gh.FetchItemContent(ctx, owner, repo, number, "issue"); fetchErr == nil {
+				body = content.Body
+			}
+			task := &db.AutopilotTask{
+				ProjectID:    project.ID,
+				Owner:        owner,
+				Repo:         repo,
+				IssueNumber:  number,
+				IssueTitle:   status.Title,
+				IssueBody:    body,
+				Dependencies: "[]",
+				Status:       "queued",
+			}
+			_ = store.CreateAutopilotTask(task) // ignore UNIQUE if task already exists
+		}
+
 		fmt.Printf("Tracking %s/%s#%d [%s] %s\n", owner, repo, number, status.CompactStatus(), status.Title)
 	}
 

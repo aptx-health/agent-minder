@@ -159,6 +159,7 @@ func (p *Poller) FetchItemStatus(ctx context.Context, ref *ghpkg.ItemRef) (*ghpk
 }
 
 // AddTrackedItemByRef resolves a GitHub item reference and adds it as a tracked item.
+// Also creates an autopilot_task so the item is immediately visible in Operations.
 // Returns the added item on success.
 func (p *Poller) AddTrackedItemByRef(ctx context.Context, ref *ghpkg.ItemRef) (*db.TrackedItem, error) {
 	token := config.GetIntegrationToken("github")
@@ -190,16 +191,41 @@ func (p *Poller) AddTrackedItemByRef(ctx context.Context, ref *ghpkg.ItemRef) (*
 		return nil, err
 	}
 
+	// Also create an autopilot_task for open issues so it shows in Operations
+	// and is ready for autopilot without a separate conversion step.
+	if status.ItemType == "issue" && status.State == "open" {
+		body := ""
+		if content, fetchErr := gh.FetchItemContent(ctx, ref.Owner, ref.Repo, ref.Number, "issue"); fetchErr == nil {
+			body = content.Body
+		}
+		task := &db.AutopilotTask{
+			ProjectID:    p.project.ID,
+			Owner:        ref.Owner,
+			Repo:         ref.Repo,
+			IssueNumber:  ref.Number,
+			IssueTitle:   status.Title,
+			IssueBody:    body,
+			Dependencies: "[]",
+			Status:       "queued",
+		}
+		// Ignore UNIQUE constraint errors — task may already exist from a previous session.
+		_ = p.store.CreateAutopilotTask(task)
+	}
+
 	p.emit("tracked", fmt.Sprintf("Now tracking %s: %s [%s]", item.DisplayRef(), item.Title, item.LastStatus), nil)
 	return item, nil
 }
 
 // RemoveTrackedItemByRef removes a tracked item by owner/repo/number.
+// Also marks the corresponding autopilot task as "removed" so it won't
+// reappear in dependency graphs or be re-discovered by watch polling.
 func (p *Poller) RemoveTrackedItemByRef(ref *ghpkg.ItemRef) error {
 	err := p.store.RemoveTrackedItem(p.project.ID, ref.Owner, ref.Repo, ref.Number)
 	if err != nil {
 		return err
 	}
+	// Mark the autopilot task as removed (no-op if no matching task exists).
+	_ = p.store.RemoveAutopilotTaskByIssue(p.project.ID, ref.Number)
 	p.emit("tracked", fmt.Sprintf("Untracked %s/%s#%d", ref.Owner, ref.Repo, ref.Number), nil)
 	return nil
 }
