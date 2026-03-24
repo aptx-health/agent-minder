@@ -2125,8 +2125,8 @@ func TestNewSettingsState_DefaultFields(t *testing.T) {
 	if ss.fieldIdx != 0 {
 		t.Errorf("fieldIdx = %d, want 0", ss.fieldIdx)
 	}
-	if len(ss.fields) != 7 {
-		t.Errorf("fields count = %d, want 7", len(ss.fields))
+	if len(ss.fields) != 10 {
+		t.Errorf("fields count = %d, want 10", len(ss.fields))
 	}
 	// Check first field.
 	if ss.fields[0].label != "Sync interval" {
