@@ -19,6 +19,7 @@ const (
 	filterStepSelectType
 	filterStepFetchingChoices
 	filterStepSelectChoice
+	filterStepWatchOrAdd // choose between setting watch filter vs one-shot add
 	filterStepInputValue
 	filterStepFetching
 	filterStepPreview
@@ -61,8 +62,10 @@ type filterState struct {
 	results      *ghpkg.SearchResult
 	choices      []ghpkg.RepoChoice // available choices for the selected filter type
 	choiceIdx    int                // currently highlighted choice
+	selectedID   int                // ID of the selected choice (for milestone API)
 	typeIdx      int                // currently highlighted filter type (0=label, 1=milestone, 2=project, 3=assignee)
 	conflictIdx  int                // currently highlighted conflict option (0=update, 1=append, 2=clear)
+	watchAddIdx  int                // 0=watch, 1=add issues
 	input        textinput.Model
 	err          error
 	hasExisting  bool // true if project already has tracked items
@@ -107,6 +110,8 @@ func (m Model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateFilterSelectType(msg)
 	case filterStepSelectChoice:
 		return m.updateFilterSelectChoice(msg)
+	case filterStepWatchOrAdd:
+		return m.updateFilterWatchOrAdd(msg)
 	case filterStepInputValue:
 		return m.updateFilterInputValue(msg)
 	case filterStepPreview:
@@ -226,31 +231,21 @@ func (m Model) updateFilterSelectChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		return m, nil
 	case "enter":
 		if fs.choiceIdx < len(fs.choices) {
-			// Selected an existing choice — use it directly.
+			// Selected an existing choice — stash it.
 			choice := fs.choices[fs.choiceIdx]
 			fs.filterValue = choice.Value
-			fs.step = filterStepFetching
+			fs.selectedID = choice.ID
 			fs.err = nil
 
-			p := m.poller
-			owner := fs.selectedRepo.Owner
-			repo := fs.selectedRepo.Repo
-			ft := fs.filterType
-			fv := fs.filterValue
-			choiceID := choice.ID
-
-			return m, func() tea.Msg {
-				var result *ghpkg.SearchResult
-				var err error
-				if ft == ghpkg.FilterMilestone && choiceID > 0 {
-					// Use Issues API with milestone number to avoid search query
-					// syntax issues with special characters in milestone titles.
-					result, err = p.SearchIssuesByMilestone(context.Background(), owner, repo, choiceID)
-				} else {
-					result, err = p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
-				}
-				return filterSearchResultMsg{results: result, err: err}
+			// For label/milestone, offer watch vs one-shot add.
+			if fs.filterType == ghpkg.FilterLabel || fs.filterType == ghpkg.FilterMilestone {
+				fs.step = filterStepWatchOrAdd
+				fs.watchAddIdx = 0
+				return m, nil
 			}
+
+			// Other types (project, assignee): go straight to fetch.
+			return m.filterDoFetch()
 		}
 		// "Type custom value" option selected — go to text input.
 		fs.step = filterStepInputValue
@@ -264,6 +259,75 @@ func (m Model) updateFilterSelectChoice(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		}
 		cmd := fs.input.Focus()
 		return m, cmd
+	}
+	return m, nil
+}
+
+// filterWatchSetMsg is sent when a watch filter is saved from the filter flow.
+type filterWatchSetMsg struct {
+	filterType  string
+	filterValue string
+	err         error
+}
+
+// filterDoFetch starts the async issue search for the selected filter.
+func (m Model) filterDoFetch() (tea.Model, tea.Cmd) {
+	fs := m.filterState
+	fs.step = filterStepFetching
+	fs.err = nil
+
+	p := m.poller
+	owner := fs.selectedRepo.Owner
+	repo := fs.selectedRepo.Repo
+	ft := fs.filterType
+	fv := fs.filterValue
+	choiceID := fs.selectedID
+
+	return m, func() tea.Msg {
+		var result *ghpkg.SearchResult
+		var err error
+		if ft == ghpkg.FilterMilestone && choiceID > 0 {
+			result, err = p.SearchIssuesByMilestone(context.Background(), owner, repo, choiceID)
+		} else {
+			result, err = p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
+		}
+		return filterSearchResultMsg{results: result, err: err}
+	}
+}
+
+func (m Model) updateFilterWatchOrAdd(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	fs := m.filterState
+	switch msg.String() {
+	case "esc":
+		fs.step = filterStepSelectChoice
+		return m, nil
+	case "up", "k":
+		if fs.watchAddIdx > 0 {
+			fs.watchAddIdx--
+		}
+		return m, nil
+	case "down", "j":
+		if fs.watchAddIdx < 1 {
+			fs.watchAddIdx++
+		}
+		return m, nil
+	case "enter":
+		if fs.watchAddIdx == 0 {
+			// Watch: save as project watch filter and exit.
+			filterType := string(fs.filterType)
+			filterValue := fs.filterValue
+			m.project.AutopilotFilterType = filterType
+			m.project.AutopilotFilterValue = filterValue
+			m.mode = "normal"
+			m.filterState = nil
+			m.resizeViewports()
+			return m, func() tea.Msg {
+				err := m.store.UpdateProject(m.project)
+				return filterWatchSetMsg{filterType: filterType, filterValue: filterValue, err: err}
+			}
+		}
+		// Add issues: proceed with the normal fetch flow.
+		return m.filterDoFetch()
 	}
 	return m, nil
 }
@@ -500,6 +564,27 @@ func (m Model) renderFilterView() string {
 			b.WriteString(mutedStyle().Render(customEntry))
 		}
 		b.WriteString("\n")
+
+	case filterStepWatchOrAdd:
+		b.WriteString(textStyle().Render(fmt.Sprintf("  %s: %s", fs.filterType, fs.filterValue)))
+		b.WriteString("\n\n")
+		watchOrAddOptions := []string{
+			"Watch — auto-discover new issues matching this filter",
+			"Add issues — one-time bulk add of current matches",
+		}
+		for i, opt := range watchOrAddOptions {
+			prefix := "    "
+			if i == fs.watchAddIdx {
+				prefix = "  > "
+			}
+			entry := prefix + opt
+			if i == fs.watchAddIdx {
+				b.WriteString(headerStyle().Render(entry))
+			} else {
+				b.WriteString(textStyle().Render(entry))
+			}
+			b.WriteString("\n")
+		}
 
 	case filterStepInputValue:
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Repo: %s/%s  Filter: %s", fs.selectedRepo.Owner, fs.selectedRepo.Repo, fs.filterType)))
