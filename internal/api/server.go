@@ -220,6 +220,11 @@ func (s *Server) streamLog(ctx context.Context, w http.ResponseWriter, logPath s
 		return
 	}
 
+	// Disable write deadline for long-lived SSE connections — the server's
+	// WriteTimeout (30s) would otherwise kill the stream prematurely.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+
 	f, err := os.Open(logPath)
 	if err != nil {
 		if os.IsNotExist(err) {
