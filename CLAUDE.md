@@ -114,6 +114,9 @@ Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash
 | `internal/sqliteutil` | SQLite health + WAL recovery | `OpenWithRecovery()`, stale -shm/-wal cleanup |
 | `internal/msgbus` | Agent-msg client + publisher | Read-only `Client`, read-write `Publisher` + `PublishReplace()` |
 | `internal/config` | Global config + credentials | Viper-based YAML config, keychain integration via `internal/secrets` |
+| `internal/discord` | Discord bot | Slash commands + embeds backed by deploy daemon API |
+| `internal/notify` | Webhook notifications | Batched event delivery; Slack, Discord, and generic JSON formats |
+| `internal/api` | Deploy daemon HTTP API | Server + Client for remote daemon interaction |
 
 ## Commands
 

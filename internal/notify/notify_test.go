@@ -243,6 +243,66 @@ func TestParseEventTypes(t *testing.T) {
 	}
 }
 
+func TestDiscordFormat(t *testing.T) {
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	n := New(Config{
+		WebhookURL: srv.URL,
+		Format:     "discord",
+		BatchDelay: 50 * time.Millisecond,
+	})
+
+	n.Notify(Event{
+		Type:        EventTaskBailed,
+		Project:     "test-project",
+		Summary:     "Agent bailed on #42",
+		IssueNumber: 42,
+		IssueTitle:  "Fix the widget",
+		Timestamp:   time.Now(),
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	if len(received) == 0 {
+		t.Fatal("expected webhook to be called")
+	}
+
+	var payload discordWebhookPayload
+	if err := json.Unmarshal(received, &payload); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(payload.Embeds) != 1 {
+		t.Fatalf("expected 1 embed, got %d", len(payload.Embeds))
+	}
+	if payload.Embeds[0].Color != 0xe67e22 { // orange for bailed
+		t.Errorf("expected orange color for bailed, got %d", payload.Embeds[0].Color)
+	}
+}
+
+func TestDiscordEventColors(t *testing.T) {
+	tests := []struct {
+		typ   EventType
+		color int
+	}{
+		{EventTaskStarted, 0x3498db},
+		{EventTaskCompleted, 0x2ecc71},
+		{EventTaskBailed, 0xe67e22},
+		{EventTaskFailed, 0xe74c3c},
+		{EventBudgetLimit, 0xf1c40f},
+	}
+	for _, tt := range tests {
+		got := discordEventColor(tt.typ)
+		if got != tt.color {
+			t.Errorf("discordEventColor(%s) = %d, want %d", tt.typ, got, tt.color)
+		}
+	}
+}
+
 func TestCloseFlushes(t *testing.T) {
 	var mu sync.Mutex
 	var calls int

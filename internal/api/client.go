@@ -131,9 +131,50 @@ func (c *Client) GetAnalysis(limit int) ([]AnalysisResponse, error) {
 	return resp, nil
 }
 
+// GetMetricsRaw calls GET /metrics and returns the raw JSON bytes.
+// The metrics response has a dynamic shape (optional ceiling fields), so
+// callers that need specific fields should unmarshal into their own type.
+func (c *Client) GetMetricsRaw() ([]byte, error) {
+	return c.getRaw("/metrics")
+}
+
 // Stop calls POST /stop on the remote daemon to initiate graceful shutdown.
 func (c *Client) Stop() error {
 	return c.post("/stop", nil)
+}
+
+// getRaw performs an authenticated GET request and returns the raw response body.
+func (c *Client) getRaw(path string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, classifyError(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("authentication failed — check --api-key or MINDER_API_KEY")
+	}
+	if resp.StatusCode != http.StatusOK {
+		var errResp errorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Message != "" {
+			return nil, fmt.Errorf("remote error (%d): %s", resp.StatusCode, errResp.Message)
+		}
+		return nil, fmt.Errorf("remote returned HTTP %d", resp.StatusCode)
+	}
+	return body, nil
 }
 
 // get performs an authenticated GET request and decodes the JSON response.

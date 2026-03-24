@@ -216,6 +216,8 @@ func (n *Notifier) flush() {
 	switch n.cfg.Format {
 	case "slack":
 		payload, err = buildSlackPayload(events)
+	case "discord":
+		payload, err = buildDiscordPayload(events)
 	default:
 		payload, err = buildGenericPayload(events)
 	}
@@ -391,6 +393,62 @@ func MapEventType(supervisorType string) EventType {
 		return EventAgentError
 	default:
 		return ""
+	}
+}
+
+// --- Discord webhook payload ---
+
+// discordWebhookPayload is the Discord incoming webhook format with embeds.
+type discordWebhookPayload struct {
+	Embeds []discordEmbed `json:"embeds"`
+}
+
+type discordEmbed struct {
+	Title       string              `json:"title,omitempty"`
+	Description string              `json:"description"`
+	Color       int                 `json:"color"`
+	Footer      *discordEmbedFooter `json:"footer,omitempty"`
+	Timestamp   string              `json:"timestamp,omitempty"`
+}
+
+type discordEmbedFooter struct {
+	Text string `json:"text"`
+}
+
+func buildDiscordPayload(events []Event) ([]byte, error) {
+	embeds := make([]discordEmbed, 0, len(events))
+	for _, evt := range events {
+		embeds = append(embeds, discordEmbed{
+			Title:       string(evt.Type),
+			Description: formatEventText(evt),
+			Color:       discordEventColor(evt.Type),
+			Footer:      &discordEmbedFooter{Text: evt.Project},
+			Timestamp:   evt.Timestamp.Format("2006-01-02T15:04:05Z"),
+		})
+	}
+
+	// Discord webhooks allow max 10 embeds per message.
+	if len(embeds) > 10 {
+		embeds = embeds[:10]
+	}
+
+	return json.Marshal(discordWebhookPayload{Embeds: embeds})
+}
+
+func discordEventColor(typ EventType) int {
+	switch typ {
+	case EventTaskStarted, EventDiscovered:
+		return 0x3498db // blue
+	case EventTaskCompleted, EventFinished:
+		return 0x2ecc71 // green
+	case EventTaskBailed:
+		return 0xe67e22 // orange
+	case EventTaskFailed, EventTaskStopped:
+		return 0xe74c3c // red
+	case EventBudgetLimit, EventAgentError:
+		return 0xf1c40f // yellow
+	default:
+		return 0x95a5a6 // gray
 	}
 }
 
