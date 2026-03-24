@@ -407,12 +407,23 @@ func runWatchDaemon() error {
 		if supervisor == nil || !supervisor.IsActive() {
 			if hasQueuedTasks(store, project.ID) {
 				supervisor = autopilot.New(store, project, completer, repoDir, owner, repo, ghToken)
+
+				// Generate daemon dep graph before launching.
+				if err := buildAndApplyDaemonDepGraph(ctx, store, supervisor, project); err != nil {
+					log.Printf("Watch %s: dep graph error (falling back to no deps): %v", watchDeployID, err)
+				}
+
 				supervisor.Launch(ctx)
 
 				// Drain events to log, exiting when supervisor finishes.
 				go drainEvents(supervisor)
 
 				log.Printf("Watch %s: launched supervisor", watchDeployID)
+			}
+		} else if newCount > 0 {
+			// New issues discovered while supervisor is running — run incremental dep analysis.
+			if err := buildAndApplyIncrementalDaemonDepGraph(ctx, store, supervisor, project); err != nil {
+				log.Printf("Watch %s: incremental dep graph error: %v", watchDeployID, err)
 			}
 		}
 
@@ -579,6 +590,60 @@ func hasSkipLabel(labels []string, skipLabel string) bool {
 		}
 	}
 	return false
+}
+
+// buildAndApplyDaemonDepGraph generates and applies a conservative dep graph for daemon mode.
+// If a stored graph already exists, it runs incremental analysis for any new tasks instead.
+func buildAndApplyDaemonDepGraph(ctx context.Context, store *db.Store, supervisor *autopilot.Supervisor, project *db.Project) error {
+	tasks, err := store.GetAutopilotTasks(project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	// Check if we already have a stored dep graph (e.g., from a previous daemon run).
+	existing, _ := store.GetDepGraph(project.ID)
+	if existing != nil {
+		// Run incremental analysis for any new tasks.
+		return buildAndApplyIncrementalDaemonDepGraph(ctx, store, supervisor, project)
+	}
+
+	// Build task pointer slice for the daemon dep graph builder.
+	taskPtrs := make([]*db.AutopilotTask, len(tasks))
+	for i := range tasks {
+		taskPtrs[i] = &tasks[i]
+	}
+
+	opt, reasoning, confidence, err := supervisor.BuildDaemonDepGraph(ctx, taskPtrs)
+	if err != nil {
+		return err
+	}
+	if opt == nil {
+		return nil
+	}
+
+	log.Printf("Daemon dep graph: strategy=%q confidence=%.0f%%", opt.Name, confidence*100)
+
+	return supervisor.ApplyDaemonDepGraph(ctx, *opt, reasoning, confidence)
+}
+
+// buildAndApplyIncrementalDaemonDepGraph runs incremental dep analysis for new tasks in daemon mode.
+func buildAndApplyIncrementalDaemonDepGraph(ctx context.Context, store *db.Store, supervisor *autopilot.Supervisor, project *db.Project) error {
+	tasks, err := store.GetAutopilotTasks(project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	opt, reasoning, confidence, err := supervisor.BuildIncrementalDaemonDepGraph(ctx, tasks)
+	if err != nil {
+		return err
+	}
+	if opt == nil {
+		return nil // no new tasks to analyze
+	}
+
+	log.Printf("Daemon incremental dep graph: strategy=%q confidence=%.0f%%", opt.Name, confidence*100)
+
+	return supervisor.ApplyIncrementalDaemonDepGraph(ctx, *opt, reasoning, confidence)
 }
 
 // drainEvents logs supervisor events until the supervisor finishes.
