@@ -357,7 +357,20 @@ func (s *Supervisor) RestartTask(ctx context.Context, taskID int64) error {
 
 	// Clean up worktree and branch from the previous attempt.
 	if task.WorktreePath != "" {
-		_ = gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath)
+		if err := gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath); err != nil {
+			// git worktree remove can fail if the worktree is in a bad state
+			// (e.g., agent bailed early). Fall back to removing the directory
+			// and pruning stale worktree bookkeeping.
+			if rmErr := os.RemoveAll(task.WorktreePath); rmErr != nil {
+				return fmt.Errorf("failed to clean up worktree at %s (git remove: %v, rm: %v)", task.WorktreePath, err, rmErr)
+			}
+			_ = gitpkg.WorktreePrune(s.repoDir)
+		}
+		// Final sanity check: if the directory still exists, don't re-queue — the
+		// agent will just fail immediately at worktree creation.
+		if _, statErr := os.Stat(task.WorktreePath); statErr == nil {
+			return fmt.Errorf("worktree directory %s still exists after cleanup — remove it manually and retry", task.WorktreePath)
+		}
 	}
 	if task.Branch != "" {
 		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
