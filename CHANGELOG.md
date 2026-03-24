@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Max turns fallback detection**: When an agent's stream-json result event is missing (nil result), the supervisor now counts assistant events from the log file to detect turn limit exhaustion. Previously these agents were misclassified as "bailed" instead of "failed" with reason "max_turns". (#340)
+
 ### Changed
 - **Long-lived supervisor**: Supervisor stays alive after all tasks complete instead of exiting — both daemon and TUI modes. Watch loop creates supervisor once at startup; new tasks are inserted as `pending` and ingested by the supervisor's 30-second ticker with incremental dep analysis. TUI autopilot mode stays active with idle slots visible until user explicitly presses `A` to stop. Eliminates dual-goroutine dep graph race conditions. (#336)
 

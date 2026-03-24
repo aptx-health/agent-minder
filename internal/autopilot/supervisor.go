@@ -3982,6 +3982,10 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 		debugLog("inspectOutcome: parse agent log failed",
 			"issue", task.IssueNumber, "error", err.Error())
 	}
+
+	effectiveTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
+	effectiveBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
+
 	if agentResult != nil {
 		// Persist agent cost regardless of outcome.
 		if agentResult.TotalCost > 0 {
@@ -3991,8 +3995,6 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 		// Check budget ceiling after recording cost — may trigger pause for remaining work.
 		s.checkBudgetCeiling()
 
-		effectiveTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
-		effectiveBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
 		status, reason, detail := classifyOutcome(agentResult, effectiveTurns, effectiveBudget)
 		if status == "failed" {
 			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
@@ -4019,6 +4021,31 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			debugLog("inspectOutcome: warning (non-fatal)",
 				"issue", task.IssueNumber, "reason", reason, "detail", detail)
 			// Continue to PR check — agent may have completed despite warnings.
+		}
+	} else {
+		// No result event — the agent process may have been killed or the log
+		// truncated. Fall back to counting assistant events in the log to detect
+		// turn limit exhaustion that would otherwise be misclassified as "bailed".
+		logTurns := countTurnsFromLog(task.AgentLog)
+		if effectiveTurns > 0 && logTurns >= effectiveTurns {
+			reason := "max_turns"
+			detail := fmt.Sprintf("used %d of %d turns (detected from log, no result event)", logTurns, effectiveTurns)
+			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
+			debugLog("inspectOutcome: nil result but turn count from log indicates max_turns",
+				"issue", task.IssueNumber, "log_turns", logTurns, "max_turns", effectiveTurns)
+
+			// Check for PR even on failure — agent may have opened one before exhausting limits.
+			ghClient := s.newGHClient()
+			pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
+			if err == nil && pr != nil && pr.Number > 0 {
+				_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
+				task.PRNumber = pr.Number
+				debugLog("inspectOutcome: failed task (log fallback) has PR, promoting to review",
+					"issue", task.IssueNumber, "pr", pr.Number)
+				return "review"
+			}
+
+			return "failed"
 		}
 	}
 
