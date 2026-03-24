@@ -125,12 +125,12 @@ func newSettingsState(project *db.Project) *settingsState {
 			{
 				label:       "Autopilot max turns",
 				description: "Max turns per agent",
-				value:       strconv.Itoa(project.AutopilotMaxTurns),
+				value:       strconv.Itoa(project.EffectiveAutopilotMaxTurns()),
 			},
 			{
 				label:       "Autopilot max budget",
 				description: "Max USD budget per agent",
-				value:       fmt.Sprintf("%.2f", project.AutopilotMaxBudgetUSD),
+				value:       fmt.Sprintf("%.2f", project.EffectiveAutopilotMaxBudget()),
 				unit:        "USD",
 			},
 			{

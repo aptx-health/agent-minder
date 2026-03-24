@@ -392,63 +392,38 @@ func runWatchDaemon() error {
 		watchDeployID, project.AutopilotFilterType, project.AutopilotFilterValue,
 		pollInterval, project.AutopilotMaxAgents)
 
-	var supervisor *autopilot.Supervisor
+	// Create supervisor once — it stays alive in daemon mode, waiting for new work.
+	supervisor := autopilot.New(store, project, completer, repoDir, owner, repo, ghToken)
+	supervisor.SetDaemonMode(true)
+	supervisor.Launch(ctx)
+	go drainEvents(supervisor)
+	log.Printf("Watch %s: launched long-lived supervisor", watchDeployID)
 
 	for {
-		// Poll GitHub for matching issues and queue new ones.
+		// Poll GitHub for matching issues and queue new ones as "pending".
+		// The supervisor's 30s ticker will ingest them, run dep analysis,
+		// and transition to queued/blocked.
 		newCount, pollErr := watchPollAndQueue(ctx, store, ghClient, project, owner, repo)
 		if pollErr != nil {
 			log.Printf("Watch poll error: %v", pollErr)
 		} else if newCount > 0 {
-			log.Printf("Watch %s: queued %d new issue(s)", watchDeployID, newCount)
+			log.Printf("Watch %s: queued %d new issue(s) as pending", watchDeployID, newCount)
 		}
 
-		// Launch or re-launch supervisor if there are queued tasks and no active supervisor.
-		if supervisor == nil || !supervisor.IsActive() {
-			if hasQueuedTasks(store, project.ID) {
-				supervisor = autopilot.New(store, project, completer, repoDir, owner, repo, ghToken)
-				supervisor.Launch(ctx)
-
-				// Drain events to log, exiting when supervisor finishes.
-				go drainEvents(supervisor)
-
-				log.Printf("Watch %s: launched supervisor", watchDeployID)
-			}
-		}
-
-		// Wait for next poll, supervisor completion, or shutdown signal.
+		// Wait for next poll or shutdown signal.
 		timer := time.NewTimer(pollInterval)
-
-		var doneCh <-chan struct{}
-		if supervisor != nil {
-			doneCh = supervisor.Done()
-		}
 
 		select {
 		case sig := <-sigCh:
 			timer.Stop()
 			log.Printf("Received signal %v, stopping...", sig)
-			if supervisor != nil && supervisor.IsActive() {
-				supervisor.Stop()
-			}
+			supervisor.Stop()
 			cancel()
-			if supervisor != nil {
-				select {
-				case <-supervisor.Done():
-				case <-time.After(30 * time.Second):
-					log.Printf("Timeout waiting for agents to stop")
-				}
-			}
 			log.Printf("Watch %s stopped", watchDeployID)
 			return nil
 
 		case <-timer.C:
 			// Next poll cycle.
-
-		case <-doneCh:
-			timer.Stop()
-			log.Printf("Watch %s: supervisor finished, will poll for more work", watchDeployID)
-			supervisor = nil
 		}
 	}
 }
@@ -545,7 +520,7 @@ func watchPollAndQueue(ctx context.Context, store *db.Store, ghClient *ghpkg.Cli
 			IssueTitle:   issue.Title,
 			IssueBody:    body,
 			Dependencies: "[]",
-			Status:       "queued",
+			Status:       "pending",
 		}
 		if createErr := store.CreateAutopilotTask(task); createErr != nil {
 			log.Printf("Warning: could not create task for #%d: %v", issue.Number, createErr)
@@ -555,20 +530,6 @@ func watchPollAndQueue(ctx context.Context, store *db.Store, ghClient *ghpkg.Cli
 	}
 
 	return queued, nil
-}
-
-// hasQueuedTasks returns true if the project has any tasks in "queued" status.
-func hasQueuedTasks(store *db.Store, projectID int64) bool {
-	tasks, err := store.GetAutopilotTasks(projectID)
-	if err != nil {
-		return false
-	}
-	for _, t := range tasks {
-		if t.Status == "queued" {
-			return true
-		}
-	}
-	return false
 }
 
 // hasSkipLabel returns true if the label list contains the skip label.

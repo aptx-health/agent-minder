@@ -82,6 +82,24 @@ func (p *Project) IdlePauseDuration() time.Duration {
 	return time.Duration(p.IdlePauseSec) * time.Second
 }
 
+// EffectiveAutopilotMaxTurns returns the project's configured max turns,
+// falling back to DefaultMaxTurns if unset (zero).
+func (p *Project) EffectiveAutopilotMaxTurns() int {
+	if p.AutopilotMaxTurns < 1 {
+		return DefaultMaxTurns
+	}
+	return p.AutopilotMaxTurns
+}
+
+// EffectiveAutopilotMaxBudget returns the project's configured max budget,
+// falling back to DefaultMaxBudgetUSD if unset (zero).
+func (p *Project) EffectiveAutopilotMaxBudget() float64 {
+	if p.AutopilotMaxBudgetUSD <= 0 {
+		return DefaultMaxBudgetUSD
+	}
+	return p.AutopilotMaxBudgetUSD
+}
+
 // Repo represents a monitored git repository.
 type Repo struct {
 	ID        int64  `db:"id"`
@@ -215,26 +233,32 @@ type AutopilotTask struct {
 	ReviewCommentID *int64  `db:"review_comment_id"` // GitHub PR comment ID for updating review comment
 }
 
+// DefaultMaxTurns is the fallback when no project or task override is set.
+const DefaultMaxTurns = 150
+
+// DefaultMaxBudgetUSD is the fallback when no project or task override is set.
+const DefaultMaxBudgetUSD = 10.00
+
 // EffectiveMaxTurns returns the per-task max turns override if set,
-// otherwise the project default. Falls back to 50 if both are zero.
+// otherwise the project default. Falls back to DefaultMaxTurns if both are zero.
 func (t *AutopilotTask) EffectiveMaxTurns(projectDefault int) int {
 	if t.MaxTurnsOverride != nil {
 		return *t.MaxTurnsOverride
 	}
 	if projectDefault < 1 {
-		return 50
+		return DefaultMaxTurns
 	}
 	return projectDefault
 }
 
 // EffectiveMaxBudget returns the per-task budget override if set,
-// otherwise the project default. Falls back to 3.00 if both are zero.
+// otherwise the project default. Falls back to DefaultMaxBudgetUSD if both are zero.
 func (t *AutopilotTask) EffectiveMaxBudget(projectDefault float64) float64 {
 	if t.MaxBudgetOverride != nil {
 		return *t.MaxBudgetOverride
 	}
 	if projectDefault <= 0 {
-		return 3.00
+		return DefaultMaxBudgetUSD
 	}
 	return projectDefault
 }
@@ -271,11 +295,13 @@ type RepoOnboarding struct {
 
 // DepGraph represents a stored dependency graph for an autopilot session.
 type DepGraph struct {
-	ID         int64  `db:"id"`
-	ProjectID  int64  `db:"project_id"`
-	GraphJSON  string `db:"graph_json"`
-	OptionName string `db:"option_name"`
-	CreatedAt  string `db:"created_at"`
+	ID         int64   `db:"id"`
+	ProjectID  int64   `db:"project_id"`
+	GraphJSON  string  `db:"graph_json"`
+	OptionName string  `db:"option_name"`
+	Reasoning  string  `db:"reasoning"`
+	Confidence float64 `db:"confidence"`
+	CreatedAt  string  `db:"created_at"`
 }
 
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.

@@ -287,9 +287,9 @@ func (m Model) renderAutopilotTab() string {
 		}
 		b.WriteString(textStyle().Render(fmt.Sprintf("  Skip label(s):  %s", strings.Join(skipParts, " "))))
 		b.WriteString("\n")
-		b.WriteString(textStyle().Render(fmt.Sprintf("  Max turns:      %d", m.project.AutopilotMaxTurns)))
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Max turns:      %d", m.project.EffectiveAutopilotMaxTurns())))
 		b.WriteString("\n")
-		b.WriteString(textStyle().Render(fmt.Sprintf("  Budget/agent:   $%.2f", m.project.AutopilotMaxBudgetUSD)))
+		b.WriteString(textStyle().Render(fmt.Sprintf("  Budget/agent:   $%.2f", m.project.EffectiveAutopilotMaxBudget())))
 		b.WriteString("\n\n")
 		b.WriteString(mutedStyle().Render("  Press s to change settings, G to add instructions for the dependency analyzer."))
 		b.WriteString("\n")
@@ -422,6 +422,13 @@ func (m Model) renderAutopilotTab() string {
 // renderAutopilotRunningContent renders slot status and task list for the running/stop-confirm states.
 func (m Model) renderAutopilotRunningContent() string {
 	var b strings.Builder
+
+	// Watch indicator: show when a milestone/label filter is active.
+	if m.project.AutopilotFilterType != "" && m.project.AutopilotFilterValue != "" {
+		watchLabel := fmt.Sprintf("watching: %s %s", m.project.AutopilotFilterType, m.project.AutopilotFilterValue)
+		b.WriteString(broadcastStyle().Render("  👁 " + watchLabel))
+		b.WriteString("\n\n")
+	}
 
 	// Slot section (compact, top of tab).
 	if m.autopilotSupervisor != nil {

@@ -333,6 +333,12 @@ func (s *Server) handleDepGraph(w http.ResponseWriter, _ *http.Request) {
 		"graph":      graphData,
 		"created_at": dg.CreatedAt,
 	}
+	if dg.Reasoning != "" {
+		resp["reasoning"] = dg.Reasoning
+	}
+	if dg.Confidence > 0 {
+		resp["confidence"] = dg.Confidence
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 

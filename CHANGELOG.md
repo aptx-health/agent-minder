@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
+
+### Fixed
+- **Max turns fallback detection**: When an agent's stream-json result event is missing (nil result), the supervisor now counts assistant events from the log file to detect turn limit exhaustion. Previously these agents were misclassified as "bailed" instead of "failed" with reason "max_turns". (#340)
+- **Autopilot settings display**: Settings panel and autopilot confirm screen now show effective defaults (150 turns, $10.00 budget) instead of raw DB zeros when no override is configured. Bumped default fallbacks from 50→150 turns and $3.00→$10.00. (#341)
+- **Worktree preserved until PR merge**: Worktrees for review tasks are no longer deleted immediately when the agent posts a PR. They are now cleaned up only when the task reaches `done` (PR merged), preventing disruption to users with active terminal sessions in the worktree. (#342)
+
+### Changed
+- **Long-lived supervisor**: Supervisor stays alive after all tasks complete instead of exiting — both daemon and TUI modes. Watch loop creates supervisor once at startup; new tasks are inserted as `pending` and ingested by the supervisor's 30-second ticker with incremental dep analysis. TUI autopilot mode stays active with idle slots visible until user explicitly presses `A` to stop. Eliminates dual-goroutine dep graph race conditions. (#336)
+
+### Added
+- **Automated dep graph resolution for daemon mode**: In watch/unattended mode, the LLM now auto-selects a single conservative dependency strategy using `--json-schema` structured output, eliminating the interactive carousel. Includes `reasoning` and `confidence` fields stored in `autopilot_dep_graphs` for auditability. Low-confidence graphs (below 60%) emit a warning concern and webhook notification but do not block. Incremental dep analysis with reverse dependency injection runs automatically when new issues are discovered by the watch loop. Schema v28 adds `reasoning` and `confidence` columns. (#279)
 - **Observability TUI tab**: New tab (keybinding `4`) showing daily, weekly, and overall project cost breakdowns with per-task cost detail, using live data from the cost aggregation backend (#228)
 - **Cost controls and circuit breakers**: Total spend tracking with configurable budget ceiling (`--total-budget 50.00`) that auto-pauses task launches when hit. 80% warning and 100% limit notifications via webhook. Configurable behavior for running agents (`--budget-pause-running` to also stop them). Resume via `POST /resume` API endpoint. Budget utilization exposed in `/metrics` and `/status` endpoints. Persistent cost aggregation: task costs are banked to `carried_cost_usd` before clearing, so budget ceilings survive daemon restarts. Schema v27 adds `total_budget_usd`, `budget_pause_running`, and `carried_cost_usd` columns. (#285)
 - **CLI remote client**: `--remote host:port` flag on `deploy list`, `deploy status`, and `deploy stop` commands to query a remote daemon's HTTP API instead of the local SQLite database. Supports `--api-key` flag and `MINDER_REMOTE`/`MINDER_API_KEY` env vars for defaults. Graceful error handling for connection refused, auth failure, and timeout. Remote stop sends `POST /stop` to trigger graceful daemon shutdown. (#281)

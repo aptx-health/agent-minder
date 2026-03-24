@@ -122,6 +122,7 @@ type Supervisor struct {
 	gitSetupMu      sync.Mutex   // serializes git branch/worktree ops to avoid ref lock contention
 	slots           []*slotState // len == maxAgents; nil = idle
 	active          bool
+	daemonMode      bool // when true, supervisor stays alive even when all work completes
 	paused          bool // when true, fillSlots returns early
 	budgetPaused    bool // when true, budget ceiling was hit — fillSlots returns early
 	budgetWarned    bool // true once the 80% warning has been emitted (avoids repeats)
@@ -182,6 +183,14 @@ func (s *Supervisor) SetNotifier(n *notify.Notifier) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notifier = n
+}
+
+// SetDaemonMode configures the supervisor to stay alive even when all work completes.
+// When true, the supervisor waits for new tasks instead of exiting. Safe to call before Launch().
+func (s *Supervisor) SetDaemonMode(daemon bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.daemonMode = daemon
 }
 
 // Events returns the channel of events for the TUI.
@@ -1678,6 +1687,20 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		// discover new tracked items, fill new slots.
 		reviewCheckTicker := time.NewTicker(30 * time.Second)
 		defer reviewCheckTicker.Stop()
+
+		// Watch ticker: polls GitHub for new issues matching the project's filter.
+		// Uses the project's refresh interval (default 2 min) as the watch poll interval.
+		watchInterval := s.project.RefreshInterval()
+		if watchInterval < 60*time.Second {
+			watchInterval = 60 * time.Second
+		}
+		watchTicker := time.NewTicker(watchInterval)
+		defer watchTicker.Stop()
+		// Do an initial watch poll right away if a filter is configured.
+		if s.project.AutopilotFilterType != "" && s.project.AutopilotFilterValue != "" {
+			s.watchPoll(ctx)
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
@@ -1686,12 +1709,24 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.mu.Unlock()
 				s.emitEvent("finished", "Autopilot cancelled", nil)
 				return
+			case <-watchTicker.C:
+				discovered := s.watchPoll(ctx)
+				if discovered > 0 {
+					// The next reviewCheckTicker will ingest pending tasks.
+					// But trigger immediate ingestion for responsiveness.
+					ingested := s.ingestPendingTasks(ctx)
+					unblocked := s.unblockSatisfiedTasks()
+					if ingested > 0 || unblocked > 0 {
+						s.fillSlots(ctx)
+					}
+				}
 			case <-reviewCheckTicker.C:
 				s.checkReviewTasks(ctx)
 				s.checkManualTasks(ctx)
 				labelChanges := s.checkLabelChanges(ctx)
+				ingested := s.ingestPendingTasks(ctx)
 				unblocked := s.unblockSatisfiedTasks()
-				if unblocked > 0 || labelChanges > 0 {
+				if unblocked > 0 || labelChanges > 0 || ingested > 0 {
 					s.fillSlots(ctx)
 				}
 			default:
@@ -1720,7 +1755,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 			if !hasWork {
 				tasks, _ := s.store.GetAutopilotTasks(s.project.ID)
 				for _, t := range tasks {
-					if t.Status == "queued" || t.Status == "review" || t.Status == "reviewing" || t.Status == "reviewed" || t.Status == "manual" || t.Status == "blocked" {
+					if t.Status == "queued" || t.Status == "pending" || t.Status == "review" || t.Status == "reviewing" || t.Status == "reviewed" || t.Status == "manual" || t.Status == "blocked" {
 						hasWork = true
 						break
 					}
@@ -1729,8 +1764,9 @@ func (s *Supervisor) Launch(ctx context.Context) {
 			if !hasWork {
 				s.mu.Lock()
 				isPaused := s.paused
+				isDaemon := s.daemonMode
 				s.mu.Unlock()
-				if isPaused {
+				if isPaused || isDaemon {
 					hasWork = true
 				}
 			}
@@ -2395,6 +2431,395 @@ func countUnblocked(graph map[string]json.RawMessage, tasks []*db.AutopilotTask)
 	return count
 }
 
+// DaemonDepGraphConfidenceThreshold is the minimum confidence below which a warning concern is emitted.
+const DaemonDepGraphConfidenceThreshold = 0.6
+
+// daemonDepGraphSchema is the JSON schema for structured output from daemon dep graph LLM calls.
+const daemonDepGraphSchema = `{
+  "type": "object",
+  "properties": {
+    "strategy_name": {"type": "string", "description": "Name of the dependency strategy"},
+    "reasoning": {"type": "string", "description": "Explanation of why this strategy was chosen"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score from 0.0 to 1.0"},
+    "graph": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "array", "items": {"type": "integer"}},
+          {"type": "string", "enum": ["skip", "manual"]}
+        ]
+      },
+      "description": "Issue number (string key) mapped to dependency array or skip/manual directive"
+    }
+  },
+  "required": ["strategy_name", "reasoning", "confidence", "graph"],
+  "additionalProperties": false
+}`
+
+// daemonDepGraphResponse is the parsed structured output from a daemon dep graph LLM call.
+type daemonDepGraphResponse struct {
+	StrategyName string                     `json:"strategy_name"`
+	Reasoning    string                     `json:"reasoning"`
+	Confidence   float64                    `json:"confidence"`
+	Graph        map[string]json.RawMessage `json:"graph"`
+}
+
+// BuildDaemonDepGraph generates a single conservative dependency graph for unattended/daemon mode.
+// Unlike buildDepOptions which returns 3 options for interactive selection, this uses --json-schema
+// to produce a single conservative strategy and auto-applies it.
+func (s *Supervisor) BuildDaemonDepGraph(ctx context.Context, tasks []*db.AutopilotTask) (*DepOption, string, float64, error) {
+	// Separate agent tasks from manual tasks.
+	var agentTasks, manualTasks []*db.AutopilotTask
+	for _, t := range tasks {
+		if t.Status == "manual" {
+			manualTasks = append(manualTasks, t)
+		} else {
+			agentTasks = append(agentTasks, t)
+		}
+	}
+
+	if len(agentTasks) == 0 {
+		graph := make(map[string]json.RawMessage, len(manualTasks))
+		for _, t := range manualTasks {
+			graph[strconv.Itoa(t.IssueNumber)] = json.RawMessage(`"manual"`)
+		}
+		return &DepOption{
+			Name:      "No agent tasks",
+			Rationale: "Only manual (non-AI) tasks — watching for completion.",
+			Graph:     graph,
+			Unblocked: 0,
+		}, "Only manual tasks present.", 1.0, nil
+	}
+
+	if len(agentTasks) <= 1 && len(manualTasks) == 0 {
+		graph := make(map[string]json.RawMessage, 1)
+		graph[strconv.Itoa(agentTasks[0].IssueNumber)] = json.RawMessage("[]")
+		return &DepOption{
+			Name:      "No dependencies",
+			Rationale: "Only one task — no dependencies possible.",
+			Graph:     graph,
+			Unblocked: 1,
+		}, "Single task, trivial graph.", 1.0, nil
+	}
+
+	// Build task issue numbers set for quick lookup.
+	taskIssues := make(map[int]bool, len(tasks))
+	for _, t := range tasks {
+		taskIssues[t.IssueNumber] = true
+	}
+
+	// Build issue list for the LLM.
+	var issueList strings.Builder
+	issueList.WriteString("## Issues to be worked on by agents:\n")
+	for _, t := range agentTasks {
+		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+		if t.IssueBody != "" {
+			body := t.IssueBody
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	if len(manualTasks) > 0 {
+		issueList.WriteString("\n## Manual tasks (non-AI, human-driven — can block agent tasks, will be watched for completion):\n")
+		for _, t := range manualTasks {
+			fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+			if t.IssueBody != "" {
+				body := t.IssueBody
+				if len(body) > 200 {
+					body = body[:200] + "..."
+				}
+				fmt.Fprintf(&issueList, "  %s\n", body)
+			}
+		}
+	}
+
+	// Include other tracked issues as context.
+	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
+	var contextList strings.Builder
+	for _, item := range trackedItems {
+		if taskIssues[item.Number] || item.ItemType != "issue" {
+			continue
+		}
+		fmt.Fprintf(&contextList, "Issue #%d [%s]: %s\n", item.Number, item.State, item.Title)
+	}
+	if contextList.Len() > 0 {
+		issueList.WriteString("\n## Other tracked issues (not being worked on by agents, but may be dependencies):\n")
+		issueList.WriteString(contextList.String())
+	}
+
+	prompt := fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
+This is running in unattended daemon mode — produce a SINGLE conservative dependency strategy.
+
+A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
+Dependencies can include issues from ALL sections — an agent task can depend on a manual task or other tracked issue.
+
+Conservative means: when uncertain whether a dependency exists, prefer to add it. This avoids conflicts from parallel work on related issues. But do NOT add dependencies between clearly unrelated issues.
+
+%s
+The "graph" object:
+- Keys for AGENT tasks: values are arrays of integer issue numbers that must complete first. No deps = empty array.
+- Keys for MANUAL tasks: value MUST be the string "manual".
+- IMPORTANT: Use integer values in dependency arrays, not strings. Agent tasks CAN depend on manual task issue numbers.
+
+Provide a confidence score between 0.0 and 1.0:
+- 1.0 = obvious, clear-cut dependencies
+- 0.7-0.9 = confident analysis with some ambiguity
+- 0.4-0.6 = multiple viable interpretations, low certainty
+- Below 0.4 = largely guessing`, issueList.String())
+
+	depModel := s.project.LLMAnalyzerModel
+	if depModel == "" {
+		depModel = "opus"
+	}
+
+	debugLog("daemon dep graph", "stage", "dep-analysis", "step", "start", "model", depModel, "tasks", len(tasks))
+
+	resp, err := s.completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: "You are analyzing issue dependencies for an unattended CI/CD system. Produce a single conservative dependency graph. Respond using the provided JSON schema.",
+		Prompt:       prompt,
+		Model:        depModel,
+		JSONSchema:   daemonDepGraphSchema,
+		DisableTools: true,
+	})
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("daemon dep graph LLM call: %w", err)
+	}
+
+	var result daemonDepGraphResponse
+	content := resp.Content()
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		debugLog("daemon dep graph parse error", "stage", "dep-analysis", "step", "error", "content", content, "error", err.Error())
+		return nil, "", 0, fmt.Errorf("parse daemon dep graph: %w", err)
+	}
+
+	debugLog("daemon dep graph result", "stage", "dep-analysis", "step", "complete",
+		"strategy", result.StrategyName, "confidence", result.Confidence, "graph_entries", len(result.Graph))
+
+	opt := DepOption{
+		Name:      result.StrategyName,
+		Rationale: result.Reasoning,
+		Graph:     result.Graph,
+		Unblocked: countUnblocked(result.Graph, tasks),
+	}
+
+	return &opt, result.Reasoning, result.Confidence, nil
+}
+
+// daemonIncrementalDepGraphSchema is the JSON schema for incremental daemon dep graph updates.
+const daemonIncrementalDepGraphSchema = `{
+  "type": "object",
+  "properties": {
+    "strategy_name": {"type": "string", "description": "Name of the incremental update strategy"},
+    "reasoning": {"type": "string", "description": "Explanation of dependency decisions for new issues"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score from 0.0 to 1.0"},
+    "graph": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "array", "items": {"type": "integer"}},
+          {"type": "string", "enum": ["skip", "manual"]}
+        ]
+      },
+      "description": "Issue number (string key) mapped to dependency array or skip/manual directive. MUST include all new issues. MAY include existing queued/blocked tasks whose deps changed."
+    }
+  },
+  "required": ["strategy_name", "reasoning", "confidence", "graph"],
+  "additionalProperties": false
+}`
+
+// BuildIncrementalDaemonDepGraph generates incremental dependency analysis for new tasks in daemon mode.
+// It analyzes only new issues (queued with no deps) while providing existing tasks as context.
+// Supports reverse dependency injection — existing queued/blocked tasks can gain new dependencies.
+func (s *Supervisor) BuildIncrementalDaemonDepGraph(ctx context.Context, allTasks []db.AutopilotTask) (*DepOption, string, float64, error) {
+	// Identify new tasks (queued with no deps, added by watch loop).
+	var newTasks []*db.AutopilotTask
+	var existingTasks []*db.AutopilotTask
+	for i := range allTasks {
+		t := &allTasks[i]
+		if t.Status == "queued" && t.Dependencies == "[]" {
+			newTasks = append(newTasks, t)
+		} else {
+			existingTasks = append(existingTasks, t)
+		}
+	}
+
+	if len(newTasks) == 0 {
+		return nil, "", 0, nil
+	}
+
+	// Single new task with no existing tasks — trivial.
+	if len(newTasks) == 1 && len(existingTasks) == 0 {
+		graph := make(map[string]json.RawMessage, 1)
+		graph[strconv.Itoa(newTasks[0].IssueNumber)] = json.RawMessage("[]")
+		return &DepOption{
+			Name:      "No dependencies",
+			Rationale: "Only one new task — no dependencies possible.",
+			Graph:     graph,
+			Unblocked: 1,
+		}, "Single new task, trivial graph.", 1.0, nil
+	}
+
+	// Build prompt with new issues as focus and existing as context.
+	var issueList strings.Builder
+	issueList.WriteString("## NEW issues to analyze dependencies for:\n")
+	for _, t := range newTasks {
+		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+		if t.IssueBody != "" {
+			body := t.IssueBody
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	// Separate existing tasks by mutability.
+	var mutableTasks, immutableTasks []*db.AutopilotTask
+	for _, t := range existingTasks {
+		switch t.Status {
+		case "queued", "blocked":
+			mutableTasks = append(mutableTasks, t)
+		default:
+			immutableTasks = append(immutableTasks, t)
+		}
+	}
+
+	if len(mutableTasks) > 0 {
+		issueList.WriteString("\n## Existing queued/blocked tasks (deps may be updated if a new issue should block them):\n")
+		for _, t := range mutableTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s (current deps: %s)\n", t.IssueNumber, t.Status, t.IssueTitle, t.Dependencies)
+		}
+	}
+	if len(immutableTasks) > 0 {
+		issueList.WriteString("\n## Existing tasks (context only — deps cannot be changed):\n")
+		for _, t := range immutableTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s (deps: %s)\n", t.IssueNumber, t.Status, t.IssueTitle, t.Dependencies)
+		}
+	}
+
+	prompt := fmt.Sprintf(`Analyze these NEW GitHub issues and determine their dependencies.
+This is running in unattended daemon mode — produce a SINGLE conservative dependency analysis.
+
+Also check if any existing queued/blocked tasks should now depend on a new issue (reverse dependencies).
+
+Rules:
+- New issues can depend on existing tasks or other new issues.
+- Existing queued/blocked tasks can gain new dependencies on new issues. If so, include that task's FULL updated dependency array (not just the new dep).
+- Do NOT include entries for existing running/review/done/manual tasks — their deps are locked.
+
+Conservative means: when uncertain whether a dependency exists, prefer to add it.
+
+%s
+The "graph" MUST contain entries for all NEW issues. It MAY also contain entries for existing queued/blocked tasks whose deps changed.
+Values are arrays of integer issue numbers (deps) or "skip"/"manual".
+
+Provide a confidence score between 0.0 and 1.0.`, issueList.String())
+
+	depModel := s.project.LLMAnalyzerModel
+	if depModel == "" {
+		depModel = "opus"
+	}
+
+	debugLog("daemon incremental dep graph", "stage", "dep-analysis", "step", "start", "model", depModel, "new_tasks", len(newTasks))
+
+	resp, err := s.completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: "You are analyzing issue dependencies for an unattended CI/CD system. Produce a single conservative dependency analysis for new issues. Respond using the provided JSON schema.",
+		Prompt:       prompt,
+		Model:        depModel,
+		JSONSchema:   daemonIncrementalDepGraphSchema,
+		DisableTools: true,
+	})
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("daemon incremental dep graph LLM call: %w", err)
+	}
+
+	var result daemonDepGraphResponse
+	content := resp.Content()
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		debugLog("daemon incremental dep graph parse error", "stage", "dep-analysis", "step", "error", "content", content, "error", err.Error())
+		return nil, "", 0, fmt.Errorf("parse daemon incremental dep graph: %w", err)
+	}
+
+	debugLog("daemon incremental dep graph result", "stage", "dep-analysis", "step", "complete",
+		"strategy", result.StrategyName, "confidence", result.Confidence, "graph_entries", len(result.Graph))
+
+	opt := DepOption{
+		Name:      result.StrategyName,
+		Rationale: result.Reasoning,
+		Graph:     result.Graph,
+		Unblocked: countUnblocked(result.Graph, newTasks),
+	}
+
+	return &opt, result.Reasoning, result.Confidence, nil
+}
+
+// ApplyDaemonDepGraph applies a daemon-generated dep graph, stores it with reasoning/confidence,
+// and emits a warning concern if confidence is below the threshold.
+func (s *Supervisor) ApplyDaemonDepGraph(ctx context.Context, opt DepOption, reasoning string, confidence float64) error {
+	// Apply the graph to tasks using the standard method.
+	if err := s.ApplyDepOption(ctx, opt); err != nil {
+		return err
+	}
+
+	// Save with full metadata.
+	graphJSON, _ := json.Marshal(opt.Graph)
+	_ = s.store.SaveDepGraphFull(s.project.ID, string(graphJSON), opt.Name, reasoning, confidence)
+
+	// Emit warning if confidence is low.
+	if confidence > 0 && confidence < DaemonDepGraphConfidenceThreshold {
+		msg := fmt.Sprintf("Low confidence (%.0f%%) dep graph: %s — %s", confidence*100, opt.Name, reasoning)
+		s.emitEvent("warning", msg, nil)
+
+		// Store as a concern for API/TUI visibility.
+		_ = s.store.AddConcern(&db.Concern{ProjectID: s.project.ID, Severity: "warning", Message: msg})
+
+		// Fire notification if configured.
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:    notify.EventAgentError,
+				Project: s.project.Name,
+				Summary: msg,
+			})
+		}
+	}
+
+	return nil
+}
+
+// ApplyIncrementalDaemonDepGraph applies incremental daemon dep analysis, merges into the stored graph,
+// and handles confidence warnings.
+func (s *Supervisor) ApplyIncrementalDaemonDepGraph(ctx context.Context, opt DepOption, reasoning string, confidence float64) error {
+	// Apply using the standard incremental method.
+	if err := s.ApplyIncrementalDepOption(ctx, opt); err != nil {
+		return err
+	}
+
+	// Update stored graph metadata with latest reasoning/confidence.
+	storedGraph, _ := s.store.GetDepGraph(s.project.ID)
+	if storedGraph != nil {
+		_ = s.store.SaveDepGraphFull(s.project.ID, storedGraph.GraphJSON, storedGraph.OptionName, reasoning, confidence)
+	}
+
+	// Emit warning if confidence is low.
+	if confidence > 0 && confidence < DaemonDepGraphConfidenceThreshold {
+		msg := fmt.Sprintf("Low confidence (%.0f%%) incremental dep update: %s — %s", confidence*100, opt.Name, reasoning)
+		s.emitEvent("warning", msg, nil)
+		_ = s.store.AddConcern(&db.Concern{ProjectID: s.project.ID, Severity: "warning", Message: msg})
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:    notify.EventAgentError,
+				Project: s.project.Name,
+				Summary: msg,
+			})
+		}
+	}
+
+	return nil
+}
+
 func (s *Supervisor) fillSlots(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2856,11 +3281,10 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
 	}
 
-	// Cleanup: remove worktree for review tasks (restored on demand later);
-	// retain worktree and branch for failed/bailed tasks so work can be recovered.
-	if status == "review" {
-		s.cleanup(task, false)
-	}
+	// Retain worktree for all non-terminal statuses:
+	// - review: user may have an active terminal session in the worktree
+	// - failed/bailed: work can be recovered
+	// Worktrees are cleaned up when the task reaches "done" (PR merged).
 }
 
 // defaultReviewMaxRetries is the default number of transient-failure retries
@@ -2927,7 +3351,7 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 	return promoted
 }
 
-// promoteTaskToDone marks a task as done, cleans up labels, and emits a completion event.
+// promoteTaskToDone marks a task as done, cleans up labels and worktree, and emits a completion event.
 func (s *Supervisor) promoteTaskToDone(ctx context.Context, ghClient *ghpkg.Client, task db.AutopilotTask, eventMsg string) {
 	_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
 	ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
@@ -2935,6 +3359,10 @@ func (s *Supervisor) promoteTaskToDone(ctx context.Context, ghClient *ghpkg.Clie
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, *task.ReviewRisk)
 	}
 	s.emitEvent("completed", eventMsg, &task)
+
+	// Clean up worktree now that the task has reached terminal state.
+	// The branch is preserved since it was already pushed for the PR.
+	s.cleanup(&task, false)
 }
 
 // promoteIfMerged checks if a task's PR has been merged or closed, and if so
@@ -3261,8 +3689,8 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 			task.IssueNumber, task.PRNumber, label), task)
 	}
 
-	// Clean up worktree after review — it can be restored again if needed.
-	s.cleanup(task, false)
+	// Worktree is preserved — user may have an active session in it.
+	// It will be cleaned up when the task reaches "done" (PR merged).
 }
 
 // parseReviewRisk extracts the risk level from a review agent's output.
@@ -3352,6 +3780,193 @@ func formatReviewComment(agentOutput, label string) string {
 
 // unblockSatisfiedTasks re-evaluates blocked tasks and promotes them to queued
 // when all their dependencies are satisfied. Returns the number of tasks unblocked.
+// ingestPendingTasks finds tasks with status "pending" (inserted by the watch loop
+// or other external callers), runs incremental dependency analysis, and transitions
+// them to "queued" or "blocked". Returns the number of tasks ingested.
+//
+// All dep graph mutations happen here inside the supervisor goroutine, naturally
+// serialized with label change detection, unblocking, and other dep graph work.
+//
+// NOTE: After #279 lands, this should call BuildDaemonDepGraph (for initial graph
+// when no stored graph exists) or BuildIncrementalDaemonDepGraph (when adding to
+// an existing graph), then ApplyDaemonDepGraph / ApplyIncrementalDaemonDepGraph
+// for reasoning/confidence storage.
+func (s *Supervisor) ingestPendingTasks(ctx context.Context) int {
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0
+	}
+
+	var pending []db.AutopilotTask
+	for _, t := range allTasks {
+		if t.Status == "pending" {
+			pending = append(pending, t)
+		}
+	}
+	if len(pending) == 0 {
+		return 0
+	}
+
+	s.emitEvent("discovered", fmt.Sprintf("Discovered %d new task(s) — analyzing dependencies", len(pending)), nil)
+
+	// Transition pending → queued with empty deps so BuildIncrementalDepOptions
+	// can identify them as new (queued + "[]" deps).
+	for _, t := range pending {
+		_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+	}
+
+	// Re-fetch after status update.
+	allTasks, err = s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return len(pending)
+	}
+
+	// Run incremental dep analysis for the new tasks.
+	options, err := s.BuildIncrementalDepOptions(ctx, allTasks, "")
+	if err != nil {
+		debugLog("ingestPendingTasks: incremental dep analysis failed", "error", err.Error())
+		s.emitEvent("warning", fmt.Sprintf("Dep analysis failed for new tasks: %v — queued without deps", err), nil)
+		return len(pending)
+	}
+
+	if len(options) > 0 {
+		// Auto-select the first (most conservative) option.
+		opt := options[0]
+
+		// Apply using the incremental method — only touches mutable tasks,
+		// handles reverse dep injection, and merges into stored graph.
+		if err := s.ApplyIncrementalDepOption(ctx, opt); err != nil {
+			debugLog("ingestPendingTasks: apply incremental dep option failed", "error", err.Error())
+			s.emitEvent("warning", fmt.Sprintf("Failed to apply dep graph: %v", err), nil)
+		} else {
+			s.emitEvent("info", fmt.Sprintf("Applied dep graph %q for %d new task(s)", opt.Name, len(pending)), nil)
+		}
+	}
+
+	return len(pending)
+}
+
+// watchPoll queries GitHub for issues matching the project's watch filter
+// (milestone or label), creates autopilot_tasks with status "pending" for any
+// new issues not already in the task table, and returns the count of newly
+// created tasks. This is the TUI equivalent of watchPollAndQueue in deploy_watch.go.
+//
+// No-op if the project has no filter configured.
+func (s *Supervisor) watchPoll(ctx context.Context) int {
+	filterType := s.project.AutopilotFilterType
+	filterValue := s.project.AutopilotFilterValue
+	if filterType == "" || filterValue == "" {
+		return 0
+	}
+
+	ghClient := s.newGHClient()
+
+	var items []ghpkg.ItemStatus
+	var err error
+	switch filterType {
+	case "milestone":
+		milestones, mErr := ghClient.ListMilestones(ctx, s.owner, s.repo)
+		if mErr != nil {
+			debugLog("watchPoll: list milestones failed", "error", mErr.Error())
+			return 0
+		}
+		var msNum int
+		for _, ms := range milestones {
+			if ms.Value == filterValue {
+				msNum = ms.ID
+				break
+			}
+		}
+		if msNum == 0 {
+			debugLog("watchPoll: milestone not found", "milestone", filterValue)
+			return 0
+		}
+		result, sErr := ghClient.ListIssuesByMilestone(ctx, s.owner, s.repo, msNum)
+		if sErr != nil {
+			debugLog("watchPoll: search by milestone failed", "error", sErr.Error())
+			return 0
+		}
+		items = result.Items
+	case "label":
+		result, sErr := ghClient.SearchIssues(ctx, s.owner, s.repo, ghpkg.FilterLabel, filterValue)
+		if sErr != nil {
+			debugLog("watchPoll: search by label failed", "error", sErr.Error())
+			return 0
+		}
+		items = result.Items
+	default:
+		debugLog("watchPoll: unknown filter type", "filter_type", filterType)
+		return 0
+	}
+
+	// Deduplicate against existing tasks.
+	existingTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		debugLog("watchPoll: get existing tasks failed", "error", err.Error())
+		return 0
+	}
+	tracked := make(map[int]bool, len(existingTasks))
+	for _, t := range existingTasks {
+		tracked[t.IssueNumber] = true
+	}
+
+	skipLabel := s.project.AutopilotSkipLabel
+	queued := 0
+
+	for _, issue := range items {
+		if tracked[issue.Number] {
+			continue
+		}
+		// Skip if the issue has the skip label.
+		skip := false
+		for _, l := range issue.Labels {
+			if l == skipLabel {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		if issue.State != "open" {
+			continue
+		}
+
+		// Fetch full issue body if truncated.
+		body := issue.Body
+		if body == "" {
+			fetched, fetchErr := ghClient.FetchItem(ctx, s.owner, s.repo, issue.Number)
+			if fetchErr != nil {
+				debugLog("watchPoll: fetch body failed", "issue", issue.Number, "error", fetchErr.Error())
+			} else {
+				body = fetched.Body
+			}
+		}
+
+		task := &db.AutopilotTask{
+			ProjectID:    s.project.ID,
+			Owner:        s.owner,
+			Repo:         s.repo,
+			IssueNumber:  issue.Number,
+			IssueTitle:   issue.Title,
+			IssueBody:    body,
+			Dependencies: "[]",
+			Status:       "pending",
+		}
+		if createErr := s.store.CreateAutopilotTask(task); createErr != nil {
+			debugLog("watchPoll: create task failed", "issue", issue.Number, "error", createErr.Error())
+			continue
+		}
+		queued++
+	}
+
+	if queued > 0 {
+		filterDesc := fmt.Sprintf("%s %s", filterType, filterValue)
+		s.emitEvent("discovered", fmt.Sprintf("Discovered %d new issue(s) from %s", queued, filterDesc), nil)
+	}
+	return queued
+}
+
 func (s *Supervisor) unblockSatisfiedTasks() int {
 	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {
@@ -3516,6 +4131,10 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 		debugLog("inspectOutcome: parse agent log failed",
 			"issue", task.IssueNumber, "error", err.Error())
 	}
+
+	effectiveTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
+	effectiveBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
+
 	if agentResult != nil {
 		// Persist agent cost regardless of outcome.
 		if agentResult.TotalCost > 0 {
@@ -3525,8 +4144,6 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 		// Check budget ceiling after recording cost — may trigger pause for remaining work.
 		s.checkBudgetCeiling()
 
-		effectiveTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
-		effectiveBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
 		status, reason, detail := classifyOutcome(agentResult, effectiveTurns, effectiveBudget)
 		if status == "failed" {
 			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
@@ -3553,6 +4170,31 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 			debugLog("inspectOutcome: warning (non-fatal)",
 				"issue", task.IssueNumber, "reason", reason, "detail", detail)
 			// Continue to PR check — agent may have completed despite warnings.
+		}
+	} else {
+		// No result event — the agent process may have been killed or the log
+		// truncated. Fall back to counting assistant events in the log to detect
+		// turn limit exhaustion that would otherwise be misclassified as "bailed".
+		logTurns := countTurnsFromLog(task.AgentLog)
+		if effectiveTurns > 0 && logTurns >= effectiveTurns {
+			reason := "max_turns"
+			detail := fmt.Sprintf("used %d of %d turns (detected from log, no result event)", logTurns, effectiveTurns)
+			_ = s.store.UpdateAutopilotTaskFailure(task.ID, reason, detail)
+			debugLog("inspectOutcome: nil result but turn count from log indicates max_turns",
+				"issue", task.IssueNumber, "log_turns", logTurns, "max_turns", effectiveTurns)
+
+			// Check for PR even on failure — agent may have opened one before exhausting limits.
+			ghClient := s.newGHClient()
+			pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
+			if err == nil && pr != nil && pr.Number > 0 {
+				_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
+				task.PRNumber = pr.Number
+				debugLog("inspectOutcome: failed task (log fallback) has PR, promoting to review",
+					"issue", task.IssueNumber, "pr", pr.Number)
+				return "review"
+			}
+
+			return "failed"
 		}
 	}
 

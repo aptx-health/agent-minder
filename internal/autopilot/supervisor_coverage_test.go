@@ -5702,6 +5702,265 @@ func TestCheckLabelChanges_NoTasks(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// watchPoll tests
+// ---------------------------------------------------------------------------
+
+// newWatchPollSupervisor creates a Supervisor wired to a test HTTP server
+// with the given filter configuration. The events channel is buffered (64)
+// so no drain goroutine is needed for tests that don't inspect events.
+func newWatchPollSupervisor(t *testing.T, filterType, filterValue, serverURL string) (*Supervisor, *db.Store) {
+	t.Helper()
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotFilterType = filterType
+	project.AutopilotFilterValue = filterValue
+	project.AutopilotSkipLabel = "no-agent"
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+	if serverURL != "" {
+		sup.ghClientFactory = func(token string) *ghpkg.Client {
+			return ghpkg.NewClientWithBaseURL(token, serverURL+"/")
+		}
+	}
+	return sup, store
+}
+
+func TestWatchPoll_NoFilter(t *testing.T) {
+	sup, _ := newWatchPollSupervisor(t, "", "", "")
+	if got := sup.watchPoll(context.Background()); got != 0 {
+		t.Errorf("watchPoll with no filter = %d, want 0", got)
+	}
+}
+
+func TestWatchPoll_UnknownFilterType(t *testing.T) {
+	sup, _ := newWatchPollSupervisor(t, "assignee", "octocat", "")
+	if got := sup.watchPoll(context.Background()); got != 0 {
+		t.Errorf("watchPoll = %d, want 0 (unknown filter type)", got)
+	}
+}
+
+func TestWatchPoll_LabelFilter_CreatesNewTasks(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
+			_, _ = fmt.Fprint(w, `{
+				"total_count": 3, "incomplete_results": false,
+				"items": [
+					{"number": 10, "title": "Issue 10", "body": "Body 10", "state": "open", "labels": []},
+					{"number": 11, "title": "Issue 11", "body": "Body 11", "state": "open", "labels": [{"name": "no-agent"}]},
+					{"number": 12, "title": "Issue 12", "body": "Body 12", "state": "open", "labels": []}
+				]
+			}`)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer ts.Close()
+
+	sup, store := newWatchPollSupervisor(t, "label", "ready", ts.URL)
+	if got := sup.watchPoll(context.Background()); got != 2 {
+		t.Errorf("watchPoll = %d, want 2 (issues 10 and 12, skip 11)", got)
+	}
+
+	tasks, err := store.GetAutopilotTasks(sup.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("task count = %d, want 2", len(tasks))
+	}
+	for _, task := range tasks {
+		if task.Status != "pending" {
+			t.Errorf("task #%d status = %q, want pending", task.IssueNumber, task.Status)
+		}
+	}
+}
+
+func TestWatchPoll_LabelFilter_DeduplicatesExisting(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
+			_, _ = fmt.Fprint(w, `{
+				"total_count": 2, "incomplete_results": false,
+				"items": [
+					{"number": 20, "title": "Existing", "body": "body", "state": "open", "labels": []},
+					{"number": 21, "title": "New one", "body": "body", "state": "open", "labels": []}
+				]
+			}`)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer ts.Close()
+
+	sup, store := newWatchPollSupervisor(t, "label", "ready", ts.URL)
+
+	existing := &db.AutopilotTask{
+		ProjectID: sup.project.ID, IssueNumber: 20, IssueTitle: "Existing",
+		Dependencies: "[]", Status: "queued",
+	}
+	if err := store.CreateAutopilotTask(existing); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sup.watchPoll(context.Background()); got != 1 {
+		t.Errorf("watchPoll = %d, want 1 (only #21 is new)", got)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(sup.project.ID)
+	if len(tasks) != 2 {
+		t.Fatalf("task count = %d, want 2", len(tasks))
+	}
+}
+
+func TestWatchPoll_MilestoneFilter_CreatesNewTasks(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/milestones"):
+			_, _ = fmt.Fprint(w, `[{"number": 1, "title": "v0.9"}, {"number": 2, "title": "v1.0"}]`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/issues") && r.URL.Query().Get("milestone") == "2":
+			_, _ = fmt.Fprint(w, `[{"number": 30, "title": "MS Issue", "body": "milestone body", "state": "open", "labels": []}]`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer ts.Close()
+
+	sup, store := newWatchPollSupervisor(t, "milestone", "v1.0", ts.URL)
+	if got := sup.watchPoll(context.Background()); got != 1 {
+		t.Errorf("watchPoll = %d, want 1", got)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(sup.project.ID)
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
+	}
+	if tasks[0].IssueTitle != "MS Issue" {
+		t.Errorf("title = %q, want 'MS Issue'", tasks[0].IssueTitle)
+	}
+	if tasks[0].Status != "pending" {
+		t.Errorf("status = %q, want pending", tasks[0].Status)
+	}
+}
+
+func TestWatchPoll_MilestoneNotFound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/milestones") {
+			_, _ = fmt.Fprint(w, `[{"number": 1, "title": "v0.9"}]`)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer ts.Close()
+
+	sup, _ := newWatchPollSupervisor(t, "milestone", "v99.0", ts.URL)
+	if got := sup.watchPoll(context.Background()); got != 0 {
+		t.Errorf("watchPoll = %d, want 0 (milestone not found)", got)
+	}
+}
+
+func TestWatchPoll_SkipsClosedIssues(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
+			_, _ = fmt.Fprint(w, `{
+				"total_count": 2, "incomplete_results": false,
+				"items": [
+					{"number": 40, "title": "Open", "body": "b", "state": "open", "labels": []},
+					{"number": 41, "title": "Closed", "body": "b", "state": "closed", "labels": []}
+				]
+			}`)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer ts.Close()
+
+	sup, store := newWatchPollSupervisor(t, "label", "ready", ts.URL)
+	if got := sup.watchPoll(context.Background()); got != 1 {
+		t.Errorf("watchPoll = %d, want 1 (only open issue)", got)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(sup.project.ID)
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
+	}
+	if tasks[0].IssueNumber != 40 {
+		t.Errorf("task issue = %d, want 40 (closed #41 should be skipped)", tasks[0].IssueNumber)
+	}
+}
+
+func TestWatchPoll_FetchesBodyWhenEmpty(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues"):
+			_, _ = fmt.Fprint(w, `{
+				"total_count": 1, "incomplete_results": false,
+				"items": [{"number": 50, "title": "No body", "body": "", "state": "open", "labels": []}]
+			}`)
+		// FetchItem tries PR first, then falls back to issue.
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pulls/50"):
+			w.WriteHeader(404)
+			_, _ = fmt.Fprint(w, `{"message": "Not Found"}`)
+		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/issues/50"):
+			_, _ = fmt.Fprint(w, `{"number": 50, "title": "No body", "body": "Fetched full body", "state": "open", "labels": []}`)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer ts.Close()
+
+	sup, store := newWatchPollSupervisor(t, "label", "ready", ts.URL)
+	if got := sup.watchPoll(context.Background()); got != 1 {
+		t.Errorf("watchPoll = %d, want 1", got)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(sup.project.ID)
+	if len(tasks) != 1 {
+		t.Fatalf("task count = %d, want 1", len(tasks))
+	}
+	if tasks[0].IssueBody != "Fetched full body" {
+		t.Errorf("body = %q, want 'Fetched full body'", tasks[0].IssueBody)
+	}
+}
+
+func TestWatchPoll_EmitsDiscoveredEvent(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
+			_, _ = fmt.Fprint(w, `{
+				"total_count": 1, "incomplete_results": false,
+				"items": [{"number": 60, "title": "New issue", "body": "body", "state": "open", "labels": []}]
+			}`)
+			return
+		}
+		w.WriteHeader(404)
+	}))
+	defer ts.Close()
+
+	sup, _ := newWatchPollSupervisor(t, "label", "ready", ts.URL)
+
+	var events []Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range sup.Events() {
+			events = append(events, ev)
+		}
+	}()
+
+	sup.watchPoll(context.Background())
+	close(sup.events)
+	<-done
+
+	found := false
+	for _, ev := range events {
+		if ev.Type == "discovered" && strings.Contains(ev.Summary, "1 new issue") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'discovered' event, got events: %+v", events)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 

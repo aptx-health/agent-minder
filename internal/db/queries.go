@@ -671,14 +671,21 @@ func (s *Store) PruneCompletedItems(projectID int64, maxAgeSec int) (int, error)
 
 // SaveDepGraph upserts a dependency graph for a project.
 func (s *Store) SaveDepGraph(projectID int64, graphJSON, optionName string) error {
+	return s.SaveDepGraphFull(projectID, graphJSON, optionName, "", 0)
+}
+
+// SaveDepGraphFull upserts a dependency graph for a project with reasoning and confidence metadata.
+func (s *Store) SaveDepGraphFull(projectID int64, graphJSON, optionName, reasoning string, confidence float64) error {
 	_, err := s.db.Exec(`
-		INSERT INTO autopilot_dep_graphs (project_id, graph_json, option_name)
-		VALUES (?, ?, ?)
+		INSERT INTO autopilot_dep_graphs (project_id, graph_json, option_name, reasoning, confidence)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(project_id) DO UPDATE SET
 			graph_json = excluded.graph_json,
 			option_name = excluded.option_name,
+			reasoning = excluded.reasoning,
+			confidence = excluded.confidence,
 			created_at = datetime('now')
-	`, projectID, graphJSON, optionName)
+	`, projectID, graphJSON, optionName, reasoning, confidence)
 	if err != nil {
 		return fmt.Errorf("save dep graph: %w", err)
 	}

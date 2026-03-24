@@ -227,3 +227,72 @@ func TestClassifyOutcome_BudgetBelowThreshold(t *testing.T) {
 		t.Error("should not classify as failed when cost is below threshold")
 	}
 }
+
+func TestCountTurnsFromLog_CountsAssistantEvents(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "agent.log")
+
+	content := `{"type":"system","subtype":"init","session_id":"abc-123"}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"Step 1"}]}}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"Step 2"}]}}
+{"type":"assistant","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"Step 3"}]}}
+`
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	count := countTurnsFromLog(logPath)
+	if count != 3 {
+		t.Errorf("countTurnsFromLog = %d, want 3", count)
+	}
+}
+
+func TestCountTurnsFromLog_EmptyPath(t *testing.T) {
+	count := countTurnsFromLog("")
+	if count != 0 {
+		t.Errorf("countTurnsFromLog = %d, want 0 for empty path", count)
+	}
+}
+
+func TestCountTurnsFromLog_MissingFile(t *testing.T) {
+	count := countTurnsFromLog("/nonexistent/path/agent.log")
+	if count != 0 {
+		t.Errorf("countTurnsFromLog = %d, want 0 for missing file", count)
+	}
+}
+
+func TestCountTurnsFromLog_NoAssistantEvents(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "agent.log")
+
+	content := `{"type":"system","subtype":"init"}
+{"type":"result","subtype":"success","num_turns":0}
+`
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	count := countTurnsFromLog(logPath)
+	if count != 0 {
+		t.Errorf("countTurnsFromLog = %d, want 0", count)
+	}
+}
+
+func TestCountTurnsFromLog_MalformedLines(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "agent.log")
+
+	content := `not json at all
+{"type":"assistant","message":{"content":[]}}
+more garbage
+{"type":"assistant","message":{"content":[]}}
+`
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	count := countTurnsFromLog(logPath)
+	if count != 2 {
+		t.Errorf("countTurnsFromLog = %d, want 2 (should skip malformed lines)", count)
+	}
+}
