@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Autopilot settings display**: Settings panel and autopilot confirm screen now show effective defaults (150 turns, $10.00 budget) instead of raw DB zeros when no override is configured. Bumped default fallbacks from 50→150 turns and $3.00→$10.00. (#341)
 - **Worktree preserved until PR merge**: Worktrees for review tasks are no longer deleted immediately when the agent posts a PR. They are now cleaned up only when the task reaches `done` (PR merged), preventing disruption to users with active terminal sessions in the worktree. (#342)
 
 ### Changed
