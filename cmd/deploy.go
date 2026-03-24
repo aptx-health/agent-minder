@@ -343,11 +343,29 @@ func runDeployDaemon() error {
 		return fmt.Errorf("--deploy-id required in daemon mode")
 	}
 
+	// Idempotent startup: if a daemon is already running, error out.
+	if alive, pid := deploy.IsRunning(deployID); alive {
+		return fmt.Errorf("deploy %s is already running (PID %d)", deployID, pid)
+	}
+
+	// Detect crash from previous run and clean up stale PID/heartbeat.
+	if deploy.WasCrashShutdown(deployID) {
+		log.Printf("Detected previous crash for deploy %s — cleaning up stale PID", deployID)
+		deploy.CleanStalePID(deployID)
+	}
+
 	// Write PID file.
 	if err := deploy.WritePID(deployID); err != nil {
 		return fmt.Errorf("write PID: %w", err)
 	}
-	defer func() { _ = deploy.RemovePID(deployID) }()
+	defer func() {
+		_ = deploy.RemovePID(deployID)
+		deploy.RemoveHeartbeat(deployID)
+	}()
+
+	// Start heartbeat writer (30s interval).
+	stopHeartbeat := deploy.StartHeartbeat(deployID, 30*time.Second)
+	defer stopHeartbeat()
 
 	log.Printf("Deploy daemon %s starting (PID %d)", deployID, os.Getpid())
 
@@ -381,6 +399,14 @@ func runDeployDaemon() error {
 	ghToken := os.Getenv("GITHUB_TOKEN")
 	if ghToken == "" {
 		ghToken = config.GetIntegrationToken("github")
+	}
+
+	// Recover from previous unclean shutdown: reset stale tasks, clean worktrees.
+	recovered, err := deploy.RecoverDaemonState(store, project, repoDir)
+	if err != nil {
+		log.Printf("Recovery warning: %v", err)
+	} else if recovered > 0 {
+		log.Printf("Recovered %d tasks from previous session", recovered)
 	}
 
 	// Create completer and supervisor.

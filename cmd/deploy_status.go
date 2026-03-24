@@ -54,9 +54,20 @@ func runDeployStatus(cmd *cobra.Command, args []string) error {
 	status := "completed"
 	if alive {
 		status = "running"
+	} else if deploy.WasCrashShutdown(id) {
+		status = "crashed"
 	}
 
 	fmt.Printf("Deploy %s [%s]\n", id, status)
+	if alive {
+		if hb := deploy.ReadHeartbeat(id); !hb.IsZero() {
+			ago := time.Since(hb).Truncate(time.Second)
+			fmt.Printf("Last heartbeat: %s ago\n", ago)
+		}
+	} else if status == "crashed" {
+		fmt.Printf("Stale PID file detected — daemon exited uncleanly.\n")
+		fmt.Printf("Relaunch with: agent-minder deploy respawn %s\n", id)
+	}
 	if repoRef != "" {
 		fmt.Printf("Repo:  %s\n", repoRef)
 	}
