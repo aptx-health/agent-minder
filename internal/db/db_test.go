@@ -317,10 +317,11 @@ func TestPolls(t *testing.T) {
 		t.Errorf("first poll LLMResponse = %q, want 'No activity'", polls[0].LLMResponse())
 	}
 
-	last, _ := store.LastPoll(p.ID)
-	if last == nil {
+	lastPtr, _ := store.LastPoll(p.ID)
+	if lastPtr == nil {
 		t.Fatal("LastPoll returned nil")
 	}
+	last := *lastPtr
 	if last.NewCommits != 0 {
 		t.Errorf("LastPoll.NewCommits = %d, want 0", last.NewCommits)
 	}
@@ -2247,11 +2248,12 @@ func TestDepGraphCRUD(t *testing.T) {
 	if dg == nil {
 		t.Fatal("expected non-nil dep graph after save")
 	}
-	if dg.GraphJSON != `{"42":[],"38":[42]}` {
-		t.Errorf("GraphJSON = %q, want %q", dg.GraphJSON, `{"42":[],"38":[42]}`)
+	got := *dg
+	if got.GraphJSON != `{"42":[],"38":[42]}` {
+		t.Errorf("GraphJSON = %q, want %q", got.GraphJSON, `{"42":[],"38":[42]}`)
 	}
-	if dg.OptionName != "Conservative" {
-		t.Errorf("OptionName = %q, want %q", dg.OptionName, "Conservative")
+	if got.OptionName != "Conservative" {
+		t.Errorf("OptionName = %q, want %q", got.OptionName, "Conservative")
 	}
 
 	// Upsert overwrites.
