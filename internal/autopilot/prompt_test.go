@@ -1090,7 +1090,7 @@ func TestRenderReviewTaskContextWithRelatedWork(t *testing.T) {
 		},
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "org", "repo", "Goal", rw)
+	ctx := renderReviewTaskContext(task, "main", "org", "repo", "Goal", "", rw)
 
 	if !strings.Contains(ctx, "Related Work") {
 		t.Error("should contain Related Work section")

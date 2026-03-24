@@ -555,7 +555,7 @@ func detectTestCommand(repoDir string) string {
 	if _, err := os.Stat(filepath.Join(repoDir, "Cargo.toml")); err == nil {
 		return "cargo test"
 	}
-	// Check for Makefile with test target.
+	// Check for Makefile (assumes a test target exists).
 	if _, err := os.Stat(filepath.Join(repoDir, "Makefile")); err == nil {
 		return "make test"
 	}
