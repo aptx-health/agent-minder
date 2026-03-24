@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **HTTP API server**: Embeddable HTTP API server (`--serve :7749`) in deploy daemon exposing `/status`, `/tasks`, `/tasks/:id`, `/tasks/:id/log` (with SSE streaming), `/dep-graph`, `/analysis`, `/analysis/poll`, and `/metrics` endpoints; API key auth via `--api-key` flag or `MINDER_API_KEY` env var; CORS headers; graceful shutdown on SIGTERM
 - **TUI review states**: Display `reviewing` (with spinner-colored indicator) and `reviewed` (with risk tier) statuses in task list; review agents shown with "R:" prefix in slot display; risk summary line showing counts by tier; risk tier color-coded in task detail panel (green=low-risk, amber=needs-testing, red=suspect)
 - **Schema v23**: Review automation columns — `autopilot_auto_merge`, `autopilot_review_max_turns`, `autopilot_review_max_budget_usd` on projects; `review_risk`, `review_comment_id` on autopilot_tasks; new `reviewing`/`reviewed` task statuses
 - **Review agent spawning**: Supervisor automatically spawns reviewer agents when tasks enter `review` status, using review-specific resource limits and the reviewer agent definition

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/api"
 	"github.com/dustinlange/agent-minder/internal/autopilot"
 	"github.com/dustinlange/agent-minder/internal/claudecli"
 	"github.com/dustinlange/agent-minder/internal/config"
@@ -30,6 +32,8 @@ var (
 	deployDaemon    bool
 	deployID        string
 	deployProject   string
+	deployServe     string
+	deployAPIKey    string
 )
 
 var deployCmd = &cobra.Command{
@@ -68,6 +72,9 @@ func init() {
 	deployCmd.Flags().Float64Var(&deployMaxBudget, "max-budget", 0, "Max budget per agent in USD (default: 3.00, or from --project)")
 	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show plan without launching")
 	deployCmd.Flags().StringVar(&deployProject, "project", "", "Inherit settings (agents, turns, budget, skip label, base branch) from an existing project")
+
+	deployCmd.Flags().StringVar(&deployServe, "serve", "", "Enable HTTP API server on the given address (e.g. :7749)")
+	deployCmd.Flags().StringVar(&deployAPIKey, "api-key", "", "API key for HTTP server authentication (or set MINDER_API_KEY)")
 
 	// Hidden flags for daemon re-exec.
 	deployCmd.Flags().BoolVar(&deployDaemon, "daemon", false, "Run as background daemon")
@@ -301,7 +308,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
 	}
-	daemonCmd := exec.Command(exe, "deploy", "--daemon", "--deploy-id", id)
+	daemonArgs := []string{"deploy", "--daemon", "--deploy-id", id}
+	if deployServe != "" {
+		daemonArgs = append(daemonArgs, "--serve", deployServe)
+	}
+	if deployAPIKey != "" {
+		daemonArgs = append(daemonArgs, "--api-key", deployAPIKey)
+	}
+	daemonCmd := exec.Command(exe, daemonArgs...)
 	daemonCmd.Env = append(os.Environ(), "GITHUB_TOKEN="+ghToken)
 	daemonCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
@@ -403,6 +417,31 @@ func runDeployDaemon() error {
 	// Launch — tasks are already queued with empty deps, so they'll fill immediately.
 	supervisor.Launch(ctx)
 
+	// Start HTTP API server if --serve is set.
+	var apiServer *api.Server
+	serveAddr := deployServe
+	if serveAddr == "" {
+		serveAddr = os.Getenv("MINDER_SERVE")
+	}
+	if serveAddr != "" {
+		apiKeyVal := deployAPIKey
+		if apiKeyVal == "" {
+			apiKeyVal = os.Getenv("MINDER_API_KEY")
+		}
+		apiServer = api.New(api.Config{
+			Store:     store,
+			ProjectID: project.ID,
+			DeployID:  deployID,
+			APIKey:    apiKeyVal,
+			BindAddr:  serveAddr,
+		})
+		go func() {
+			if err := apiServer.ListenAndServe(serveAddr); err != nil && err != http.ErrServerClosed {
+				log.Printf("API server error: %v", err)
+			}
+		}()
+	}
+
 	// Drain events to log.
 	go func() {
 		for evt := range supervisor.Events() {
@@ -421,6 +460,15 @@ func runDeployDaemon() error {
 		case <-supervisor.Done():
 		case <-time.After(30 * time.Second):
 			log.Printf("Timeout waiting for agents to stop")
+		}
+	}
+
+	// Gracefully shut down API server.
+	if apiServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := apiServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("API server shutdown error: %v", err)
 		}
 	}
 
