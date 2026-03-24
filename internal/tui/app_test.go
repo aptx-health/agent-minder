@@ -99,8 +99,8 @@ func TestNew_DefaultState(t *testing.T) {
 	if m.showHelp {
 		t.Error("showHelp should be false")
 	}
-	if m.analysisExpanded {
-		t.Error("analysisExpanded should be false")
+	if !m.analysisExpanded {
+		t.Error("analysisExpanded should be true (expanded by default)")
 	}
 	if m.broadcastStatus != "" {
 		t.Errorf("broadcastStatus = %q, want empty", m.broadcastStatus)
@@ -311,14 +311,14 @@ func TestExpandToggle_AnalysisTab(t *testing.T) {
 
 	result, _ := m.Update(keyPress('e'))
 	m = result.(Model)
-	if !m.analysisExpanded {
-		t.Error("analysisExpanded should be true after 'e' on Analysis tab")
+	if m.analysisExpanded {
+		t.Error("analysisExpanded should be false after 'e' on Analysis tab (was expanded by default)")
 	}
 
 	result, _ = m.Update(keyPress('e'))
 	m = result.(Model)
-	if m.analysisExpanded {
-		t.Error("analysisExpanded should be false after second 'e'")
+	if !m.analysisExpanded {
+		t.Error("analysisExpanded should be true after second 'e'")
 	}
 }
 
@@ -346,8 +346,8 @@ func TestExpandToggle_OpsTabNoOp(t *testing.T) {
 	result, _ := m.Update(keyPress('e'))
 	m = result.(Model)
 	// On operations tab, 'e' should be a no-op (neither expand flag changes).
-	if m.analysisExpanded {
-		t.Error("analysisExpanded should remain false on Ops tab")
+	if !m.analysisExpanded {
+		t.Error("analysisExpanded should remain true on Ops tab (default expanded, not toggled)")
 	}
 	if m.autopilotTasksExpanded {
 		t.Error("autopilotTasksExpanded should remain false on Ops tab")

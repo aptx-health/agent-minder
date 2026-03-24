@@ -522,10 +522,50 @@ func renderRelatedWork(task *db.AutopilotTask, rw *reviewRelatedWork) string {
 	return result
 }
 
+// resolveTestCommand reads the test command from the repo's onboarding file.
+// If the onboarding file doesn't specify a test command, falls back to
+// convention-based detection by checking for language-specific markers.
+func resolveTestCommand(repoDir string) string {
+	f, err := onboarding.Parse(onboarding.FilePath(repoDir))
+	if err == nil && f.Context.TestCommand != "" {
+		return f.Context.TestCommand
+	}
+	return detectTestCommand(repoDir)
+}
+
+// detectTestCommand probes a repo directory for language-specific markers
+// and returns the conventional test command. Returns empty string if no
+// known convention is detected.
+func detectTestCommand(repoDir string) string {
+	// Check for Go module.
+	if _, err := os.Stat(filepath.Join(repoDir, "go.mod")); err == nil {
+		return "go test ./..."
+	}
+	// Check for Node.js (package.json).
+	if _, err := os.Stat(filepath.Join(repoDir, "package.json")); err == nil {
+		return "npm test"
+	}
+	// Check for Python (pytest / setup.py / pyproject.toml).
+	for _, marker := range []string{"pytest.ini", "setup.cfg", "pyproject.toml", "setup.py"} {
+		if _, err := os.Stat(filepath.Join(repoDir, marker)); err == nil {
+			return "pytest"
+		}
+	}
+	// Check for Rust (Cargo.toml).
+	if _, err := os.Stat(filepath.Join(repoDir, "Cargo.toml")); err == nil {
+		return "cargo test"
+	}
+	// Check for Makefile (assumes a test target exists).
+	if _, err := os.Stat(filepath.Join(repoDir, "Makefile")); err == nil {
+		return "make test"
+	}
+	return ""
+}
+
 // renderReviewTaskContext builds a prompt with review-specific context for the reviewer agent.
-// It provides the PR number, issue details, project goal, dependency graph, sibling task
-// statuses, and commands for the review workflow.
-func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, rw *reviewRelatedWork) string {
+// It provides the PR number, issue details, project goal, test command, dependency graph,
+// sibling task statuses, and commands for the review workflow.
+func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, rw *reviewRelatedWork) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Review Context\n\n")
@@ -546,6 +586,12 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 		fmt.Fprintf(&b, "## Project Goal\n\n%s\n\n", projectGoal)
 	}
 
+	if testCommand != "" {
+		fmt.Fprintf(&b, "## Test command\n\n")
+		fmt.Fprintf(&b, "Run tests: `%s`\n\n", testCommand)
+		fmt.Fprintf(&b, "**IMPORTANT:** You MUST run this test command after making any fixes and before pushing.\n\n")
+	}
+
 	if related := renderRelatedWork(task, rw); related != "" {
 		b.WriteString(related)
 	}
@@ -562,8 +608,8 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 }
 
 // buildReviewClaudeArgs constructs the CLI arguments for launching a reviewer agent.
-func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal string, maxTurns int, maxBudget float64, allowedTools []string, rw *reviewRelatedWork) []string {
-	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, rw)
+func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *reviewRelatedWork) []string {
+	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, testCommand, rw)
 	return []string{
 		"--agent", "reviewer",
 		"-p",

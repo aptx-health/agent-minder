@@ -975,17 +975,17 @@ func TestRenderAnalysisTab_ExpandCollapseHint(t *testing.T) {
 	m.resizeViewports()
 	m.rebuildAnalysisContent()
 
-	// Not expanded.
+	// Expanded by default.
 	result := m.renderAnalysisTab()
-	if !strings.Contains(result, "e: expand") {
-		t.Error("renderAnalysisTab() should show 'e: expand'")
+	if !strings.Contains(result, "e: collapse") {
+		t.Error("renderAnalysisTab() should show 'e: collapse' (expanded by default)")
 	}
 
-	// Expanded.
-	m.analysisExpanded = true
+	// Collapsed.
+	m.analysisExpanded = false
 	result = m.renderAnalysisTab()
-	if !strings.Contains(result, "e: collapse") {
-		t.Error("renderAnalysisTab() expanded should show 'e: collapse'")
+	if !strings.Contains(result, "e: expand") {
+		t.Error("renderAnalysisTab() collapsed should show 'e: expand'")
 	}
 }
 
