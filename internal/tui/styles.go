@@ -210,6 +210,26 @@ func spinnerStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(currentTheme().Secondary)
 }
 
+// riskStyle returns a color-coded style for review risk tiers.
+func riskStyle(risk string) lipgloss.Style {
+	t := currentTheme()
+	switch risk {
+	case "low-risk":
+		return lipgloss.NewStyle().Foreground(t.Success)
+	case "needs-testing":
+		return lipgloss.NewStyle().Foreground(t.Warning)
+	case "suspect":
+		return lipgloss.NewStyle().Foreground(t.Error).Bold(true)
+	default:
+		return lipgloss.NewStyle().Foreground(t.Muted)
+	}
+}
+
+// reviewingStyle returns the style for review-in-progress indicators.
+func reviewingStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(currentTheme().Primary)
+}
+
 func tabActiveStyle() lipgloss.Style {
 	t := currentTheme()
 	return lipgloss.NewStyle().Bold(true).Foreground(t.TabActiveFg).Background(t.TabActiveBg).Padding(0, 1)

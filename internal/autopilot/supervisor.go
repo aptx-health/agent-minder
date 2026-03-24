@@ -90,6 +90,7 @@ type SlotInfo struct {
 	RunningFor  time.Duration
 	Status      string // "running" or "idle"
 	Paused      bool   // true when slot filling is paused (idle slots show "(paused)")
+	IsReview    bool   // true when slot is running a review agent (task status "reviewing")
 
 	// Live status from stream-json parsing.
 	CurrentTool string
@@ -1428,6 +1429,7 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 				Branch:      slot.task.Branch,
 				RunningFor:  time.Since(slot.startedAt),
 				Status:      "running",
+				IsReview:    slot.task.Status == "reviewing",
 				CurrentTool: slot.liveStatus.CurrentTool,
 				ToolInput:   slot.liveStatus.ToolInput,
 				StepCount:   slot.liveStatus.StepCount,
@@ -1466,7 +1468,7 @@ func (s *Supervisor) StatusBlock() string {
 
 	// Summary counts.
 	tasks, _ := s.store.GetAutopilotTasks(s.project.ID)
-	var queued, running, review, done, bailed, stopped, manual int
+	var queued, running, review, reviewing, reviewed, done, bailed, stopped, manual int
 	for _, t := range tasks {
 		switch t.Status {
 		case "queued":
@@ -1475,6 +1477,10 @@ func (s *Supervisor) StatusBlock() string {
 			running++
 		case "review":
 			review++
+		case "reviewing":
+			reviewing++
+		case "reviewed":
+			reviewed++
 		case "done":
 			done++
 		case "bailed":
@@ -1485,7 +1491,7 @@ func (s *Supervisor) StatusBlock() string {
 			manual++
 		}
 	}
-	summary := fmt.Sprintf("\nTask summary: %d queued, %d running, %d in review, %d done, %d bailed, %d stopped", queued, running, review, done, bailed, stopped)
+	summary := fmt.Sprintf("\nTask summary: %d queued, %d running, %d in review, %d reviewing, %d reviewed, %d done, %d bailed, %d stopped", queued, running, review, reviewing, reviewed, done, bailed, stopped)
 	if manual > 0 {
 		summary += fmt.Sprintf(", %d manual (watching)", manual)
 	}
