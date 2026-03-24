@@ -22,16 +22,18 @@ import (
 )
 
 var (
-	watchMilestone string
-	watchLabel     string
-	watchInterval  int
-	watchMaxAgents int
-	watchMaxTurns  int
-	watchMaxBudget float64
-	watchDryRun    bool
-	watchDaemon    bool
-	watchDeployID  string
-	watchProject   string
+	watchMilestone          string
+	watchLabel              string
+	watchInterval           int
+	watchMaxAgents          int
+	watchMaxTurns           int
+	watchMaxBudget          float64
+	watchTotalBudget        float64
+	watchBudgetPauseRunning bool
+	watchDryRun             bool
+	watchDaemon             bool
+	watchDeployID           string
+	watchProject            string
 )
 
 var deployWatchCmd = &cobra.Command{
@@ -60,6 +62,8 @@ func init() {
 	deployWatchCmd.Flags().IntVar(&watchMaxAgents, "max-agents", 5, "Max concurrent agents")
 	deployWatchCmd.Flags().IntVar(&watchMaxTurns, "max-turns", 50, "Max turns per agent")
 	deployWatchCmd.Flags().Float64Var(&watchMaxBudget, "max-budget", 3.00, "Max budget per agent in USD")
+	deployWatchCmd.Flags().Float64Var(&watchTotalBudget, "total-budget", 0, "Total spend ceiling in USD (0 = no limit); auto-pause when hit")
+	deployWatchCmd.Flags().BoolVar(&watchBudgetPauseRunning, "budget-pause-running", false, "Also stop running agents when total budget ceiling is hit")
 	deployWatchCmd.Flags().BoolVar(&watchDryRun, "dry-run", false, "Show matching issues without launching")
 	deployWatchCmd.Flags().StringVar(&watchProject, "project", "", "Inherit settings from an existing project")
 
@@ -140,6 +144,8 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 	maxAgents := watchMaxAgents
 	maxTurns := watchMaxTurns
 	maxBudget := watchMaxBudget
+	totalBudget := watchTotalBudget
+	budgetPauseRunning := watchBudgetPauseRunning
 	analyzerModel := "sonnet"
 	skipLabel := "no-agent"
 	baseBranch := ""
@@ -167,6 +173,10 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 		if srcProject.AutopilotBaseBranch != "" {
 			baseBranch = srcProject.AutopilotBaseBranch
 		}
+		if srcProject.TotalBudgetUSD > 0 {
+			totalBudget = srcProject.TotalBudgetUSD
+		}
+		budgetPauseRunning = srcProject.BudgetPauseRunning
 	}
 
 	if cmd.Flags().Changed("max-agents") {
@@ -177,6 +187,12 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 	}
 	if cmd.Flags().Changed("max-budget") {
 		maxBudget = watchMaxBudget
+	}
+	if cmd.Flags().Changed("total-budget") {
+		totalBudget = watchTotalBudget
+	}
+	if cmd.Flags().Changed("budget-pause-running") {
+		budgetPauseRunning = watchBudgetPauseRunning
 	}
 
 	// Filter out skip-labeled issues for display.
@@ -202,6 +218,13 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		fmt.Printf("\nMax agents: %d | Max turns: %d | Max budget: $%.2f\n", maxAgents, maxTurns, maxBudget)
+		if totalBudget > 0 {
+			fmt.Printf("Total budget ceiling: $%.2f", totalBudget)
+			if budgetPauseRunning {
+				fmt.Print(" (will stop running agents)")
+			}
+			fmt.Println()
+		}
 		fmt.Printf("Poll interval: %ds\n", watchInterval)
 		fmt.Println("\nNo agents launched (--dry-run)")
 		return nil
@@ -226,6 +249,8 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 		AutopilotMaxAgents:    maxAgents,
 		AutopilotMaxTurns:     maxTurns,
 		AutopilotMaxBudgetUSD: maxBudget,
+		TotalBudgetUSD:        totalBudget,
+		BudgetPauseRunning:    budgetPauseRunning,
 		LLMAnalyzerModel:      analyzerModel,
 		AutopilotSkipLabel:    skipLabel,
 		AutopilotBaseBranch:   baseBranch,
@@ -287,6 +312,13 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	fmt.Printf("\nMax agents: %d | Max turns: %d | Max budget: $%.2f\n", maxAgents, maxTurns, maxBudget)
+	if totalBudget > 0 {
+		fmt.Printf("Total budget ceiling: $%.2f", totalBudget)
+		if budgetPauseRunning {
+			fmt.Print(" (will stop running agents)")
+		}
+		fmt.Println()
+	}
 	fmt.Printf("Poll interval: %ds\n", watchInterval)
 	fmt.Printf("\nLog:    %s\n", deploy.LogPath(id))
 	fmt.Printf("Status: agent-minder deploy status %s\n", id)

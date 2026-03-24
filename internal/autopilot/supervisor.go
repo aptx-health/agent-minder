@@ -123,6 +123,8 @@ type Supervisor struct {
 	slots           []*slotState // len == maxAgents; nil = idle
 	active          bool
 	paused          bool // when true, fillSlots returns early
+	budgetPaused    bool // when true, budget ceiling was hit — fillSlots returns early
+	budgetWarned    bool // true once the 80% warning has been emitted (avoids repeats)
 	preparedAt      time.Time
 	events          chan Event
 	parentCtx       context.Context // parent context for the session (used by slot goroutines for fillSlots)
@@ -1450,6 +1452,107 @@ func (s *Supervisor) Stop() {
 	}
 }
 
+// IsBudgetPaused returns true if the supervisor is paused due to total budget ceiling.
+func (s *Supervisor) IsBudgetPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.budgetPaused
+}
+
+// ResumeBudget clears the budget-paused state so new tasks can launch again.
+func (s *Supervisor) ResumeBudget() {
+	s.mu.Lock()
+	s.budgetPaused = false
+	s.budgetWarned = false
+	s.mu.Unlock()
+	s.emitEvent("info", "Budget pause cleared — resuming task launches", nil)
+}
+
+// checkBudgetCeiling checks total spend against the project's total budget ceiling.
+// If the ceiling is exceeded, it pauses the supervisor. Returns true if budget is exceeded.
+// Must NOT be called with s.mu held.
+func (s *Supervisor) checkBudgetCeiling() bool {
+	ceiling := s.project.TotalBudgetUSD
+	if ceiling <= 0 {
+		return false // No ceiling configured.
+	}
+
+	totalSpend, err := s.store.TotalSpend(s.project.ID)
+	if err != nil {
+		debugLog("checkBudgetCeiling: query failed", "error", err.Error())
+		return false
+	}
+
+	// 80% warning threshold.
+	warningThreshold := ceiling * 0.8
+	s.mu.Lock()
+	alreadyWarned := s.budgetWarned
+	alreadyPaused := s.budgetPaused
+	s.mu.Unlock()
+
+	if totalSpend >= warningThreshold && !alreadyWarned && !alreadyPaused {
+		s.mu.Lock()
+		s.budgetWarned = true
+		s.mu.Unlock()
+		msg := fmt.Sprintf("Budget warning: $%.2f of $%.2f spent (%.0f%%)", totalSpend, ceiling, (totalSpend/ceiling)*100)
+		s.emitEvent("warning", msg, nil)
+
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:      notify.EventBudgetLimit,
+				Project:   s.project.Name,
+				Summary:   msg,
+				Timestamp: time.Now(),
+			})
+		}
+	}
+
+	// At or over ceiling — pause.
+	if totalSpend >= ceiling {
+		s.mu.Lock()
+		if !s.budgetPaused {
+			s.budgetPaused = true
+			s.mu.Unlock()
+
+			msg := fmt.Sprintf("Budget ceiling hit: $%.2f of $%.2f — pausing new task launches", totalSpend, ceiling)
+			s.emitEvent("warning", msg, nil)
+
+			if s.notifier != nil {
+				s.notifier.Notify(notify.Event{
+					Type:      notify.EventBudgetLimit,
+					Project:   s.project.Name,
+					Summary:   msg,
+					Timestamp: time.Now(),
+				})
+			}
+
+			// If configured, also stop running agents.
+			if s.project.BudgetPauseRunning {
+				s.stopRunningAgents()
+			}
+		} else {
+			s.mu.Unlock()
+		}
+		return true
+	}
+
+	return false
+}
+
+// stopRunningAgents cancels all currently running agent slots.
+// Must NOT be called with s.mu held.
+func (s *Supervisor) stopRunningAgents() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, slot := range s.slots {
+		if slot != nil && slot.cancelFunc != nil {
+			debugLog("stopRunningAgents: stopping slot", "slot", i, "issue", slot.task.IssueNumber)
+			slot.stoppedByUser = true
+			slot.cancelFunc()
+		}
+	}
+}
+
 // SlotStatus returns the current state of all agent slots.
 func (s *Supervisor) SlotStatus() []SlotInfo {
 	s.mu.Lock()
@@ -1979,13 +2082,23 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.paused {
+	if s.paused || s.budgetPaused {
 		return
 	}
 
 	// Don't launch new agents if the context is cancelled (e.g. Stop() was called).
 	if ctx.Err() != nil {
 		return
+	}
+
+	// Check budget ceiling before launching (query requires no lock held).
+	if s.project.TotalBudgetUSD > 0 {
+		s.mu.Unlock()
+		exceeded := s.checkBudgetCeiling()
+		s.mu.Lock()
+		if exceeded {
+			return
+		}
 	}
 
 	// Single fetch for all agents about to launch — avoids concurrent fetches
@@ -3006,6 +3119,9 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 		if agentResult.TotalCost > 0 {
 			_ = s.store.UpdateAutopilotTaskCost(task.ID, agentResult.TotalCost)
 		}
+
+		// Check budget ceiling after recording cost — may trigger pause for remaining work.
+		s.checkBudgetCeiling()
 
 		effectiveTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
 		effectiveBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)

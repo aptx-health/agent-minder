@@ -34,30 +34,42 @@ type Server struct {
 	// stopDaemon is called to initiate graceful daemon shutdown.
 	// May be nil if not wired up.
 	stopDaemon func()
+
+	// budgetResume is called to clear budget-paused state and resume.
+	// May be nil if not wired up.
+	budgetResume func()
+
+	// isBudgetPaused returns true if the supervisor is currently paused due to budget ceiling.
+	// May be nil.
+	isBudgetPaused func() bool
 }
 
 // Config holds configuration for the API server.
 type Config struct {
-	Store       *db.Store
-	ProjectID   int64
-	DeployID    string
-	APIKey      string
-	BindAddr    string
-	TriggerPoll func()
-	StopDaemon  func()
+	Store          *db.Store
+	ProjectID      int64
+	DeployID       string
+	APIKey         string
+	BindAddr       string
+	TriggerPoll    func()
+	StopDaemon     func()
+	BudgetResume   func()
+	IsBudgetPaused func() bool
 }
 
 // New creates a new API server with the given configuration.
 func New(cfg Config) *Server {
 	s := &Server{
-		store:       cfg.Store,
-		projectID:   cfg.ProjectID,
-		deployID:    cfg.DeployID,
-		apiKey:      cfg.APIKey,
-		startTime:   time.Now(),
-		mux:         http.NewServeMux(),
-		triggerPoll: cfg.TriggerPoll,
-		stopDaemon:  cfg.StopDaemon,
+		store:          cfg.Store,
+		projectID:      cfg.ProjectID,
+		deployID:       cfg.DeployID,
+		apiKey:         cfg.APIKey,
+		startTime:      time.Now(),
+		mux:            http.NewServeMux(),
+		triggerPoll:    cfg.TriggerPoll,
+		stopDaemon:     cfg.StopDaemon,
+		budgetResume:   cfg.BudgetResume,
+		isBudgetPaused: cfg.IsBudgetPaused,
 	}
 
 	s.mux.HandleFunc("GET /status", s.handleStatus)
@@ -69,6 +81,7 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("POST /analysis/poll", s.handleTriggerPoll)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux.HandleFunc("POST /stop", s.handleStop)
+	s.mux.HandleFunc("POST /resume", s.handleResume)
 
 	s.srv = &http.Server{
 		Handler:      s.middleware(s.mux),
@@ -132,22 +145,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 
 	alive, pid := deploy.IsRunning(s.deployID)
 
+	budgetPaused := false
+	if s.isBudgetPaused != nil {
+		budgetPaused = s.isBudgetPaused()
+	}
+
+	configMap := map[string]any{
+		"max_agents":  project.AutopilotMaxAgents,
+		"max_turns":   project.AutopilotMaxTurns,
+		"max_budget":  project.AutopilotMaxBudgetUSD,
+		"analyzer":    project.LLMAnalyzerModel,
+		"skip_label":  project.AutopilotSkipLabel,
+		"auto_merge":  project.AutopilotAutoMerge,
+		"base_branch": project.AutopilotBaseBranch,
+	}
+	if project.TotalBudgetUSD > 0 {
+		configMap["total_budget"] = project.TotalBudgetUSD
+		configMap["budget_pause_running"] = project.BudgetPauseRunning
+	}
+
 	resp := map[string]any{
-		"deploy_id":  s.deployID,
-		"project_id": s.projectID,
-		"pid":        pid,
-		"alive":      alive,
-		"uptime_sec": int(time.Since(s.startTime).Seconds()),
-		"started_at": s.startTime.UTC().Format(time.RFC3339),
-		"config": map[string]any{
-			"max_agents":  project.AutopilotMaxAgents,
-			"max_turns":   project.AutopilotMaxTurns,
-			"max_budget":  project.AutopilotMaxBudgetUSD,
-			"analyzer":    project.LLMAnalyzerModel,
-			"skip_label":  project.AutopilotSkipLabel,
-			"auto_merge":  project.AutopilotAutoMerge,
-			"base_branch": project.AutopilotBaseBranch,
-		},
+		"deploy_id":     s.deployID,
+		"project_id":    s.projectID,
+		"pid":           pid,
+		"alive":         alive,
+		"budget_paused": budgetPaused,
+		"uptime_sec":    int(time.Since(s.startTime).Seconds()),
+		"started_at":    s.startTime.UTC().Format(time.RFC3339),
+		"config":        configMap,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -394,21 +419,54 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		successRate = float64(doneCount) / float64(completedTotal)
 	}
 
+	// Look up project for budget ceiling info.
+	project, _ := s.store.GetProjectByID(s.projectID)
+
+	spendMap := map[string]any{
+		"total":   totalCost,
+		"daily":   daily,
+		"weekly":  weekly,
+		"overall": overall,
+	}
+	if project != nil && project.TotalBudgetUSD > 0 {
+		spendMap["ceiling"] = project.TotalBudgetUSD
+		spendMap["remaining"] = project.TotalBudgetUSD - totalCost
+		if totalCost > 0 {
+			spendMap["utilization"] = totalCost / project.TotalBudgetUSD
+		} else {
+			spendMap["utilization"] = 0.0
+		}
+	}
+
+	budgetPaused := false
+	if s.isBudgetPaused != nil {
+		budgetPaused = s.isBudgetPaused()
+	}
+
 	resp := map[string]any{
-		"spend": map[string]any{
-			"total":   totalCost,
-			"daily":   daily,
-			"weekly":  weekly,
-			"overall": overall,
-		},
+		"spend": spendMap,
 		"tasks": map[string]any{
 			"total":        len(tasks),
 			"by_status":    statusCounts,
 			"success_rate": successRate,
 		},
-		"uptime_sec": int(time.Since(s.startTime).Seconds()),
+		"budget_paused": budgetPaused,
+		"uptime_sec":    int(time.Since(s.startTime).Seconds()),
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleResume(w http.ResponseWriter, _ *http.Request) {
+	if s.budgetResume == nil {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{"not_implemented", "resume not wired up"})
+		return
+	}
+	if s.isBudgetPaused != nil && !s.isBudgetPaused() {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "not_paused", "message": "supervisor is not budget-paused"})
+		return
+	}
+	s.budgetResume()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "resumed", "message": "budget pause cleared — task launches will resume"})
 }
 
 // --- Helpers ---

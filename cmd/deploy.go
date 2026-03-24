@@ -473,6 +473,8 @@ func runDeployDaemon() error {
 				supervisor.Stop()
 				cancel()
 			},
+			BudgetResume:   supervisor.ResumeBudget,
+			IsBudgetPaused: supervisor.IsBudgetPaused,
 		})
 		go func() {
 			if err := apiServer.ListenAndServe(serveAddr); err != nil && err != http.ErrServerClosed {

@@ -36,7 +36,8 @@ func (s *Store) CreateProject(p *Project) error {
 			autopilot_filter_type, autopilot_filter_value, autopilot_max_agents,
 			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label,
 			autopilot_base_branch, is_deploy,
-			autopilot_auto_merge, autopilot_review_max_turns, autopilot_review_max_budget_usd)
+			autopilot_auto_merge, autopilot_review_max_turns, autopilot_review_max_budget_usd,
+			total_budget_usd, budget_pause_running)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
 			:llm_summarizer_model, :llm_analyzer_model, :status_interval_sec, :analysis_interval_sec,
@@ -44,7 +45,8 @@ func (s *Store) CreateProject(p *Project) error {
 			:autopilot_filter_type, :autopilot_filter_value, :autopilot_max_agents,
 			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label,
 			:autopilot_base_branch, :is_deploy,
-			:autopilot_auto_merge, :autopilot_review_max_turns, :autopilot_review_max_budget_usd)
+			:autopilot_auto_merge, :autopilot_review_max_turns, :autopilot_review_max_budget_usd,
+			:total_budget_usd, :budget_pause_running)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -1120,6 +1122,21 @@ func (s *Store) ReviewTasks(projectID int64) ([]AutopilotTask, error) {
 }
 
 // --- Cost Aggregation ---
+
+// TotalSpend returns the sum of cost_usd across ALL tasks for a project,
+// including running tasks. This reflects the actual total spend for budget ceiling checks.
+func (s *Store) TotalSpend(projectID int64) (float64, error) {
+	var total float64
+	err := s.db.Get(&total, `
+		SELECT COALESCE(SUM(cost_usd), 0)
+		FROM autopilot_tasks
+		WHERE project_id = ?
+	`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("total spend: %w", err)
+	}
+	return total, nil
+}
 
 // DailyCost returns the aggregated cost for a project on a given date (YYYY-MM-DD).
 // Only includes tasks with terminal status (done, bailed, failed, stopped).
