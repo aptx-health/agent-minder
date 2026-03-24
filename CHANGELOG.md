@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Deploy watch mode**: `deploy watch --milestone "v1.0"` or `deploy watch --label "ready-for-agent"` runs a long-lived daemon that continuously polls GitHub for new open issues matching a filter and auto-queues them for autopilot agents. Supports configurable poll interval, deduplication, skip label filtering, and never-exit semantics (#278)
 - **TUI review states**: Display `reviewing` (with spinner-colored indicator) and `reviewed` (with risk tier) statuses in task list; review agents shown with "R:" prefix in slot display; risk summary line showing counts by tier; risk tier color-coded in task detail panel (green=low-risk, amber=needs-testing, red=suspect)
 - **Schema v23**: Review automation columns — `autopilot_auto_merge`, `autopilot_review_max_turns`, `autopilot_review_max_budget_usd` on projects; `review_risk`, `review_comment_id` on autopilot_tasks; new `reviewing`/`reviewed` task statuses
 - **Review agent spawning**: Supervisor automatically spawns reviewer agents when tasks enter `review` status, using review-specific resource limits and the reviewer agent definition
