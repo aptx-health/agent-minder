@@ -736,30 +736,27 @@ func TestQueuedUnblockedTasks_UnblockedByDone(t *testing.T) {
 	}
 }
 
-func TestQueuedUnblockedTasks_ExternalBlockingViaTrackedItems(t *testing.T) {
+func TestQueuedUnblockedTasks_ManualTaskBlocking(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 
-	// Add tracked item #99 as open.
-	item := &db.TrackedItem{
-		ProjectID: project.ID,
-		Source:    "github",
-		Owner:     "org",
-		Repo:      "repo",
-		Number:    99,
-		ItemType:  "issue",
-		Title:     "External dep",
-		State:     "open",
+	// Add manual task #99 (human-driven, not done yet).
+	t99 := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  99,
+		IssueTitle:   "Manual dep",
+		Dependencies: "[]",
+		Status:       "manual",
 	}
-	if err := store.AddTrackedItem(item); err != nil {
+	if err := store.CreateAutopilotTask(t99); err != nil {
 		t.Fatal(err)
 	}
 
-	// Task 20 depends on external issue 99.
+	// Task 20 depends on manual task 99.
 	t20 := &db.AutopilotTask{
 		ProjectID:    project.ID,
 		IssueNumber:  20,
-		IssueTitle:   "Depends on external",
+		IssueTitle:   "Depends on manual",
 		Dependencies: "[99]",
 		Status:       "queued",
 	}
@@ -772,33 +769,30 @@ func TestQueuedUnblockedTasks_ExternalBlockingViaTrackedItems(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(unblocked) != 0 {
-		t.Errorf("expected 0 unblocked (external dep is open), got %d", len(unblocked))
+		t.Errorf("expected 0 unblocked (manual dep is not done), got %d", len(unblocked))
 	}
 }
 
-func TestQueuedUnblockedTasks_ExternalClosedUnblocks(t *testing.T) {
+func TestQueuedUnblockedTasks_RemovedDepUnblocks(t *testing.T) {
 	store := openTestStore(t)
 	project := createTestProject(t, store)
 
-	// Add tracked item #99 as closed.
-	item := &db.TrackedItem{
-		ProjectID: project.ID,
-		Source:    "github",
-		Owner:     "org",
-		Repo:      "repo",
-		Number:    99,
-		ItemType:  "issue",
-		Title:     "Closed dep",
-		State:     "closed",
+	// Add removed task #99 (user explicitly dropped it).
+	t99 := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  99,
+		IssueTitle:   "Removed dep",
+		Dependencies: "[]",
+		Status:       "removed",
 	}
-	if err := store.AddTrackedItem(item); err != nil {
+	if err := store.CreateAutopilotTask(t99); err != nil {
 		t.Fatal(err)
 	}
 
 	t20 := &db.AutopilotTask{
 		ProjectID:    project.ID,
 		IssueNumber:  20,
-		IssueTitle:   "Depends on closed external",
+		IssueTitle:   "Depends on removed",
 		Dependencies: "[99]",
 		Status:       "queued",
 	}
@@ -811,7 +805,7 @@ func TestQueuedUnblockedTasks_ExternalClosedUnblocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(unblocked) != 1 {
-		t.Errorf("expected 1 unblocked (external dep is closed), got %d", len(unblocked))
+		t.Errorf("expected 1 unblocked (dep was removed), got %d", len(unblocked))
 	}
 }
 

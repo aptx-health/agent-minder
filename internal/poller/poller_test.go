@@ -370,12 +370,9 @@ func TestPoller_EmitWithPollResult(t *testing.T) {
 func TestSummarize_AllFields(t *testing.T) {
 	p := New(nil, &db.Project{Name: "test"}, nil, nil)
 	result := &PollResult{
-		NewCommits:   3,
-		NewMessages:  2,
-		NewWorktrees: 1,
-		TrackedItemChanges: []TrackedItemChange{
-			{Ref: "org/repo#1", OldStatus: "Open", NewStatus: "Closd"},
-		},
+		NewCommits:     3,
+		NewMessages:    2,
+		NewWorktrees:   1,
 		BusMessageSent: "[proj/coord] hello",
 	}
 
@@ -388,9 +385,6 @@ func TestSummarize_AllFields(t *testing.T) {
 	}
 	if !strings.Contains(summary, "1 new worktrees") {
 		t.Errorf("missing worktrees in summary: %q", summary)
-	}
-	if !strings.Contains(summary, "1 tracked item changes") {
-		t.Errorf("missing tracked changes in summary: %q", summary)
 	}
 	if !strings.Contains(summary, "bus message sent") {
 		t.Errorf("missing bus message in summary: %q", summary)
@@ -518,58 +512,56 @@ func TestBuildAnalysisPrompt_BasicStructure(t *testing.T) {
 	}
 }
 
-func TestBuildAnalysisPrompt_WithTrackedItems(t *testing.T) {
+func TestBuildAnalysisPrompt_WithAutopilotTasks(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
 	poller := New(store, p, nil, nil)
-	items := []db.TrackedItem{
-		{
-			Owner:      "org",
-			Repo:       "repo",
-			Number:     42,
-			ItemType:   "issue",
-			Title:      "Fix the bug",
-			LastStatus: "Open",
-		},
+	tasks := []db.AutopilotTask{
+		{Owner: "org", Repo: "repo", IssueNumber: 42, IssueTitle: "Fix the bug", Status: "queued"},
+		{Owner: "org", Repo: "repo", IssueNumber: 43, IssueTitle: "Running task", Status: "running"},
 	}
-	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, tasks)
 
-	if !strings.Contains(prompt, "Tracked Issues/PRs") {
-		t.Error("missing tracked items section")
+	if !strings.Contains(prompt, "Active Tasks") {
+		t.Error("missing active tasks section")
 	}
 	if !strings.Contains(prompt, "org/repo#42") {
-		t.Error("missing item reference")
+		t.Error("missing task reference")
 	}
 	if !strings.Contains(prompt, "Fix the bug") {
-		t.Error("missing item title")
+		t.Error("missing task title")
 	}
-	if !strings.Contains(prompt, "[manual]") {
-		t.Error("items without autopilot should be tagged manual")
+	if !strings.Contains(prompt, "[queued]") {
+		t.Error("expected queued status")
+	}
+	if !strings.Contains(prompt, "[running]") {
+		t.Error("expected running status")
 	}
 }
 
-func TestBuildAnalysisPrompt_WithAutopilotTags(t *testing.T) {
+func TestBuildAnalysisPrompt_ExcludesRemovedTasks(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
 	poller := New(store, p, nil, nil)
-	items := []db.TrackedItem{
-		{Owner: "org", Repo: "repo", Number: 42, ItemType: "issue", Title: "Autopilot task", LastStatus: "InProg"},
-		{Owner: "org", Repo: "repo", Number: 43, ItemType: "issue", Title: "Manual task", LastStatus: "Open"},
+	tasks := []db.AutopilotTask{
+		{Owner: "org", Repo: "repo", IssueNumber: 42, IssueTitle: "Active", Status: "queued"},
+		{Owner: "org", Repo: "repo", IssueNumber: 43, IssueTitle: "Removed", Status: "removed"},
+		{Owner: "org", Repo: "repo", IssueNumber: 44, IssueTitle: "Done", Status: "done"},
 	}
-	autopilotTasks := []db.AutopilotTask{
-		{Owner: "org", Repo: "repo", IssueNumber: 42, Status: "running"},
-	}
-	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, autopilotTasks)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, tasks)
 
-	if !strings.Contains(prompt, "[autopilot:running]") {
-		t.Error("expected autopilot:running tag")
+	if !strings.Contains(prompt, "#42") {
+		t.Error("active task should be included")
 	}
-	if !strings.Contains(prompt, "[manual]") {
-		t.Error("expected manual tag for non-autopilot item")
+	if strings.Contains(prompt, "#43") {
+		t.Error("removed task should be excluded")
+	}
+	if strings.Contains(prompt, "#44") {
+		t.Error("done task should be excluded")
 	}
 }
 
@@ -631,35 +623,22 @@ func TestBuildAnalysisPrompt_AutopilotDepGraph(t *testing.T) {
 	}
 }
 
-func TestBuildAnalysisPrompt_WithPRDetails(t *testing.T) {
+func TestBuildAnalysisPrompt_TaskWithPR(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
 
 	poller := New(store, p, nil, nil)
-	items := []db.TrackedItem{
-		{
-			Owner:       "org",
-			Repo:        "repo",
-			Number:      55,
-			ItemType:    "pull_request",
-			Title:       "Add feature",
-			State:       "open",
-			IsDraft:     true,
-			ReviewState: "pending",
-			LastStatus:  "Draft",
-		},
+	tasks := []db.AutopilotTask{
+		{Owner: "org", Repo: "repo", IssueNumber: 55, IssueTitle: "Add feature", Status: "review", PRNumber: 100},
 	}
-	gathered := &gatherResult{result: &PollResult{}, trackedItems: items}
-	prompt := poller.buildAnalysisPrompt(gathered, nil, nil)
+	gathered := &gatherResult{result: &PollResult{}}
+	prompt := poller.buildAnalysisPrompt(gathered, nil, tasks)
 
-	if !strings.Contains(prompt, "[PR]") {
-		t.Error("expected PR type tag")
+	if !strings.Contains(prompt, "#55") {
+		t.Error("expected issue number")
 	}
-	if !strings.Contains(prompt, "Draft: yes") {
-		t.Error("expected draft indicator")
-	}
-	if !strings.Contains(prompt, "Review: pending") {
-		t.Error("expected review state")
+	if !strings.Contains(prompt, "PR: #100") {
+		t.Error("expected PR number")
 	}
 }
 
@@ -1152,24 +1131,6 @@ func TestPoller_SetStatusInterval(t *testing.T) {
 	}
 }
 
-// --- TrackedItemChange display ---
-
-func TestTrackedItemChange(t *testing.T) {
-	change := TrackedItemChange{
-		Ref:       "org/repo#42",
-		Title:     "Fix bug",
-		OldStatus: "Open",
-		NewStatus: "Closd",
-	}
-
-	if change.Ref != "org/repo#42" {
-		t.Errorf("Ref = %q", change.Ref)
-	}
-	if change.OldStatus != "Open" || change.NewStatus != "Closd" {
-		t.Errorf("status transition: %s → %s", change.OldStatus, change.NewStatus)
-	}
-}
-
 // --- parseAnalysis corpus of real-world edge cases ---
 
 func TestParseAnalysis_Corpus(t *testing.T) {
@@ -1501,126 +1462,6 @@ func TestEvent_TimeIsSet(t *testing.T) {
 	ev := <-p.Events()
 	if ev.Time.Before(before) || ev.Time.After(after) {
 		t.Errorf("event time %v not between %v and %v", ev.Time, before, after)
-	}
-}
-
-// --- itemSweepSystemPrompt test ---
-
-func TestItemSweepSystemPrompt(t *testing.T) {
-	prompt := itemSweepSystemPrompt()
-	if !strings.Contains(prompt, "issue/PR summarizer") {
-		t.Error("unexpected system prompt content")
-	}
-	if !strings.Contains(prompt, "objective") {
-		t.Error("expected 'objective' in prompt")
-	}
-	if !strings.Contains(prompt, "progress") {
-		t.Error("expected 'progress' in prompt")
-	}
-}
-
-// --- SweepResult tests ---
-
-func TestSweepResult_Fields(t *testing.T) {
-	item := &db.TrackedItem{Owner: "org", Repo: "repo", Number: 1, Title: "Test"}
-	r := SweepResult{
-		Item:      item,
-		Changed:   true,
-		OldStatus: "Open",
-		NewStatus: "Closd",
-		HaikuRan:  true,
-	}
-	if !r.Changed {
-		t.Error("expected Changed = true")
-	}
-	if r.OldStatus != "Open" || r.NewStatus != "Closd" {
-		t.Error("unexpected status")
-	}
-	if !r.HaikuRan {
-		t.Error("expected HaikuRan = true")
-	}
-}
-
-// --- parseItemSweep additional edge cases ---
-
-func TestParseItemSweep_GenericFence(t *testing.T) {
-	raw := "```\n{\"objective\":\"Fix bug\",\"progress\":\"In review\"}\n```"
-	resp := parseItemSweep(raw)
-	if resp == nil {
-		t.Fatal("expected non-nil response")
-	}
-	if resp.Objective != "Fix bug" {
-		t.Errorf("objective = %q", resp.Objective)
-	}
-	if resp.Progress != "In review" {
-		t.Errorf("progress = %q", resp.Progress)
-	}
-}
-
-func TestParseItemSweep_ObjectiveOnly(t *testing.T) {
-	raw := `{"objective":"Implement feature","progress":""}`
-	resp := parseItemSweep(raw)
-	if resp == nil {
-		t.Fatal("expected non-nil response")
-	}
-	if resp.Objective != "Implement feature" {
-		t.Errorf("objective = %q", resp.Objective)
-	}
-}
-
-func TestParseItemSweep_ProgressOnly(t *testing.T) {
-	raw := `{"objective":"","progress":"PR merged"}`
-	resp := parseItemSweep(raw)
-	if resp == nil {
-		t.Fatal("expected non-nil response")
-	}
-	if resp.Progress != "PR merged" {
-		t.Errorf("progress = %q", resp.Progress)
-	}
-}
-
-func TestParseItemSweep_InvalidJSONFallback(t *testing.T) {
-	raw := `Not valid JSON at all`
-	resp := parseItemSweep(raw)
-	if resp == nil {
-		t.Fatal("expected non-nil response (plain text fallback)")
-	}
-	if resp.Progress != raw {
-		t.Errorf("progress = %q, want %q", resp.Progress, raw)
-	}
-}
-
-// --- computeContentHash additional tests ---
-
-func TestComputeContentHash_WithComments(t *testing.T) {
-	h1 := computeContentHash("open", "bug", "body", []string{"comment1", "comment2"}, nil, false, "")
-	h2 := computeContentHash("open", "bug", "body", []string{"comment1"}, nil, false, "")
-	if h1 == h2 {
-		t.Error("different comments should produce different hashes")
-	}
-}
-
-func TestComputeContentHash_WithRelatedCommits(t *testing.T) {
-	h1 := computeContentHash("open", "bug", "body", nil, []string{"abc123:fix"}, false, "")
-	h2 := computeContentHash("open", "bug", "body", nil, nil, false, "")
-	if h1 == h2 {
-		t.Error("commits should invalidate hash")
-	}
-}
-
-func TestComputeContentHash_DraftFlag(t *testing.T) {
-	h1 := computeContentHash("open", "", "", nil, nil, true, "")
-	h2 := computeContentHash("open", "", "", nil, nil, false, "")
-	if h1 == h2 {
-		t.Error("draft flag should affect hash")
-	}
-}
-
-func TestComputeContentHash_ReviewState(t *testing.T) {
-	h1 := computeContentHash("open", "", "", nil, nil, false, "approved")
-	h2 := computeContentHash("open", "", "", nil, nil, false, "pending")
-	if h1 == h2 {
-		t.Error("review state should affect hash")
 	}
 }
 
@@ -2363,20 +2204,6 @@ func TestSummarize_WithWorktrees(t *testing.T) {
 	}
 }
 
-func TestSummarize_WithTrackedItemChanges(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-	poller := New(store, p, &mockCompleter{}, nil)
-
-	result := &PollResult{
-		TrackedItemChanges: []TrackedItemChange{{Ref: "o/r#1", OldStatus: "open", NewStatus: "closed"}},
-	}
-	s := poller.summarize(result)
-	if !strings.Contains(s, "1 tracked item changes") {
-		t.Errorf("summarize = %q", s)
-	}
-}
-
 func TestSummarize_WithBusMessage(t *testing.T) {
 	store := openTestDB(t)
 	p := createTestProject(t, store)
@@ -2386,77 +2213,6 @@ func TestSummarize_WithBusMessage(t *testing.T) {
 	s := poller.summarize(result)
 	if !strings.Contains(s, "bus message sent") {
 		t.Errorf("summarize = %q", s)
-	}
-}
-
-// --- sweepTrackedItems tests ---
-
-func TestSweepTrackedItems_EmptyList(t *testing.T) {
-	store := openTestDB(t)
-	p := createTestProject(t, store)
-	poller := New(store, p, &mockCompleter{}, nil)
-
-	results, summary := poller.sweepTrackedItems(context.Background(), nil, nil, nil)
-	if len(results) != 0 {
-		t.Errorf("expected 0 results, got %d", len(results))
-	}
-	if summary != "" {
-		t.Errorf("expected empty summary, got %q", summary)
-	}
-}
-
-// --- buildItemSweepPrompt tests ---
-
-func TestBuildItemSweepPrompt_WithDraftPR(t *testing.T) {
-	item := &db.TrackedItem{
-		Owner:       "o",
-		Repo:        "r",
-		Number:      5,
-		ItemType:    "pull_request",
-		Title:       "Draft PR",
-		State:       "open",
-		IsDraft:     true,
-		ReviewState: "changes_requested",
-		Labels:      "wip,enhancement",
-	}
-	content := &ghpkg.ItemContent{
-		Body:     "This is a draft",
-		Comments: []string{"Please review", "Will fix"},
-	}
-
-	prompt := buildItemSweepPrompt(item, content, nil)
-	if !strings.Contains(prompt, "Draft:** yes") {
-		t.Error("expected draft indicator")
-	}
-	if !strings.Contains(prompt, "Review:** changes_requested") {
-		t.Error("expected review state")
-	}
-	if !strings.Contains(prompt, "Labels:** wip,enhancement") {
-		t.Error("expected labels")
-	}
-	if !strings.Contains(prompt, "Comment 1:") {
-		t.Error("expected comments")
-	}
-	if !strings.Contains(prompt, "Comment 2:") {
-		t.Error("expected 2 comments")
-	}
-}
-
-func TestBuildItemSweepPrompt_TruncatesLongComment(t *testing.T) {
-	item := &db.TrackedItem{
-		Owner:    "o",
-		Repo:     "r",
-		Number:   1,
-		ItemType: "issue",
-		Title:    "Test",
-		State:    "open",
-	}
-	longComment := strings.Repeat("c", 600)
-	content := &ghpkg.ItemContent{Comments: []string{longComment}}
-
-	prompt := buildItemSweepPrompt(item, content, nil)
-	if !strings.Contains(prompt, "...[truncated]") {
-		t.Error("expected comment truncation")
 	}
 }
 
@@ -2671,12 +2427,10 @@ func TestOnboard_WithReposContext(t *testing.T) {
 func TestGatherResultFields(t *testing.T) {
 	result := &PollResult{NewCommits: 3, NewMessages: 2}
 	gr := &gatherResult{
-		result:          result,
-		repos:           []db.Repo{{Path: "/test"}},
-		gitSummary:      "3 commits",
-		msgSummary:      "2 messages",
-		trackedChanges:  "item changed",
-		sweepHadUpdates: true,
+		result:     result,
+		repos:      []db.Repo{{Path: "/test"}},
+		gitSummary: "3 commits",
+		msgSummary: "2 messages",
 	}
 
 	if gr.result.NewCommits != 3 {
@@ -2684,9 +2438,6 @@ func TestGatherResultFields(t *testing.T) {
 	}
 	if len(gr.repos) != 1 {
 		t.Errorf("repos = %d", len(gr.repos))
-	}
-	if !gr.sweepHadUpdates {
-		t.Error("expected sweepHadUpdates=true")
 	}
 }
 
@@ -2761,71 +2512,6 @@ func TestOnboard_AnalysisWithNoBusMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "did not produce a publishable onboarding message") {
 		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-// --- computeContentHash edge cases ---
-
-func TestComputeContentHash_EmptyInputs(t *testing.T) {
-	h := computeContentHash("", "", "", nil, nil, false, "")
-	if h == "" {
-		t.Error("expected non-empty hash for empty inputs")
-	}
-	if len(h) != 64 {
-		t.Errorf("expected 64-char hex hash, got %d", len(h))
-	}
-}
-
-func TestComputeContentHash_WithAllFields(t *testing.T) {
-	h := computeContentHash(
-		"open",
-		"bug,enhancement",
-		"fix the thing",
-		[]string{"comment 1", "comment 2"},
-		[]string{"abc123:fix", "def456:update"},
-		true,
-		"approved",
-	)
-	if h == "" {
-		t.Error("expected non-empty hash")
-	}
-	// Verify deterministic.
-	h2 := computeContentHash("open", "bug,enhancement", "fix the thing",
-		[]string{"comment 1", "comment 2"},
-		[]string{"abc123:fix", "def456:update"},
-		true, "approved")
-	if h != h2 {
-		t.Error("same inputs should produce same hash")
-	}
-}
-
-// --- itemSweepSystemPrompt test ---
-
-func TestItemSweepSystemPrompt_Content(t *testing.T) {
-	prompt := itemSweepSystemPrompt()
-	if !strings.Contains(prompt, "issue/PR summarizer") {
-		t.Error("expected summarizer mention")
-	}
-	if !strings.Contains(prompt, "objective") {
-		t.Error("expected objective field mention")
-	}
-	if !strings.Contains(prompt, "progress") {
-		t.Error("expected progress field mention")
-	}
-}
-
-// --- ItemSweepResponse fields test ---
-
-func TestItemSweepResponse_Fields(t *testing.T) {
-	resp := ItemSweepResponse{
-		Objective: "Add feature X",
-		Progress:  "PR open, waiting review",
-	}
-	if resp.Objective != "Add feature X" {
-		t.Errorf("Objective = %q", resp.Objective)
-	}
-	if resp.Progress != "PR open, waiting review" {
-		t.Errorf("Progress = %q", resp.Progress)
 	}
 }
 

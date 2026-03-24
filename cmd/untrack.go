@@ -46,6 +46,8 @@ func runUntrack(cmd *cobra.Command, args []string) error {
 	if err := store.RemoveTrackedItem(project.ID, owner, repo, number); err != nil {
 		return err
 	}
+	// Also mark the autopilot task as removed (no-op if no matching task).
+	_ = store.RemoveAutopilotTaskByIssue(project.ID, number)
 
 	fmt.Printf("Untracked %s/%s#%d from project %q\n", owner, repo, number, projectName)
 	return nil

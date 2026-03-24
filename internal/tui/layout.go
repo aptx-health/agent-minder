@@ -1434,7 +1434,7 @@ func (m Model) renderHeader() string {
 // Shows status tag and dot per item, wrapping to multiple lines for >5 items.
 // When trackedExpanded is true, shows one item per line with title.
 func (m Model) renderTrackedStrip() string {
-	if len(m.trackedItems) == 0 {
+	if len(m.operationsTasks) == 0 {
 		return ""
 	}
 
@@ -1443,24 +1443,24 @@ func (m Model) renderTrackedStrip() string {
 	if m.trackedExpanded {
 		toggleHint = "[x: collapse]"
 	}
-	b.WriteString(headerStyle().Render(fmt.Sprintf("Tracked (%d)", len(m.trackedItems))))
+	b.WriteString(headerStyle().Render(fmt.Sprintf("Tasks (%d)", len(m.operationsTasks))))
 	b.WriteString("  ")
 	b.WriteString(mutedStyle().Render(toggleHint))
 	b.WriteString("\n")
 
 	if m.trackedExpanded {
-		for _, item := range m.trackedItems {
-			st := m.effectiveStatus(item)
+		for _, task := range m.operationsTasks {
+			st := taskDisplayStatus(task.Status)
 			dot := statusDot(st)
-			ref := fmt.Sprintf("#%d", item.Number)
+			ref := fmt.Sprintf("#%d", task.IssueNumber)
 			status := fmt.Sprintf("[%s]", st)
-			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
+			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", task.Owner, task.Repo, task.IssueNumber)
 
 			// Truncate title to fit available width.
 			// Format: "  ● #123[Status] Title..."
 			prefixLen := 2 + 2 + len(ref) + len(status) + 1 // indent + dot + ref + status + space
 			maxTitle := m.width - prefixLen - 2
-			title := item.Title
+			title := task.IssueTitle
 			if maxTitle > 0 && len(title) > maxTitle {
 				title = title[:maxTitle-3] + "..."
 			}
@@ -1481,13 +1481,12 @@ func (m Model) renderTrackedStrip() string {
 		var line strings.Builder
 		line.WriteString("  ")
 
-		for i, item := range m.trackedItems {
-			st := m.effectiveStatus(item)
-			entry := fmt.Sprintf("#%d[%s]", item.Number, st)
+		for i, task := range m.operationsTasks {
+			st := taskDisplayStatus(task.Status)
+			entry := fmt.Sprintf("#%d[%s]", task.IssueNumber, st)
 			dot := statusDot(st)
 			entryLen := len(entry) + 2 // +2 for dot + space
-			// Build GitHub URL for OSC 8 hyperlink.
-			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", item.Owner, item.Repo, item.Number)
+			ghURL := fmt.Sprintf("https://github.com/%s/%s/issues/%d", task.Owner, task.Repo, task.IssueNumber)
 
 			// Wrap to next line if needed (allow ~5 items per line).
 			if i > 0 && lineWidth+entryLen+2 > m.width-2 {

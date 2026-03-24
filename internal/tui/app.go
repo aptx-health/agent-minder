@@ -191,11 +191,10 @@ type Model struct {
 	eventLogVP       viewport.Model
 	analysisExpanded bool // 'e' toggles proportional vs 3-line (default: expanded)
 
-	// Tracked items (refreshed on poll results).
-	trackedItems    []db.TrackedItem
-	bailedIssues    map[int]bool   // issue numbers with bailed autopilot tasks
-	failedIssues    map[int]string // issue numbers with failed autopilot tasks → failure reason
-	trackedExpanded bool           // 'x' toggles compact strip vs expanded list with titles
+	// Operations tasks — autopilot_tasks is the single source of truth.
+	// Excludes removed/done/skipped for display purposes.
+	operationsTasks []db.AutopilotTask
+	trackedExpanded bool // 'x' toggles compact strip vs expanded list with titles
 
 	// Settings dialog.
 	settingsState  *settingsState
@@ -1438,13 +1437,13 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return clearTrackStatusMsg{}
 			})
 		}
-		hasExisting := len(m.trackedItems) > 0
+		hasExisting := len(m.operationsTasks) > 0
 		m.filterState = newFilterState(repos, hasExisting)
 		m.filterStatus = ""
 		m.mode = "filter"
 		return m, nil
 	case "I":
-		if len(m.trackedItems) == 0 {
+		if len(m.operationsTasks) == 0 {
 			m.trackStatus = "Nothing tracked"
 			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 				return clearTrackStatusMsg{}
@@ -1462,7 +1461,17 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.trackError = false
 		m.trackStep = trackStepInput
 		m.trackPreviewItems = nil
-		m.trackRows = buildTrackRows(ghRepos, m.trackedItems)
+		// Build tracked items from operations tasks for the untrack form.
+		var trackedForUntrack []db.TrackedItem
+		for _, t := range m.operationsTasks {
+			trackedForUntrack = append(trackedForUntrack, db.TrackedItem{
+				Owner:  t.Owner,
+				Repo:   t.Repo,
+				Number: t.IssueNumber,
+				Title:  t.IssueTitle,
+			})
+		}
+		m.trackRows = buildTrackRows(ghRepos, trackedForUntrack)
 		m.trackFocus = 0
 		cmd := m.trackRows[0].input.Focus()
 		m.resizeViewports()
@@ -2128,23 +2137,27 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// For untrack, look up titles from existing tracked items (no API call needed).
-	titleMap := make(map[string]db.TrackedItem, len(m.trackedItems))
-	for _, ti := range m.trackedItems {
-		key := fmt.Sprintf("%s/%s#%d", ti.Owner, ti.Repo, ti.Number)
-		titleMap[key] = ti
+	// For untrack, look up titles from operations tasks (no API call needed).
+	type taskInfo struct {
+		Title  string
+		Status string
+	}
+	titleMap := make(map[string]taskInfo, len(m.operationsTasks))
+	for _, t := range m.operationsTasks {
+		key := fmt.Sprintf("%s/%s#%d", t.Owner, t.Repo, t.IssueNumber)
+		titleMap[key] = taskInfo{Title: t.IssueTitle, Status: t.Status}
 	}
 	var items []trackPreviewItem
 	for _, ref := range refs {
 		key := fmt.Sprintf("%s/%s#%d", ref.Owner, ref.Repo, ref.Number)
 		title := fmt.Sprintf("#%d", ref.Number)
-		status := "Open"
-		if ti, ok := titleMap[key]; ok {
-			if ti.Title != "" {
-				title = ti.Title
+		status := "queued"
+		if info, ok := titleMap[key]; ok {
+			if info.Title != "" {
+				title = info.Title
 			}
-			if ti.LastStatus != "" {
-				status = ti.LastStatus
+			if info.Status != "" {
+				status = info.Status
 			}
 		}
 		items = append(items, trackPreviewItem{
@@ -2750,20 +2763,21 @@ func listenForAutopilotEvents(sup *autopilot.Supervisor) tea.Cmd {
 	}
 }
 
-// refreshTrackedItems reloads tracked items and rebuilds the bailed/failed issues map
-// from autopilot tasks.
+// refreshTrackedItems reloads operations tasks from autopilot_tasks,
+// filtering out terminal and removed statuses.
 func (m *Model) refreshTrackedItems() {
-	m.trackedItems, _ = m.store.GetTrackedItems(m.project.ID)
-	m.bailedIssues = make(map[int]bool)
-	m.failedIssues = make(map[int]string)
-	if tasks, err := m.store.GetAutopilotTasks(m.project.ID); err == nil {
-		for _, t := range tasks {
-			switch t.Status {
-			case "bailed":
-				m.bailedIssues[t.IssueNumber] = true
-			case "failed":
-				m.failedIssues[t.IssueNumber] = t.FailureReason
-			}
+	allTasks, err := m.store.GetAutopilotTasks(m.project.ID)
+	if err != nil {
+		m.operationsTasks = nil
+		return
+	}
+	m.operationsTasks = m.operationsTasks[:0]
+	for _, t := range allTasks {
+		switch t.Status {
+		case "removed", "done", "skipped":
+			continue
+		default:
+			m.operationsTasks = append(m.operationsTasks, t)
 		}
 	}
 }
@@ -2786,19 +2800,28 @@ func (m *Model) refreshObsCosts() {
 	m.obsDailyTaskCosts, m.obsCostErr = m.store.DailyTaskCosts(m.project.ID, today)
 }
 
-// effectiveStatus returns the display status for a tracked item, overlaying
-// bailed/failed autopilot status when applicable.
-func (m Model) effectiveStatus(item db.TrackedItem) string {
-	if item.LastStatus == "Mrgd" || item.LastStatus == "Closd" {
-		return item.LastStatus
-	}
-	if _, ok := m.failedIssues[item.Number]; ok {
-		return "Faild"
-	}
-	if m.bailedIssues[item.Number] {
+// taskDisplayStatus returns a short display status for an autopilot task.
+func taskDisplayStatus(status string) string {
+	switch status {
+	case "queued":
+		return "Queue"
+	case "running":
+		return "Run"
+	case "review", "reviewing", "reviewed":
+		return "Revew"
+	case "blocked":
+		return "Blckd"
+	case "manual":
+		return "Manul"
+	case "bailed":
 		return "Baild"
+	case "failed":
+		return "Faild"
+	case "pending":
+		return "Pend"
+	default:
+		return status
 	}
-	return item.LastStatus
 }
 
 // clearTabIndicator clears the new-data indicator for the currently active tab.
