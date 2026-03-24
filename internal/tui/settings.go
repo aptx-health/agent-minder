@@ -29,6 +29,31 @@ type settingsField struct {
 	value       string
 	unit        string
 	multiline   bool // true for textarea fields
+	toggle      bool // true for boolean toggle fields
+}
+
+// optIntStr formats an *int as a string, returning "" for nil.
+func optIntStr(p *int) string {
+	if p == nil {
+		return ""
+	}
+	return strconv.Itoa(*p)
+}
+
+// optFloatStr formats an *float64 as a string, returning "" for nil.
+func optFloatStr(p *float64) string {
+	if p == nil {
+		return ""
+	}
+	return fmt.Sprintf("%.2f", *p)
+}
+
+// boolOnOff returns "on" or "off" for a boolean.
+func boolOnOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 // settingsState holds all state for the settings dialog.
@@ -118,6 +143,23 @@ func newSettingsState(project *db.Project) *settingsState {
 				description: "Base branch for worktrees and PRs (empty = auto-detect)",
 				value:       project.AutopilotBaseBranch,
 			},
+			{
+				label:       "Review max turns",
+				description: "Max turns per review agent (empty = reviews disabled)",
+				value:       optIntStr(project.AutopilotReviewMaxTurns),
+			},
+			{
+				label:       "Review max budget",
+				description: "Max USD budget per review agent",
+				value:       optFloatStr(project.AutopilotReviewMaxBudgetUSD),
+				unit:        "USD",
+			},
+			{
+				label:       "Auto-merge",
+				description: "Auto-merge low-risk PRs after review (enter to toggle)",
+				value:       boolOnOff(project.AutopilotAutoMerge),
+				toggle:      true,
+			},
 		},
 	}
 }
@@ -164,6 +206,14 @@ func (m Model) updateSettingsSelectField(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 	case "enter":
 		field := ss.fields[ss.fieldIdx]
 		ss.err = ""
+		if field.toggle {
+			m.project.AutopilotAutoMerge = !m.project.AutopilotAutoMerge
+			ss.fields[ss.fieldIdx].value = boolOnOff(m.project.AutopilotAutoMerge)
+			return m, func() tea.Msg {
+				err := m.store.UpdateProject(m.project)
+				return settingsSavedMsg{field: field.label, err: err}
+			}
+		}
 		if field.multiline {
 			ss.step = settingsStepEditTextarea
 			// Load the effective value (default when empty) so users can see and edit it.
@@ -278,6 +328,32 @@ func (m Model) updateSettingsEditValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 			}
 			m.project.AutopilotBaseBranch = branch
 			return m.saveSettingsField(ss, field.label, branch)
+		case "Review max turns":
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				m.project.AutopilotReviewMaxTurns = nil
+				return m.saveSettingsField(ss, field.label, "")
+			}
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 {
+				ss.err = "Enter a positive number (or empty to disable)"
+				return m, nil
+			}
+			m.project.AutopilotReviewMaxTurns = &n
+			return m.saveSettingsField(ss, field.label, raw)
+		case "Review max budget":
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				m.project.AutopilotReviewMaxBudgetUSD = nil
+				return m.saveSettingsField(ss, field.label, "")
+			}
+			f, err := strconv.ParseFloat(raw, 64)
+			if err != nil || f <= 0 {
+				ss.err = "Enter a positive number (or empty to disable)"
+				return m, nil
+			}
+			m.project.AutopilotReviewMaxBudgetUSD = &f
+			return m.saveSettingsField(ss, field.label, fmt.Sprintf("%.2f", f))
 		}
 
 		return m, nil
