@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Structured PR review comments**: Review agent posts a formatted markdown comment on the PR with risk tier, recommendation, and structured assessment; applies risk labels (`low-risk`, `needs-testing`, `suspect`) and stores comment ID for future updates
 - **Review test command**: Review agent context now includes the project's test command from `onboarding.yaml`, enabling reviewers to run the correct test suite after making fixes
 - **Convention-based test command detection**: When no test command is configured in `onboarding.yaml`, the reviewer automatically detects the project's test framework (Go, Node.js, Python, Rust, Makefile) and includes the conventional test command in the review context
+- **Auto-merge for low-risk PRs**: When `autopilot_auto_merge` is enabled on a project, reviewed PRs assessed as `low-risk` are automatically squash-merged with a comment; failures leave the task in `reviewed` for manual intervention
 
 ## [0.1.0] - 2026-03-19
 

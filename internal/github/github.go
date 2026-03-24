@@ -57,6 +57,14 @@ func NewClient(token string) *Client {
 	}
 }
 
+// NewClientWithBaseURL creates a GitHub client pointing at a custom API base URL.
+// Used for testing with httptest servers.
+func NewClientWithBaseURL(token, baseURL string) *Client {
+	c := github.NewClient(nil).WithAuthToken(token)
+	c.BaseURL, _ = c.BaseURL.Parse(baseURL)
+	return &Client{gh: c}
+}
+
 // FetchItem fetches the current status of an issue or PR.
 // It first tries as a PR (to detect merged state), then falls back to issue.
 func (c *Client) FetchItem(ctx context.Context, owner, repo string, number int) (*ItemStatus, error) {
@@ -314,6 +322,20 @@ func (c *Client) CreateComment(ctx context.Context, owner, repo string, number i
 		return 0, fmt.Errorf("create comment: %w", err)
 	}
 	return comment.GetID(), nil
+}
+
+// MergePR merges a pull request using the specified method (merge, squash, rebase).
+// Returns nil on success, or an error describing why the merge failed.
+func (c *Client) MergePR(ctx context.Context, owner, repo string, number int, method string, commitMsg string) error {
+	opts := &github.PullRequestOptions{
+		MergeMethod: method,
+		CommitTitle: commitMsg,
+	}
+	_, _, err := c.gh.PullRequests.Merge(ctx, owner, repo, number, "", opts)
+	if err != nil {
+		return fmt.Errorf("merge PR #%d: %w", number, err)
+	}
+	return nil
 }
 
 // ListMilestones returns open milestones for a repo.

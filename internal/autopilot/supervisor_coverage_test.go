@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dustinlange/agent-minder/internal/db"
+	ghpkg "github.com/dustinlange/agent-minder/internal/github"
 	_ "modernc.org/sqlite"
 )
 
@@ -5240,6 +5244,256 @@ func TestReviewOutcome_PermissionWarning_StillSucceeds(t *testing.T) {
 	risk := parseReviewRisk(result)
 	if risk != "medium" {
 		t.Errorf("parseReviewRisk = %q, want 'medium'", risk)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auto-merge tests
+// ---------------------------------------------------------------------------
+
+// TestAutoMerge_LowRisk_Enabled verifies that a reviewed task with low-risk
+// and auto-merge enabled attempts to merge via GitHub API. Since we use a fake
+// token, the merge will fail, but the auto-merge path should be taken (error
+// comment posted, task stays in "reviewed").
+func TestAutoMerge_LowRisk_Enabled(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotAutoMerge = true
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  80,
+		IssueTitle:   "Auto-merge low risk",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	lowRisk := "low-risk"
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 300)
+	_ = store.UpdateAutopilotTaskReview(task.ID, lowRisk, 0)
+
+	// checkReviewTasks will try auto-merge path (fails with fake token),
+	// then falls through to promoteIfMerged (also fails with fake token).
+	sup.checkReviewTasks(context.Background())
+
+	// Task should remain in "reviewed" since both auto-merge and
+	// promoteIfMerged fail with fake credentials.
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed' (auto-merge fails, should remain)", tt.Status)
+			}
+		}
+	}
+}
+
+// TestAutoMerge_Disabled_SkipsAutoMerge verifies that when auto-merge is disabled,
+// the auto-merge path is not taken even for low-risk reviewed tasks.
+func TestAutoMerge_Disabled_SkipsAutoMerge(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotAutoMerge = false // explicitly disabled
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  81,
+		IssueTitle:   "No auto-merge",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	lowRisk := "low-risk"
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 301)
+	_ = store.UpdateAutopilotTaskReview(task.ID, lowRisk, 0)
+
+	sup.checkReviewTasks(context.Background())
+
+	// Task should remain in "reviewed" — auto-merge not attempted.
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+		}
+	}
+}
+
+// TestAutoMerge_NonLowRisk_SkipsAutoMerge verifies that auto-merge is skipped
+// when review risk is not low-risk, even if auto-merge is enabled.
+func TestAutoMerge_NonLowRisk_SkipsAutoMerge(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotAutoMerge = true
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  82,
+		IssueTitle:   "Medium risk no auto-merge",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	needsTesting := "needs-testing"
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 302)
+	_ = store.UpdateAutopilotTaskReview(task.ID, needsTesting, 0)
+
+	sup.checkReviewTasks(context.Background())
+
+	// Task should remain in "reviewed" — auto-merge not attempted for non-low-risk.
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+		}
+	}
+}
+
+// TestAutoMerge_NilRisk_SkipsAutoMerge verifies that auto-merge is skipped
+// when review risk is nil.
+func TestAutoMerge_NilRisk_SkipsAutoMerge(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotAutoMerge = true
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  83,
+		IssueTitle:   "Nil risk no auto-merge",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 303)
+	// Don't set review risk — it stays nil.
+
+	sup.checkReviewTasks(context.Background())
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "reviewed" {
+				t.Errorf("status = %q, want 'reviewed'", tt.Status)
+			}
+		}
+	}
+}
+
+// TestAutoMerge_HappyPath_MergesAndPromotes uses an httptest server to simulate
+// a successful GitHub merge, verifying the full happy path: status → done,
+// success comment posted, and completion event emitted.
+func TestAutoMerge_HappyPath_MergesAndPromotes(t *testing.T) {
+	var mu sync.Mutex
+	var mergeCount int
+	var commentBodies []string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		// PUT /repos/owner/repo/pulls/400/merge — squash merge
+		case r.Method == "PUT" && strings.HasSuffix(r.URL.Path, "/pulls/400/merge"):
+			mergeCount++
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"sha":"abc123","merged":true,"message":"Pull Request successfully merged"}`)
+
+		// POST /repos/owner/repo/issues/400/comments — comment on PR
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/issues/400/comments"):
+			var body struct{ Body string }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			commentBodies = append(commentBodies, body.Body)
+			w.WriteHeader(201)
+			_, _ = fmt.Fprintf(w, `{"id":1}`)
+
+		// DELETE label — ignore
+		case r.Method == "DELETE" && strings.Contains(r.URL.Path, "/labels/"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{}`)
+
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer ts.Close()
+
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	project.AutopilotAutoMerge = true
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+	sup.ghClientFactory = func(token string) *ghpkg.Client {
+		return ghpkg.NewClientWithBaseURL(token, ts.URL+"/")
+	}
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		IssueNumber:  90,
+		IssueTitle:   "Add widget feature",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+	lowRisk := "low-risk"
+	_ = store.UpdateAutopilotTaskStatus(task.ID, "reviewed")
+	_ = store.UpdateAutopilotTaskPR(task.ID, 400)
+	_ = store.UpdateAutopilotTaskReview(task.ID, lowRisk, 0)
+
+	// Drain events in background.
+	go func() {
+		for range sup.Events() {
+		}
+	}()
+
+	promoted := sup.checkReviewTasks(context.Background())
+
+	// Verify: task promoted to done.
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tt := range tasks {
+		if tt.ID == task.ID {
+			if tt.Status != "done" {
+				t.Errorf("status = %q, want 'done'", tt.Status)
+			}
+		}
+	}
+
+	// Verify: merge was called exactly once.
+	mu.Lock()
+	if mergeCount != 1 {
+		t.Errorf("mergeCount = %d, want 1", mergeCount)
+	}
+
+	// Verify: success comment was posted (after merge).
+	if len(commentBodies) == 0 {
+		t.Error("expected at least one comment, got none")
+	} else if !strings.Contains(commentBodies[len(commentBodies)-1], "Auto-merged") {
+		t.Errorf("last comment = %q, want to contain 'Auto-merged'", commentBodies[len(commentBodies)-1])
+	}
+	mu.Unlock()
+
+	// Verify: at least one task was promoted.
+	if promoted < 1 {
+		t.Errorf("promoted = %d, want >= 1", promoted)
 	}
 }
 

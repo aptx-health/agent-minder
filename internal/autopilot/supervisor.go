@@ -116,16 +116,17 @@ type Supervisor struct {
 	repo      string
 	ghToken   string
 
-	mu            sync.Mutex
-	slots         []*slotState // len == maxAgents; nil = idle
-	active        bool
-	paused        bool // when true, fillSlots returns early
-	preparedAt    time.Time
-	events        chan Event
-	parentCtx     context.Context // parent context for the session (used by slot goroutines for fillSlots)
-	cancel        context.CancelFunc
-	done          chan struct{}
-	reviewRetries map[int64]int // in-memory retry count for review agent transient failures
+	mu              sync.Mutex
+	slots           []*slotState // len == maxAgents; nil = idle
+	active          bool
+	paused          bool // when true, fillSlots returns early
+	preparedAt      time.Time
+	events          chan Event
+	parentCtx       context.Context // parent context for the session (used by slot goroutines for fillSlots)
+	cancel          context.CancelFunc
+	done            chan struct{}
+	reviewRetries   map[int64]int                    // in-memory retry count for review agent transient failures
+	ghClientFactory func(token string) *ghpkg.Client // override for testing; nil uses ghpkg.NewClient
 }
 
 // New creates a new Supervisor.
@@ -146,6 +147,14 @@ func New(store *db.Store, project *db.Project, completer claudecli.Completer, re
 		events:        make(chan Event, 64),
 		reviewRetries: make(map[int64]int),
 	}
+}
+
+// newGHClient returns a GitHub client, using the test factory if set.
+func (s *Supervisor) newGHClient() *ghpkg.Client {
+	if s.ghClientFactory != nil {
+		return s.ghClientFactory(s.ghToken)
+	}
+	return ghpkg.NewClient(s.ghToken)
 }
 
 // Events returns the channel of events for the TUI.
@@ -1563,7 +1572,7 @@ func (s *Supervisor) convertTrackedItems(ctx context.Context) ([]*db.AutopilotTa
 	}
 
 	matcher := newSkipMatcher(s.project.AutopilotSkipLabel)
-	ghClient := ghpkg.NewClient(s.ghToken)
+	ghClient := s.newGHClient()
 
 	var tasks []*db.AutopilotTask
 	for _, item := range items {
@@ -1993,7 +2002,7 @@ func (s *Supervisor) addNewTrackedItems(ctx context.Context) int {
 	}
 
 	matcher := newSkipMatcher(s.project.AutopilotSkipLabel)
-	ghClient := ghpkg.NewClient(s.ghToken)
+	ghClient := s.newGHClient()
 
 	var newTasks []*db.AutopilotTask
 	for _, item := range items {
@@ -2321,13 +2330,13 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 	switch status {
 	case "review":
 		// Swap in-progress → needs-review label on the issue.
-		ghClient := ghpkg.NewClient(s.ghToken)
+		ghClient := s.newGHClient()
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
 		_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
 		s.emitEvent("completed", fmt.Sprintf("Agent completed #%d — PR opened, awaiting review & merge", task.IssueNumber), task)
 	case "failed":
 		// Remove in-progress label since the agent is done.
-		ghClient := ghpkg.NewClient(s.ghToken)
+		ghClient := s.newGHClient()
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
 		// Reload task to get failure_reason populated by inspectOutcome.
 		if updated, err := s.store.GetAutopilotTasks(s.project.ID); err == nil {
@@ -2364,7 +2373,7 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 		return 0
 	}
 
-	ghClient := ghpkg.NewClient(s.ghToken)
+	ghClient := s.newGHClient()
 	promoted := 0
 
 	for _, task := range tasks {
@@ -2396,6 +2405,13 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 			}
 
 		case "reviewed":
+			// Auto-merge if enabled and review risk is low.
+			if s.project.AutopilotAutoMerge && task.ReviewRisk != nil && *task.ReviewRisk == "low-risk" {
+				if s.tryAutoMerge(ctx, ghClient, task) {
+					promoted++
+					continue
+				}
+			}
 			// Review agent finished — check if PR was merged.
 			if ok := s.promoteIfMerged(ctx, ghClient, task); ok {
 				promoted++
@@ -2406,6 +2422,16 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 	return promoted
 }
 
+// promoteTaskToDone marks a task as done, cleans up labels, and emits a completion event.
+func (s *Supervisor) promoteTaskToDone(ctx context.Context, ghClient *ghpkg.Client, task db.AutopilotTask, eventMsg string) {
+	_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
+	ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
+	if task.ReviewRisk != nil && *task.ReviewRisk != "" {
+		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, *task.ReviewRisk)
+	}
+	s.emitEvent("completed", eventMsg, &task)
+}
+
 // promoteIfMerged checks if a task's PR has been merged or closed, and if so
 // promotes the task to "done" and cleans up labels. Returns true if promoted.
 func (s *Supervisor) promoteIfMerged(ctx context.Context, ghClient *ghpkg.Client, task db.AutopilotTask) bool {
@@ -2414,16 +2440,36 @@ func (s *Supervisor) promoteIfMerged(ctx context.Context, ghClient *ghpkg.Client
 		return false
 	}
 	if item.State == "merged" || item.State == "closed" {
-		_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
-		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
-		// Clean up the risk label from the PR (if one was applied).
-		if task.ReviewRisk != nil && *task.ReviewRisk != "" {
-			ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, *task.ReviewRisk)
-		}
-		s.emitEvent("completed", fmt.Sprintf("PR #%d for issue #%d merged — dependents unblocked", task.PRNumber, task.IssueNumber), &task)
+		s.promoteTaskToDone(ctx, ghClient, task,
+			fmt.Sprintf("PR #%d for issue #%d merged — dependents unblocked", task.PRNumber, task.IssueNumber))
 		return true
 	}
 	return false
+}
+
+// tryAutoMerge attempts to auto-merge a reviewed PR that was assessed as low-risk.
+// Squash-merges first, then posts a success comment. On failure, it posts
+// an error comment and leaves the task in "reviewed" for manual intervention.
+// Returns true if the merge succeeded and the task was promoted to "done".
+func (s *Supervisor) tryAutoMerge(ctx context.Context, ghClient *ghpkg.Client, task db.AutopilotTask) bool {
+	commitMsg := fmt.Sprintf("Auto-merge: %s (#%d)", task.IssueTitle, task.IssueNumber)
+
+	if err := ghClient.MergePR(ctx, s.owner, s.repo, task.PRNumber, "squash", commitMsg); err != nil {
+		// Merge failed — post error comment and leave in reviewed.
+		_, _ = ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber,
+			fmt.Sprintf("Auto-merge failed: %v\n\nPlease merge manually or investigate the failure.", err))
+		s.emitEvent("error", fmt.Sprintf("Auto-merge failed for PR #%d (issue #%d): %v",
+			task.PRNumber, task.IssueNumber, err), &task)
+		return false
+	}
+
+	// Merge succeeded — post comment and promote to done.
+	_, _ = ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber,
+		"Auto-merged: reviewed as low-risk by review agent")
+	s.promoteTaskToDone(ctx, ghClient, task,
+		fmt.Sprintf("Auto-merged PR #%d for issue #%d (low-risk) — dependents unblocked",
+			task.PRNumber, task.IssueNumber))
+	return true
 }
 
 // incrReviewRetry increments the in-memory retry counter for a review task.
@@ -2685,7 +2731,7 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 
 		// Post structured review comment to the PR and apply risk label.
 		var commentID int64
-		ghClient := ghpkg.NewClient(s.ghToken)
+		ghClient := s.newGHClient()
 		body := formatReviewComment(agentResult.Result, label)
 		if cid, err := ghClient.CreateComment(ctx, s.owner, s.repo, task.PRNumber, body); err != nil {
 			s.emitEvent("error", fmt.Sprintf("Failed to post review comment on PR #%d: %v", task.PRNumber, err), task)
@@ -2852,7 +2898,7 @@ func (s *Supervisor) checkManualTasks(ctx context.Context) int {
 		return 0
 	}
 
-	ghClient := ghpkg.NewClient(s.ghToken)
+	ghClient := s.newGHClient()
 	promoted := 0
 
 	for _, task := range tasks {
@@ -2897,7 +2943,7 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 				"issue", task.IssueNumber, "reason", reason)
 
 			// Check for PR even on failure — agent may have opened one before exhausting limits.
-			ghClient := ghpkg.NewClient(s.ghToken)
+			ghClient := s.newGHClient()
 			pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
 			if err == nil && pr != nil && pr.Number > 0 {
 				_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
@@ -2920,7 +2966,7 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 	}
 
 	// Check if a PR was opened for this branch.
-	ghClient := ghpkg.NewClient(s.ghToken)
+	ghClient := s.newGHClient()
 	pr, err := ghClient.FetchPRForBranch(ctx, s.owner, s.repo, task.Branch)
 	if err == nil && pr != nil && pr.Number > 0 {
 		_ = s.store.UpdateAutopilotTaskPR(task.ID, pr.Number)
