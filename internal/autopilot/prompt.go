@@ -494,6 +494,25 @@ func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, te
 	return b.String()
 }
 
+// renderManualSessionPrompt builds a prompt for a manual work session.
+// Claude fetches the issue details, summarizes the work, then awaits user instructions.
+func renderManualSessionPrompt(task *db.AutopilotTask, owner, repo string, rw *relatedWork) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "You are starting a manual work session for issue #%d in %s/%s.\n\n", task.IssueNumber, owner, repo)
+	fmt.Fprintf(&b, "1. Run `gh issue view %d -R %s/%s` to fetch the full issue details\n", task.IssueNumber, owner, repo)
+	b.WriteString("2. Summarize the issue and what needs to be done\n")
+	b.WriteString("3. Then tell the user you're ready for their instructions\n\n")
+	fmt.Fprintf(&b, "Worktree: %s\n", task.WorktreePath)
+	fmt.Fprintf(&b, "Branch: %s\n\n", task.Branch)
+
+	if related := renderRelatedWork(task, rw); related != "" {
+		b.WriteString(related)
+	}
+
+	return b.String()
+}
+
 // relatedWork holds dependency graph and sibling task context for autopilot and reviewer agents.
 type relatedWork struct {
 	// depGraph is the raw JSON dependency graph (issue→[deps]) from autopilot_dep_graphs.

@@ -826,6 +826,13 @@ func (s *Store) UpdateAutopilotTaskRunning(id int64, worktreePath, branch, agent
 	return err
 }
 
+// UpdateAutopilotTaskWorktree sets the worktree path and branch for a task without changing status.
+func (s *Store) UpdateAutopilotTaskWorktree(id int64, worktreePath, branch string) error {
+	_, err := s.db.Exec(`UPDATE autopilot_tasks SET worktree_path = ?, branch = ? WHERE id = ?`,
+		worktreePath, branch, id)
+	return err
+}
+
 // UpdateAutopilotTaskPR sets the PR number for a completed task.
 func (s *Store) UpdateAutopilotTaskPR(id int64, prNumber int) error {
 	_, err := s.db.Exec(`UPDATE autopilot_tasks SET pr_number = ? WHERE id = ?`, prNumber, id)

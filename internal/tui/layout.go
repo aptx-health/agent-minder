@@ -1685,7 +1685,7 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 		isRunning := m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" ||
 			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" ||
 			m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "review-confirm" ||
-			m.autopilotMode == "completed"
+			m.autopilotMode == "manual-confirm" || m.autopilotMode == "completed"
 		if isRunning {
 			// Slot section.
 			if m.autopilotSupervisor != nil {
@@ -2113,6 +2113,18 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "manual-confirm" {
+			task := m.selectedAutopilotTask()
+			issueNum := 0
+			if task != nil {
+				issueNum = task.IssueNumber
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Spin off worktree for #%d? ", issueNum)))
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": launch • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
 		} else if m.autopilotStatus != "" {
 			b.WriteString(broadcastStyle().Render(fmt.Sprintf("  %s", m.autopilotStatus)))
 			b.WriteString("\n")
@@ -2313,7 +2325,7 @@ var (
 		{"a", "launch autopilot"},
 		{"A", "stop all agents"},
 		{"S", "stop selected"},
-		{"r", "restart/review selected"},
+		{"r", "restart/review/spinoff"},
 		{"b", "bump task limits"},
 		{"c", "copy worktree path"},
 		{"+", "add slot"},

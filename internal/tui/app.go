@@ -237,7 +237,7 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor       *autopilot.Supervisor
-	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "add-slot-confirm", "completed", "reprepare-choice"
+	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "manual-confirm", "add-slot-confirm", "completed", "reprepare-choice"
 	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
 	autopilotPrepareResult    *autopilot.PrepareResult
 	autopilotStatus           string
@@ -1231,6 +1231,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.autopilotMode == "manual-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "enter":
+			return m.launchManualSession()
+		case "esc":
+			m.autopilotMode = m.autopilotModeBeforeReview
+			return m, nil
+		}
+	}
 	if m.autopilotMode == "add-slot-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
 		case "enter":
@@ -1285,7 +1294,8 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// On tab 3 during autopilot, 'r' is task-contextual:
 		//   - failed/stopped → resume-or-restart (offer resume in existing worktree)
 		//   - bailed → restart (no useful work to resume)
-		//   - review → launch review session
+		//   - review/reviewed → launch review session
+		//   - manual → spin off worktree with preloaded context
 		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
 			task := m.selectedAutopilotTask()
 			if task != nil && (task.Status == "failed" || task.Status == "stopped") {
@@ -1296,9 +1306,14 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.autopilotMode = "restart-confirm"
 				return m, nil
 			}
-			if task != nil && task.Status == "review" {
+			if task != nil && (task.Status == "review" || task.Status == "reviewed") {
 				m.autopilotModeBeforeReview = m.autopilotMode
 				m.autopilotMode = "review-confirm"
+				return m, nil
+			}
+			if task != nil && task.Status == "manual" {
+				m.autopilotModeBeforeReview = m.autopilotMode
+				m.autopilotMode = "manual-confirm"
 				return m, nil
 			}
 			return m, nil
@@ -2580,7 +2595,7 @@ func (m Model) confirmAddSlot() (tea.Model, tea.Cmd) {
 // launchReviewSession restores the worktree and launches a pre-warmed Claude session for review.
 func (m Model) launchReviewSession() (tea.Model, tea.Cmd) {
 	task := m.selectedAutopilotTask()
-	if task == nil || task.Status != "review" {
+	if task == nil || (task.Status != "review" && task.Status != "reviewed") {
 		m.autopilotMode = m.autopilotModeBeforeReview
 		return m, nil
 	}
@@ -2598,6 +2613,31 @@ func (m Model) launchReviewSession() (tea.Model, tea.Cmd) {
 
 	return m, func() tea.Msg {
 		result, err := sup.ReviewSession(context.Background(), taskID)
+		return reviewSessionResultMsg{result: result, err: err}
+	}
+}
+
+// launchManualSession creates a worktree and launches a pre-warmed Claude session for a manual task.
+func (m Model) launchManualSession() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil || task.Status != "manual" {
+		m.autopilotMode = m.autopilotModeBeforeReview
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = m.autopilotModeBeforeReview
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+	m.autopilotMode = m.autopilotModeBeforeReview
+	m.autopilotStatus = fmt.Sprintf("Spinning off worktree for #%d...", issueNum)
+
+	return m, func() tea.Msg {
+		result, err := sup.ManualSession(context.Background(), taskID)
 		return reviewSessionResultMsg{result: result, err: err}
 	}
 }
