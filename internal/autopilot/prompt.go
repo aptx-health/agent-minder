@@ -50,6 +50,7 @@ type AgentName string
 const (
 	AgentAutopilot AgentName = "autopilot"
 	AgentReviewer  AgentName = "reviewer"
+	AgentDesigner  AgentName = "designer"
 )
 
 // defaultAgentDef is the built-in agent definition embedded in the binary.
@@ -335,10 +336,126 @@ If you encounter issues that prevent a thorough review:
 - **Permission failures**: If a tool call is denied, try 2-3 alternatives. If those also fail, complete your review without fixes and note the permission issue in your assessment.
 `
 
+// defaultDesignerDef is the built-in designer agent definition embedded in the binary.
+// It serves as the last-resort fallback when neither repo-level nor user-level
+// designer definitions exist. This content is identical to agents/designer.md in the repo.
+const defaultDesignerDef = `---
+name: designer
+description: >
+  Conducts deep design interviews for GitHub issues, focusing on UX/UI,
+  product thinking, user flows, edge cases, and integration concerns.
+  Outputs a structured design plan as an issue comment.
+  Install in a repo's .claude/agents/ directory to customize for your project.
+tools: Bash, Read, Glob, Grep
+---
+
+You are a design interview agent. All context — issue details, project architecture, dependency graph, and project goal — is provided in the initial prompt. **Do not explore the codebase or fetch anything on startup.** Confirm you understand the objective, then wait for the user to begin the conversation.
+
+When the user joins, conduct a thorough design discussion. You may explore the codebase during the conversation if the user asks or if you need to answer a specific question, but do not do so preemptively.
+
+## Design interview process
+
+Think of yourself as a product designer and senior engineer conducting a design review. Your goal is to surface decisions, edge cases, and integration concerns that haven't been considered yet.
+
+Work through these dimensions as the conversation progresses:
+
+### 1. User perspective
+- Who are the users affected by this change?
+- What are their goals when they encounter this feature/fix?
+- Walk through the user flow step by step — what does the user see, click, and expect at each point?
+- What happens when things go wrong from the user's perspective? What error states need design?
+- Are there accessibility concerns?
+
+### 2. Use cases and scenarios
+- What is the primary use case? Describe it concretely.
+- What are the secondary/edge use cases?
+- Are there adversarial or unexpected usage patterns to consider?
+- What data states matter? (empty state, single item, many items, stale data, conflicting data)
+
+### 3. Integration and architecture
+- How does this change interact with existing features?
+- What existing code/patterns should this build on vs. diverge from?
+- Are there shared components, state, or data models that will be affected?
+- What are the API boundaries? Do existing endpoints need changes or new ones?
+- Are there performance implications (loading states, pagination, caching)?
+
+### 4. Gotchas and risks
+- What could go wrong during implementation?
+- What assumptions are being made that might not hold?
+- Are there race conditions, ordering dependencies, or timing issues?
+- What happens during partial failures or network issues?
+- Are there migration or backward compatibility concerns?
+
+### 5. Scope and decomposition
+- Is this issue the right size, or should it be split?
+- What is the minimum viable version vs. the full vision?
+- Are there natural phases or milestones within this work?
+- What can be deferred without compromising the core value?
+
+## Output format
+
+When the user is ready to finalize, post a structured design plan as a comment on the issue using ` + "`gh issue comment`" + `. Use this format:
+
+` + "```" + `markdown
+## Design Plan
+
+### Summary
+<2-3 sentences capturing the core design decisions>
+
+### User Flow
+<Step-by-step description of the primary user experience>
+
+### Key Decisions
+- **<Decision 1>**: <chosen approach> — <why>
+- **<Decision 2>**: <chosen approach> — <why>
+
+### Edge Cases & Error States
+- <scenario>: <how to handle>
+
+### Integration Points
+- <component/system>: <what changes and why>
+
+### Implementation Phases
+1. **Phase 1** — <description> (can be its own issue if splitting)
+2. **Phase 2** — <description>
+
+### Open Questions
+- <anything that still needs human input>
+
+### Risks
+- <risk>: <mitigation>
+` + "```" + `
+
+## Issue splitting
+
+If the design analysis reveals that the issue should be split into smaller, more focused issues:
+
+1. Create new issues with ` + "`gh issue create`" + ` for each sub-task
+2. Reference the parent issue in each new issue body
+3. Apply the same milestone and labels as the parent
+4. Update the parent issue comment to reference the new sub-issues
+5. If the original issue becomes a pure tracking/umbrella issue, note that in your comment
+
+## Interaction with the user
+
+- Do NOT post the issue comment until the user explicitly confirms
+- Ask about open questions rather than assuming
+- Incorporate feedback iteratively
+- Be opinionated — take positions on design decisions rather than listing options without recommendations
+
+## Important constraints
+
+- You are a **designer and analyst**, not an implementer — do NOT write implementation code
+- Do NOT modify any files in the repository
+- Focus on the **what** and **why**, not the **how** of implementation
+- Ground your analysis in the actual codebase, not hypotheticals
+`
+
 // builtInDefs maps agent names to their built-in default definitions.
 var builtInDefs = map[AgentName]string{
 	AgentAutopilot: defaultAgentDef,
 	AgentReviewer:  defaultReviewerDef,
+	AgentDesigner:  defaultDesignerDef,
 }
 
 // DetectAgentDef probes the three-tier failover chain without writing anything.
@@ -451,7 +568,7 @@ func toCliAllowedTools(tools []string) string {
 
 // renderTaskContext builds a minimal prompt with only dynamic per-task context.
 // Used when a .claude/agents/autopilot.md agent definition provides the behavioral instructions.
-func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, rw *relatedWork) string {
+func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, rw *relatedWork, issueComments string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Task Context\n\n")
@@ -460,6 +577,12 @@ func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testComm
 
 	if task.IssueBody != "" {
 		b.WriteString(task.IssueBody)
+		b.WriteString("\n\n")
+	}
+
+	if issueComments != "" {
+		b.WriteString("## Issue Discussion\n\n")
+		b.WriteString(issueComments)
 		b.WriteString("\n\n")
 	}
 
@@ -492,7 +615,7 @@ func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testComm
 
 // renderResumeTaskContext builds a continuation prompt for resuming work in an existing worktree.
 // It includes context about the prior failure and instructs the agent to pick up where it left off.
-func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, rw *relatedWork) string {
+func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, rw *relatedWork, issueComments string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Resuming Previous Work\n\n")
@@ -508,26 +631,148 @@ func renderResumeTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, te
 	b.WriteString("continue from where it left off, and open a PR when ready.\n\n")
 
 	// Include the standard task context.
-	b.WriteString(renderTaskContext(task, baseBranch, owner, repo, testCommand, rw))
+	b.WriteString(renderTaskContext(task, baseBranch, owner, repo, testCommand, rw, issueComments))
 
 	return b.String()
 }
 
 // renderManualSessionPrompt builds a prompt for a manual work session.
-// Claude fetches the issue details, summarizes the work, then awaits user instructions.
-func renderManualSessionPrompt(task *db.AutopilotTask, owner, repo string, rw *relatedWork) string {
+// All context is pre-loaded so the agent starts ready for conversation.
+func renderManualSessionPrompt(task *db.AutopilotTask, owner, repo, projectGoal string, rw *relatedWork, issueComments, claudeMD string) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "You are starting a manual work session for issue #%d in %s/%s.\n\n", task.IssueNumber, owner, repo)
-	fmt.Fprintf(&b, "1. Run `gh issue view %d -R %s/%s` to fetch the full issue details\n", task.IssueNumber, owner, repo)
-	b.WriteString("2. Summarize the issue and what needs to be done\n")
-	b.WriteString("3. Then tell the user you're ready for their instructions\n\n")
-	fmt.Fprintf(&b, "Worktree: %s\n", task.WorktreePath)
+	fmt.Fprintf(&b, "You are starting a manual work session for issue #%d in %s/%s.\n", task.IssueNumber, owner, repo)
+	b.WriteString("All context you need is provided below. Do NOT fetch the issue or explore yet.\n")
+	b.WriteString("Confirm you understand the objective, then await the user's instructions.\n\n")
+
+	fmt.Fprintf(&b, "## Issue #%d — %s\n\n", task.IssueNumber, task.IssueTitle)
+
+	if task.IssueBody != "" {
+		b.WriteString(task.IssueBody)
+		b.WriteString("\n\n")
+	}
+
+	if issueComments != "" {
+		b.WriteString("## Issue Discussion\n\n")
+		b.WriteString(issueComments)
+		b.WriteString("\n\n")
+	}
+
+	if projectGoal != "" {
+		fmt.Fprintf(&b, "## Project Goal\n\n%s\n\n", projectGoal)
+	}
+
+	if claudeMD != "" {
+		b.WriteString("## Project Architecture (CLAUDE.md)\n\n")
+		b.WriteString(claudeMD)
+		b.WriteString("\n\n")
+	}
+
+	fmt.Fprintf(&b, "## Worktree\n\n")
+	fmt.Fprintf(&b, "Path: %s\n", task.WorktreePath)
 	fmt.Fprintf(&b, "Branch: %s\n\n", task.Branch)
 
 	if related := renderRelatedWork(task, rw); related != "" {
 		b.WriteString(related)
 	}
+
+	return b.String()
+}
+
+// renderReviewSessionPrompt builds a prompt for an interactive review session.
+// All context is pre-loaded so the agent starts ready for conversation.
+func renderReviewSessionPrompt(task *db.AutopilotTask, owner, repo, projectGoal string, rw *relatedWork, issueComments, prDetails, prDiff, claudeMD string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "You are starting a review session for PR #%d (issue #%d) in %s/%s.\n", task.PRNumber, task.IssueNumber, owner, repo)
+	b.WriteString("All context you need is provided below. Do NOT fetch the PR or issue yet.\n")
+	b.WriteString("Confirm you understand the PR, then await the user's review instructions.\n\n")
+
+	fmt.Fprintf(&b, "## Issue #%d — %s\n\n", task.IssueNumber, task.IssueTitle)
+
+	if task.IssueBody != "" {
+		b.WriteString(task.IssueBody)
+		b.WriteString("\n\n")
+	}
+
+	if issueComments != "" {
+		b.WriteString("## Issue Discussion\n\n")
+		b.WriteString(issueComments)
+		b.WriteString("\n\n")
+	}
+
+	if prDetails != "" {
+		fmt.Fprintf(&b, "## PR #%d Details\n\n", task.PRNumber)
+		b.WriteString(prDetails)
+		b.WriteString("\n\n")
+	}
+
+	if prDiff != "" {
+		fmt.Fprintf(&b, "## PR #%d Diff\n\n```diff\n", task.PRNumber)
+		b.WriteString(prDiff)
+		b.WriteString("```\n\n")
+	}
+
+	if projectGoal != "" {
+		fmt.Fprintf(&b, "## Project Goal\n\n%s\n\n", projectGoal)
+	}
+
+	if claudeMD != "" {
+		b.WriteString("## Project Architecture (CLAUDE.md)\n\n")
+		b.WriteString(claudeMD)
+		b.WriteString("\n\n")
+	}
+
+	fmt.Fprintf(&b, "## Worktree\n\n")
+	fmt.Fprintf(&b, "Path: %s\n", task.WorktreePath)
+	fmt.Fprintf(&b, "Branch: %s\n\n", task.Branch)
+
+	if related := renderRelatedWork(task, rw); related != "" {
+		b.WriteString(related)
+	}
+
+	return b.String()
+}
+
+// renderDesignSessionPrompt builds a prompt for a design interview session.
+// All context is pre-loaded so the agent can start immediately without exploring.
+func renderDesignSessionPrompt(task *db.AutopilotTask, owner, repo, projectGoal string, rw *relatedWork, issueComments, claudeMD string) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "You are a design interview agent for issue #%d in %s/%s.\n", task.IssueNumber, owner, repo)
+	b.WriteString("All context you need is provided below. Do NOT explore the codebase or fetch anything yet.\n\n")
+	b.WriteString("Confirm you understand the objective, then await the user's first message.\n\n")
+
+	fmt.Fprintf(&b, "## Issue #%d — %s\n\n", task.IssueNumber, task.IssueTitle)
+
+	if task.IssueBody != "" {
+		b.WriteString(task.IssueBody)
+		b.WriteString("\n\n")
+	}
+
+	if issueComments != "" {
+		b.WriteString("## Issue Discussion\n\n")
+		b.WriteString(issueComments)
+		b.WriteString("\n\n")
+	}
+
+	if projectGoal != "" {
+		fmt.Fprintf(&b, "## Project Goal\n\n%s\n\n", projectGoal)
+	}
+
+	if claudeMD != "" {
+		b.WriteString("## Project Architecture (CLAUDE.md)\n\n")
+		b.WriteString(claudeMD)
+		b.WriteString("\n\n")
+	}
+
+	if related := renderRelatedWork(task, rw); related != "" {
+		b.WriteString(related)
+	}
+
+	fmt.Fprintf(&b, "## Commands (for later use)\n\n")
+	fmt.Fprintf(&b, "Post comment: gh issue comment %d -R %s/%s --body \"<plan>\"\n", task.IssueNumber, owner, repo)
+	fmt.Fprintf(&b, "Create sub-issue: gh issue create -R %s/%s --title \"<title>\" --body \"<body>\"\n", owner, repo)
 
 	return b.String()
 }
@@ -630,7 +875,7 @@ func detectTestCommand(repoDir string) string {
 // renderReviewTaskContext builds a prompt with review-specific context for the reviewer agent.
 // It provides the PR number, issue details, project goal, test command, dependency graph,
 // sibling task statuses, and commands for the review workflow.
-func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, rw *relatedWork) string {
+func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, rw *relatedWork, issueComments string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "## Review Context\n\n")
@@ -644,6 +889,12 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 	if task.IssueBody != "" {
 		fmt.Fprintf(&b, "## Issue Description\n\n")
 		b.WriteString(task.IssueBody)
+		b.WriteString("\n\n")
+	}
+
+	if issueComments != "" {
+		b.WriteString("## Issue Discussion\n\n")
+		b.WriteString(issueComments)
 		b.WriteString("\n\n")
 	}
 
@@ -673,8 +924,8 @@ func renderReviewTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, pr
 }
 
 // buildReviewClaudeArgs constructs the CLI arguments for launching a reviewer agent.
-func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork) []string {
-	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, testCommand, rw)
+func buildReviewClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, projectGoal, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork, issueComments string) []string {
+	prompt := renderReviewTaskContext(task, baseBranch, owner, repo, projectGoal, testCommand, rw, issueComments)
 	return []string{
 		"--agent", "reviewer",
 		"-p",

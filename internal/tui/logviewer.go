@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -126,9 +125,7 @@ func (m *Model) copyLogPath() tea.Cmd {
 		return nil
 	}
 
-	cmd := exec.Command("pbcopy")
-	cmd.Stdin = strings.NewReader(m.logViewerTask.AgentLog)
-	if err := cmd.Run(); err != nil {
+	if err := copyToClipboard(m.logViewerTask.AgentLog); err != nil {
 		m.logViewerStatus = fmt.Sprintf("Copy failed: %v", err)
 	} else {
 		m.logViewerStatus = fmt.Sprintf("Copied: %s", m.logViewerTask.AgentLog)

@@ -259,22 +259,25 @@ func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSe
 		}
 	}
 
-	// Build a review prompt.
-	prompt := fmt.Sprintf(
-		"You are starting a review session for PR #%d (issue #%d) in %s/%s.\n\n"+
-			"1. Run `gh pr view %d -R %s/%s` to fetch the PR details\n"+
-			"2. Run `gh pr diff %d -R %s/%s` to see the changes\n"+
-			"3. Summarize what the PR does and note any concerns\n"+
-			"4. Then tell the user you're ready for their review instructions\n\n"+
-			"Worktree: %s\nBranch: %s",
-		task.PRNumber, task.IssueNumber, s.owner, s.repo,
-		task.PRNumber, s.owner, s.repo,
-		task.PRNumber, s.owner, s.repo,
-		task.WorktreePath, task.Branch,
-	)
+	// Pre-fetch all context so the agent starts ready for conversation.
+	issueComments := s.fetchIssueComments(ctx, task.IssueNumber, task.WorktreePath)
+	prDetails := s.fetchPRDetails(ctx, task.PRNumber, task.WorktreePath)
+	prDiff := s.fetchPRDiff(ctx, task.PRNumber, task.WorktreePath)
+	claudeMD := s.readClaudeMD(task.WorktreePath)
 
-	// Launch claude -p with stream-json so we can capture the session ID.
-	// Use --allowedTools for least-privilege access scoped to review needs.
+	// Build related work context — reuse the already-loaded tasks as siblings.
+	var rw *relatedWork
+	dg, dgErr := s.store.GetDepGraph(s.project.ID)
+	if dgErr == nil || len(tasks) > 0 {
+		rw = &relatedWork{}
+		if dgErr == nil && dg != nil {
+			rw.depGraph = dg.GraphJSON
+		}
+		rw.siblingTasks = tasks
+	}
+
+	prompt := renderReviewSessionPrompt(task, s.owner, s.repo, s.project.GoalDescription, rw, issueComments, prDetails, prDiff, claudeMD)
+
 	allowedTools := resolveAllowedTools(s.repoDir)
 	args := []string{
 		"-p",
@@ -392,22 +395,22 @@ func (s *Supervisor) ManualSession(ctx context.Context, taskID int64) (*ReviewSe
 		return nil, fmt.Errorf("update task worktree: %w", err)
 	}
 
-	// Build related work context.
+	// Pre-fetch all context so the agent starts ready for conversation.
+	issueComments := s.fetchIssueComments(ctx, task.IssueNumber, worktreePath)
+	claudeMD := s.readClaudeMD(worktreePath)
+
+	// Build related work context — reuse the already-loaded tasks as siblings.
 	var rw *relatedWork
 	dg, dgErr := s.store.GetDepGraph(s.project.ID)
-	siblings, sibErr := s.store.GetAutopilotTasks(s.project.ID)
-	if dgErr == nil || sibErr == nil {
+	if dgErr == nil || len(tasks) > 0 {
 		rw = &relatedWork{}
 		if dgErr == nil && dg != nil {
 			rw.depGraph = dg.GraphJSON
 		}
-		if sibErr == nil {
-			rw.siblingTasks = siblings
-		}
+		rw.siblingTasks = tasks
 	}
 
-	// Build manual session prompt.
-	prompt := renderManualSessionPrompt(task, s.owner, s.repo, rw)
+	prompt := renderManualSessionPrompt(task, s.owner, s.repo, s.project.GoalDescription, rw, issueComments, claudeMD)
 
 	// Launch claude -p with stream-json so we can capture the session ID.
 	allowedTools := resolveAllowedTools(s.repoDir)
@@ -465,6 +468,190 @@ func (s *Supervisor) ManualSession(ctx context.Context, taskID int64) (*ReviewSe
 		SessionID:    sessionID,
 		IssueNumber:  task.IssueNumber,
 	}, nil
+}
+
+// DesignSession creates a worktree for a task and launches a Claude session with the
+// designer agent for an interactive design interview. Works on any non-terminal task status.
+// Returns the session ID so the user can resume it.
+func (s *Supervisor) DesignSession(ctx context.Context, taskID int64) (*ReviewSessionResult, error) {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %d not found", taskID)
+	}
+
+	home, _ := os.UserHomeDir()
+	worktreeBase := filepath.Join(home, ".agent-minder", "worktrees", s.project.Name)
+	worktreePath := filepath.Join(worktreeBase, fmt.Sprintf("issue-%d", task.IssueNumber))
+	branch := fmt.Sprintf("design/issue-%d", task.IssueNumber)
+
+	baseBranch := s.project.AutopilotBaseBranch
+	if baseBranch == "" {
+		baseBranch, _ = gitpkg.DefaultBranch(s.repoDir)
+	}
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
+		s.gitSetupMu.Lock()
+		_ = gitpkg.Fetch(s.repoDir)
+		_ = gitpkg.DeleteBranch(s.repoDir, branch)
+		gitErr := gitpkg.WorktreeAdd(s.repoDir, worktreePath, branch, "origin/"+baseBranch)
+		s.gitSetupMu.Unlock()
+		if gitErr != nil {
+			return nil, fmt.Errorf("create worktree: %w", gitErr)
+		}
+	}
+
+	// Persist worktree info on the task (without changing status).
+	task.WorktreePath = worktreePath
+	task.Branch = branch
+	if err := s.store.UpdateAutopilotTaskWorktree(task.ID, worktreePath, branch); err != nil {
+		return nil, fmt.Errorf("update task worktree: %w", err)
+	}
+
+	// Reuse the already-loaded tasks as siblings for related work context.
+	var rw *relatedWork
+	dg, dgErr := s.store.GetDepGraph(s.project.ID)
+	if dgErr == nil || len(tasks) > 0 {
+		rw = &relatedWork{}
+		if dgErr == nil && dg != nil {
+			rw.depGraph = dg.GraphJSON
+		}
+		rw.siblingTasks = tasks
+	}
+
+	// Pre-fetch issue comments and CLAUDE.md so the agent has full context
+	// without needing to explore — the session starts ready for conversation.
+	issueComments := s.fetchIssueComments(ctx, task.IssueNumber, worktreePath)
+	claudeMD := s.readClaudeMD(worktreePath)
+
+	prompt := renderDesignSessionPrompt(task, s.owner, s.repo, s.project.GoalDescription, rw, issueComments, claudeMD)
+
+	if _, err := ensureAgentDefByName(worktreePath, AgentDesigner); err != nil {
+		debugLog("design-session: ensure agent def", "error", err)
+	}
+
+	allowedTools := resolveAllowedTools(s.repoDir)
+	args := []string{
+		"--agent", "designer",
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--max-turns", "3",
+		"--allowedTools", toCliAllowedTools(allowedTools),
+		"--", prompt,
+	}
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = worktreePath
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude: %w", err)
+	}
+
+	// Parse stream-json output for session_id from the init event.
+	var sessionID string
+	scanner := json.NewDecoder(stdout)
+	for scanner.More() {
+		var raw json.RawMessage
+		if err := scanner.Decode(&raw); err != nil {
+			break
+		}
+		var initEvt struct {
+			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal(raw, &initEvt) == nil && initEvt.Type == "system" && initEvt.Subtype == "init" && initEvt.SessionID != "" {
+			sessionID = initEvt.SessionID
+		}
+	}
+
+	_ = cmd.Wait()
+
+	if sessionID == "" {
+		return &ReviewSessionResult{
+			WorktreePath: worktreePath,
+			IssueNumber:  task.IssueNumber,
+		}, nil
+	}
+
+	return &ReviewSessionResult{
+		WorktreePath: worktreePath,
+		SessionID:    sessionID,
+		IssueNumber:  task.IssueNumber,
+	}, nil
+}
+
+// fetchIssueComments shells out to gh to get the full issue view with comments.
+// Returns empty string on any error — the design session still works, just with less context.
+func (s *Supervisor) fetchIssueComments(ctx context.Context, issueNumber int, workDir string) string {
+	cmd := exec.CommandContext(ctx, "gh", "issue", "view", strconv.Itoa(issueNumber),
+		"--comments", "-R", s.owner+"/"+s.repo)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+	out, err := cmd.Output()
+	if err != nil {
+		debugLog("design-session: fetch issue comments", "error", err, "issue", issueNumber)
+		return ""
+	}
+	return string(out)
+}
+
+// fetchPRDetails shells out to gh to get PR metadata (title, body, status, files).
+func (s *Supervisor) fetchPRDetails(ctx context.Context, prNumber int, workDir string) string {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(prNumber),
+		"-R", s.owner+"/"+s.repo)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+	out, err := cmd.Output()
+	if err != nil {
+		debugLog("review-session: fetch PR details", "error", err, "pr", prNumber)
+		return ""
+	}
+	return string(out)
+}
+
+// fetchPRDiff shells out to gh to get the PR diff.
+func (s *Supervisor) fetchPRDiff(ctx context.Context, prNumber int, workDir string) string {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "diff", strconv.Itoa(prNumber),
+		"-R", s.owner+"/"+s.repo)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+	out, err := cmd.Output()
+	if err != nil {
+		debugLog("review-session: fetch PR diff", "error", err, "pr", prNumber)
+		return ""
+	}
+	return string(out)
+}
+
+// readClaudeMD reads the CLAUDE.md file from the worktree root.
+// Returns empty string if the file doesn't exist or can't be read.
+func (s *Supervisor) readClaudeMD(worktreePath string) string {
+	data, err := os.ReadFile(filepath.Join(worktreePath, "CLAUDE.md"))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // RestartTask cleans up a bailed or stopped task and re-queues it.
@@ -2556,11 +2743,14 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		}
 	}
 
+	// Pre-fetch issue comments so the agent has full context without spending a turn.
+	issueComments := s.fetchIssueComments(ctx, task.IssueNumber, task.WorktreePath)
+
 	var args []string
 	if isResume {
-		args = buildResumeClaudeArgs(task, baseBranch, s.owner, s.repo, testCommand, maxTurns, maxBudget, allowedTools, rw)
+		args = buildResumeClaudeArgs(task, baseBranch, s.owner, s.repo, testCommand, maxTurns, maxBudget, allowedTools, rw, issueComments)
 	} else {
-		args = buildClaudeArgs(task, baseBranch, s.owner, s.repo, testCommand, maxTurns, maxBudget, allowedTools, rw)
+		args = buildClaudeArgs(task, baseBranch, s.owner, s.repo, testCommand, maxTurns, maxBudget, allowedTools, rw, issueComments)
 	}
 
 	debugStep := "launch"
@@ -2942,7 +3132,10 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 		}
 	}
 
-	args := buildReviewClaudeArgs(task, baseBranch, s.owner, s.repo, projectGoal, testCommand, maxTurns, maxBudget, allowedTools, rw)
+	// Pre-fetch issue comments so the reviewer has full context without spending a turn.
+	issueComments := s.fetchIssueComments(ctx, task.IssueNumber, task.WorktreePath)
+
+	args := buildReviewClaudeArgs(task, baseBranch, s.owner, s.repo, projectGoal, testCommand, maxTurns, maxBudget, allowedTools, rw, issueComments)
 
 	debugLog("review agent command",
 		"stage", "autopilot", "step", "review-launch",
@@ -3348,8 +3541,8 @@ var userHomeDir = os.UserHomeDir
 // Instead of --dangerously-skip-permissions, each tool from allowedTools is
 // passed as a separate --allowedTools flag, giving the agent least-privilege
 // access scoped to the tools it actually needs.
-func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork) []string {
-	prompt := renderTaskContext(task, baseBranch, owner, repo, testCommand, rw)
+func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork, issueComments string) []string {
+	prompt := renderTaskContext(task, baseBranch, owner, repo, testCommand, rw, issueComments)
 	return []string{
 		"--agent", "autopilot",
 		"-p",
@@ -3364,8 +3557,8 @@ func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, testComman
 
 // buildResumeClaudeArgs constructs the argument list for resuming a claude agent
 // in an existing worktree. Uses a continuation prompt instead of a fresh start prompt.
-func buildResumeClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork) []string {
-	prompt := renderResumeTaskContext(task, baseBranch, owner, repo, testCommand, rw)
+func buildResumeClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork, issueComments string) []string {
+	prompt := renderResumeTaskContext(task, baseBranch, owner, repo, testCommand, rw, issueComments)
 	return []string{
 		"--agent", "autopilot",
 		"-p",
