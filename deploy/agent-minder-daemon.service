@@ -1,0 +1,48 @@
+[Unit]
+Description=agent-minder deploy daemon
+Documentation=https://github.com/aptx-health/agent-minder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minder
+Group=minder
+WorkingDirectory=/opt/agent-minder/repo
+
+# Load secrets from environment file (create from agent-minder.env.example)
+EnvironmentFile=/etc/agent-minder/agent-minder.env
+
+ExecStart=/usr/local/bin/agent-minder deploy watch \
+    --milestone "${WATCH_MILESTONE}" \
+    --max-agents ${MAX_AGENTS:-5} \
+    --max-turns ${MAX_TURNS:-150} \
+    --max-budget ${MAX_BUDGET:-10.00} \
+    --total-budget ${TOTAL_BUDGET:-50.00} \
+    --poll-interval ${POLL_INTERVAL:-300} \
+    --serve ${SERVE_ADDR:-:7749} \
+    --api-key "${MINDER_API_KEY}" \
+    --daemon \
+    --deploy-id "${DEPLOY_ID:-vps-daemon}"
+
+Restart=on-failure
+RestartSec=10
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/minder/.agent-minder
+ReadWritePaths=/opt/agent-minder/repo
+PrivateTmp=true
+
+# Logging to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=agent-minder
+
+# Resource limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **VPS deployment guide + systemd units**: Complete deployment documentation for running agent-minder watch mode on Ubuntu VPS, including systemd service units for the daemon and Discord bot, install script, environment file template, logrotate config, firewall/Tailscale guidance, and troubleshooting reference (#287)
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed

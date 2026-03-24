@@ -1,0 +1,11 @@
+/home/minder/.agent-minder/agents/*.log
+/home/minder/.agent-minder/debug.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su minder minder
+}
