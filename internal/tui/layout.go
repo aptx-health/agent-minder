@@ -389,8 +389,16 @@ func (m Model) renderAutopilotRunningContent() string {
 				b.WriteString(mutedStyle().Render(fmt.Sprintf("  Slot %d: %s", slot.SlotNum, label)))
 			} else {
 				elapsed := slot.RunningFor.Round(time.Second)
-				line := fmt.Sprintf("  Slot %d: #%d  %s  %d steps", slot.SlotNum, slot.IssueNumber, elapsed, slot.StepCount)
-				b.WriteString(statusRunningStyle().Render(line))
+				prefix := ""
+				if slot.IsReview {
+					prefix = "R: "
+				}
+				line := fmt.Sprintf("  Slot %d: %s#%d  %s  %d steps", slot.SlotNum, prefix, slot.IssueNumber, elapsed, slot.StepCount)
+				if slot.IsReview {
+					b.WriteString(reviewingStyle().Render(line))
+				} else {
+					b.WriteString(statusRunningStyle().Render(line))
+				}
 				if slot.CurrentTool != "" {
 					b.WriteString("\n")
 					toolLine := fmt.Sprintf("         %s", slot.CurrentTool)
@@ -404,6 +412,12 @@ func (m Model) renderAutopilotRunningContent() string {
 					b.WriteString(mutedStyle().Render(toolLine))
 				}
 			}
+			b.WriteString("\n")
+		}
+		// Risk summary line for reviewed tasks.
+		riskSummary := m.renderRiskSummary()
+		if riskSummary != "" {
+			b.WriteString(riskSummary)
 			b.WriteString("\n")
 		}
 	}
@@ -485,18 +499,20 @@ func (m *Model) rebuildAutopilotTaskContent() {
 		return
 	}
 
-	// Sort tasks by status priority: running → queued → blocked → manual → review → done → failed → bailed → skipped.
+	// Sort tasks by status priority: running → reviewing → queued → blocked → manual → review → reviewed → done → failed → bailed → skipped.
 	statusOrder := map[string]int{
-		"running": 0,
-		"queued":  1,
-		"blocked": 2,
-		"manual":  3,
-		"review":  4,
-		"done":    5,
-		"failed":  6,
-		"bailed":  7,
-		"stopped": 8,
-		"skipped": 9,
+		"running":   0,
+		"reviewing": 1,
+		"queued":    2,
+		"blocked":   3,
+		"manual":    4,
+		"review":    5,
+		"reviewed":  6,
+		"done":      7,
+		"failed":    8,
+		"bailed":    9,
+		"stopped":   10,
+		"skipped":   11,
 	}
 	sortedTasks := make([]db.AutopilotTask, len(tasks))
 	copy(sortedTasks, tasks)
@@ -555,6 +571,30 @@ func (m *Model) rebuildAutopilotTaskContent() {
 		case "review":
 			if t.PRNumber > 0 {
 				extra = fmt.Sprintf("PR #%d", t.PRNumber)
+			}
+		case "reviewing":
+			if t.PRNumber > 0 {
+				extra = fmt.Sprintf("PR #%d", t.PRNumber)
+			}
+			if t.StartedAt != "" {
+				if started, err := time.Parse(time.RFC3339, t.StartedAt); err == nil {
+					if extra != "" {
+						extra += "  "
+					}
+					extra += time.Since(started).Round(time.Second).String()
+				}
+			}
+		case "reviewed":
+			if t.PRNumber > 0 {
+				extra = fmt.Sprintf("PR #%d", t.PRNumber)
+			}
+			if t.ReviewRisk != nil {
+				risk := *t.ReviewRisk
+				riskStr := riskStyle(risk).Render(risk)
+				if extra != "" {
+					extra += "  "
+				}
+				extra += riskStr
 			}
 		case "running":
 			if t.StartedAt != "" {
@@ -710,9 +750,16 @@ func (m Model) renderTaskDetail() string {
 		b.WriteString("\n")
 	}
 
+	// Review risk (shown for reviewed tasks).
+	if task.ReviewRisk != nil && *task.ReviewRisk != "" {
+		risk := *task.ReviewRisk
+		fmt.Fprintf(&b, "  Risk: %s", riskStyle(risk).Render(risk))
+		b.WriteString("\n")
+	}
+
 	// Cost (shown for completed tasks).
 	switch task.Status {
-	case "done", "bailed", "review", "stopped", "failed":
+	case "done", "bailed", "review", "reviewing", "reviewed", "stopped", "failed":
 		if task.CostUSD > 0 {
 			b.WriteString(mutedStyle().Render(fmt.Sprintf("  Cost: $%.2f", task.CostUSD)))
 		} else {
@@ -728,7 +775,7 @@ func (m Model) renderTaskDetail() string {
 	}
 
 	// Runtime.
-	if task.Status == "running" && task.StartedAt != "" {
+	if (task.Status == "running" || task.Status == "reviewing") && task.StartedAt != "" {
 		if started, err := time.Parse(time.RFC3339, task.StartedAt); err == nil {
 			elapsed := time.Since(started).Round(time.Second)
 			b.WriteString(statusRunningStyle().Render(fmt.Sprintf("  Running for %s", elapsed)))
@@ -750,6 +797,10 @@ func (m Model) taskStatusDisplay(status string) string {
 		return mutedStyle().Render("\u25cc blocked")
 	case "review":
 		return broadcastStyle().Render("\u25ce review ")
+	case "reviewing":
+		return reviewingStyle().Render("\u25cf review\u2026")
+	case "reviewed":
+		return statusRunningStyle().Render("\u25c9 reviewed")
 	case "done":
 		return statusRunningStyle().Render("\u2713 done   ")
 	case "failed":
@@ -765,6 +816,42 @@ func (m Model) taskStatusDisplay(status string) string {
 	default:
 		return mutedStyle().Render(fmt.Sprintf("  %-7s", status))
 	}
+}
+
+// renderRiskSummary returns a one-line summary of reviewed task risk tiers.
+// Returns empty string if no reviewed tasks exist.
+func (m Model) renderRiskSummary() string {
+	var lowRisk, needsTesting, suspect int
+	for _, t := range m.autopilotTasks {
+		if t.Status != "reviewed" && t.Status != "done" {
+			continue
+		}
+		if t.ReviewRisk == nil {
+			continue
+		}
+		switch *t.ReviewRisk {
+		case "low-risk":
+			lowRisk++
+		case "needs-testing":
+			needsTesting++
+		case "suspect":
+			suspect++
+		}
+	}
+	if lowRisk+needsTesting+suspect == 0 {
+		return ""
+	}
+	parts := []string{}
+	if lowRisk > 0 {
+		parts = append(parts, riskStyle("low-risk").Render(fmt.Sprintf("%d low-risk", lowRisk)))
+	}
+	if needsTesting > 0 {
+		parts = append(parts, riskStyle("needs-testing").Render(fmt.Sprintf("%d needs-testing", needsTesting)))
+	}
+	if suspect > 0 {
+		parts = append(parts, riskStyle("suspect").Render(fmt.Sprintf("%d suspect", suspect)))
+	}
+	return fmt.Sprintf("  Reviewed: %s", strings.Join(parts, mutedStyle().Render(", ")))
 }
 
 // taskFailureReasonSuffix returns a parenthesized failure reason for display, or empty string.
