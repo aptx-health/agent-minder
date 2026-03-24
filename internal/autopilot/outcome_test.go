@@ -23,6 +23,9 @@ func TestParseAgentLog_ResultEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
 	if result.NumTurns != 5 {
 		t.Errorf("NumTurns = %d, want 5", result.NumTurns)
 	}
@@ -95,6 +98,9 @@ more garbage
 	result, err := parseAgentLog(logPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("should still find result event among garbage lines")
 	}
 	if result.NumTurns != 3 {
 		t.Errorf("NumTurns = %d, want 3", result.NumTurns)

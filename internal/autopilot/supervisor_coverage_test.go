@@ -5565,6 +5565,9 @@ func TestCheckLabelChanges_ManualToQueued(t *testing.T) {
 
 	// Verify dep graph updated.
 	dg, _ := store.GetDepGraph(project.ID)
+	if dg == nil {
+		t.Fatal("dep graph should exist")
+	}
 	if !strings.Contains(dg.GraphJSON, `"42":[]`) {
 		t.Errorf("dep graph should have 42:[], got %s", dg.GraphJSON)
 	}

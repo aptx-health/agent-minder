@@ -1,0 +1,10 @@
+version: "2"
+
+linters:
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        - "-SA5011" # t.Fatal is noreturn but staticcheck doesn't recognize it
+        - "-ST1000" # package comments — not enforced in this repo
+        - "-ST1003" # underscore naming — pre-existing in test constants

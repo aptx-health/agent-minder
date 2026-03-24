@@ -318,6 +318,9 @@ func TestPolls(t *testing.T) {
 	}
 
 	last, _ := store.LastPoll(p.ID)
+	if last == nil {
+		t.Fatal("LastPoll returned nil")
+	}
 	if last.NewCommits != 0 {
 		t.Errorf("LastPoll.NewCommits = %d, want 0", last.NewCommits)
 	}
@@ -2240,6 +2243,9 @@ func TestDepGraphCRUD(t *testing.T) {
 	dg, err = store.GetDepGraph(p.ID)
 	if err != nil {
 		t.Fatalf("GetDepGraph after save: %v", err)
+	}
+	if dg == nil {
+		t.Fatal("expected non-nil dep graph after save")
 	}
 	if dg.GraphJSON != `{"42":[],"38":[42]}` {
 		t.Errorf("GraphJSON = %q, want %q", dg.GraphJSON, `{"42":[],"38":[42]}`)
