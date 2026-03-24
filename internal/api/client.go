@@ -102,6 +102,35 @@ func (c *Client) GetTask(id string) (*TaskResponse, error) {
 	return &resp, nil
 }
 
+// AnalysisResponse represents a single poll result from GET /analysis.
+type AnalysisResponse struct {
+	ID             int64  `json:"id"`
+	NewCommits     int    `json:"new_commits"`
+	NewMessages    int    `json:"new_messages"`
+	ConcernsRaised int    `json:"concerns_raised"`
+	Analysis       string `json:"analysis"`
+	BusMessageSent bool   `json:"bus_message_sent"`
+	PolledAt       string `json:"polled_at"`
+}
+
+// TriggerPoll calls POST /analysis/poll on the remote daemon to trigger an on-demand analysis.
+func (c *Client) TriggerPoll() error {
+	return c.post("/analysis/poll", nil)
+}
+
+// GetAnalysis calls GET /analysis on the remote daemon.
+func (c *Client) GetAnalysis(limit int) ([]AnalysisResponse, error) {
+	path := "/analysis"
+	if limit > 0 {
+		path = fmt.Sprintf("/analysis?limit=%d", limit)
+	}
+	var resp []AnalysisResponse
+	if err := c.get(path, &resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 // Stop calls POST /stop on the remote daemon to initiate graceful shutdown.
 func (c *Client) Stop() error {
 	return c.post("/stop", nil)

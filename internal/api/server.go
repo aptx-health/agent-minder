@@ -28,8 +28,9 @@ type Server struct {
 	srv       *http.Server
 
 	// triggerPoll is called to trigger a manual analysis poll cycle.
+	// Returns an error if a poll is already in progress.
 	// May be nil if not wired up.
-	triggerPoll func()
+	triggerPoll func() error
 
 	// stopDaemon is called to initiate graceful daemon shutdown.
 	// May be nil if not wired up.
@@ -51,7 +52,7 @@ type Config struct {
 	DeployID       string
 	APIKey         string
 	BindAddr       string
-	TriggerPoll    func()
+	TriggerPoll    func() error
 	StopDaemon     func()
 	BudgetResume   func()
 	IsBudgetPaused func() bool
@@ -370,7 +371,10 @@ func (s *Server) handleTriggerPoll(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotImplemented, errorResponse{"not_implemented", "poll trigger not wired up"})
 		return
 	}
-	s.triggerPoll()
+	if err := s.triggerPoll(); err != nil {
+		writeJSON(w, http.StatusConflict, errorResponse{"conflict", err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "poll triggered"})
 }
 

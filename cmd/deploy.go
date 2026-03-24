@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/dustinlange/agent-minder/internal/discovery"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
+	"github.com/dustinlange/agent-minder/internal/poller"
 	"github.com/spf13/cobra"
 )
 
@@ -435,6 +437,10 @@ func runDeployDaemon() error {
 	completer := claudecli.NewCLICompleter()
 	supervisor := autopilot.New(store, project, completer, repoDir, owner, repo, ghToken)
 
+	// Create analysis poller (publisher nil — bus publishing optional in daemon mode).
+	analysisPoller := poller.New(store, project, completer, nil)
+	analysisPoller.SetAutopilotDepGraphFunc(supervisor.DepGraph)
+
 	// Signal handling.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -448,8 +454,27 @@ func runDeployDaemon() error {
 		cancel()
 	}()
 
+	// Start the analysis poller (runs status polls on timer, analysis on-demand).
+	analysisPoller.Start(ctx)
+	defer analysisPoller.Stop()
+
 	// Launch — tasks are already queued with empty deps, so they'll fill immediately.
 	supervisor.Launch(ctx)
+
+	// In-progress guard for on-demand analysis trigger.
+	var pollInProgress atomic.Bool
+	triggerPoll := func() error {
+		if !pollInProgress.CompareAndSwap(false, true) {
+			return fmt.Errorf("analysis already in progress")
+		}
+		go func() {
+			defer pollInProgress.Store(false)
+			log.Printf("On-demand analysis poll triggered via API")
+			analysisPoller.PollNow(ctx)
+			log.Printf("On-demand analysis poll completed")
+		}()
+		return nil
+	}
 
 	// Start HTTP API server if --serve is set.
 	var apiServer *api.Server
@@ -463,11 +488,12 @@ func runDeployDaemon() error {
 			apiKeyVal = os.Getenv("MINDER_API_KEY")
 		}
 		apiServer = api.New(api.Config{
-			Store:     store,
-			ProjectID: project.ID,
-			DeployID:  deployID,
-			APIKey:    apiKeyVal,
-			BindAddr:  serveAddr,
+			Store:       store,
+			ProjectID:   project.ID,
+			DeployID:    deployID,
+			APIKey:      apiKeyVal,
+			BindAddr:    serveAddr,
+			TriggerPoll: triggerPoll,
 			StopDaemon: func() {
 				log.Printf("Stop requested via API")
 				supervisor.Stop()
@@ -483,10 +509,17 @@ func runDeployDaemon() error {
 		}()
 	}
 
-	// Drain events to log.
+	// Drain supervisor events to log.
 	go func() {
 		for evt := range supervisor.Events() {
 			log.Printf("[%s] %s", evt.Type, evt.Summary)
+		}
+	}()
+
+	// Drain poller events to log.
+	go func() {
+		for evt := range analysisPoller.Events() {
+			log.Printf("[analysis/%s] %s", evt.Type, evt.Summary)
 		}
 	}()
 
