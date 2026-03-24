@@ -188,7 +188,7 @@ type Model struct {
 	// Viewports for scrollable sections.
 	analysisVP       viewport.Model
 	eventLogVP       viewport.Model
-	analysisExpanded bool // 'e' toggles 3-line vs proportional
+	analysisExpanded bool // 'e' toggles proportional vs 3-line (default: expanded)
 
 	// Tracked items (refreshed on poll results).
 	trackedItems    []db.TrackedItem
@@ -357,6 +357,7 @@ func New(project *db.Project, store *db.Store, p *poller.Poller) Model {
 		analysisVP:       aVP,
 		eventLogVP:       eVP,
 		autopilotTaskVP:  apVP,
+		analysisExpanded: true,
 		lastUserInput:    time.Now(),
 	}
 
