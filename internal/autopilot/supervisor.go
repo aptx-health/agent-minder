@@ -2233,11 +2233,28 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		}
 	}
 
+	testCommand := resolveTestCommand(s.repoDir)
+
+	// Load dependency graph and sibling task statuses so the agent
+	// understands where its issue fits in the broader work.
+	var rw *relatedWork
+	dg, dgErr := s.store.GetDepGraph(s.project.ID)
+	siblings, sibErr := s.store.GetAutopilotTasks(s.project.ID)
+	if dgErr == nil || sibErr == nil {
+		rw = &relatedWork{}
+		if dgErr == nil && dg != nil {
+			rw.depGraph = dg.GraphJSON
+		}
+		if sibErr == nil {
+			rw.siblingTasks = siblings
+		}
+	}
+
 	var args []string
 	if isResume {
-		args = buildResumeClaudeArgs(task, baseBranch, s.owner, s.repo, maxTurns, maxBudget, allowedTools)
+		args = buildResumeClaudeArgs(task, baseBranch, s.owner, s.repo, testCommand, maxTurns, maxBudget, allowedTools, rw)
 	} else {
-		args = buildClaudeArgs(task, baseBranch, s.owner, s.repo, maxTurns, maxBudget, allowedTools)
+		args = buildClaudeArgs(task, baseBranch, s.owner, s.repo, testCommand, maxTurns, maxBudget, allowedTools, rw)
 	}
 
 	debugStep := "launch"
@@ -2568,11 +2585,11 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 	testCommand := resolveTestCommand(s.repoDir)
 
 	// Load dependency graph and sibling task statuses for review context.
-	var rw *reviewRelatedWork
+	var rw *relatedWork
 	dg, err := s.store.GetDepGraph(s.project.ID)
 	tasks, taskErr := s.store.GetAutopilotTasks(s.project.ID)
 	if err == nil || taskErr == nil {
-		rw = &reviewRelatedWork{}
+		rw = &relatedWork{}
 		if err == nil && dg != nil {
 			rw.depGraph = dg.GraphJSON
 		}
@@ -2964,8 +2981,8 @@ var userHomeDir = os.UserHomeDir
 // Instead of --dangerously-skip-permissions, each tool from allowedTools is
 // passed as a separate --allowedTools flag, giving the agent least-privilege
 // access scoped to the tools it actually needs.
-func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, maxTurns int, maxBudget float64, allowedTools []string) []string {
-	prompt := renderTaskContext(task, baseBranch, owner, repo)
+func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork) []string {
+	prompt := renderTaskContext(task, baseBranch, owner, repo, testCommand, rw)
 	return []string{
 		"--agent", "autopilot",
 		"-p",
@@ -2980,8 +2997,8 @@ func buildClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, max
 
 // buildResumeClaudeArgs constructs the argument list for resuming a claude agent
 // in an existing worktree. Uses a continuation prompt instead of a fresh start prompt.
-func buildResumeClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo string, maxTurns int, maxBudget float64, allowedTools []string) []string {
-	prompt := renderResumeTaskContext(task, baseBranch, owner, repo)
+func buildResumeClaudeArgs(task *db.AutopilotTask, baseBranch, owner, repo, testCommand string, maxTurns int, maxBudget float64, allowedTools []string, rw *relatedWork) []string {
+	prompt := renderResumeTaskContext(task, baseBranch, owner, repo, testCommand, rw)
 	return []string{
 		"--agent", "autopilot",
 		"-p",
