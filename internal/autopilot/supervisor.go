@@ -2395,6 +2395,395 @@ func countUnblocked(graph map[string]json.RawMessage, tasks []*db.AutopilotTask)
 	return count
 }
 
+// DaemonDepGraphConfidenceThreshold is the minimum confidence below which a warning concern is emitted.
+const DaemonDepGraphConfidenceThreshold = 0.6
+
+// daemonDepGraphSchema is the JSON schema for structured output from daemon dep graph LLM calls.
+const daemonDepGraphSchema = `{
+  "type": "object",
+  "properties": {
+    "strategy_name": {"type": "string", "description": "Name of the dependency strategy"},
+    "reasoning": {"type": "string", "description": "Explanation of why this strategy was chosen"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score from 0.0 to 1.0"},
+    "graph": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "array", "items": {"type": "integer"}},
+          {"type": "string", "enum": ["skip", "manual"]}
+        ]
+      },
+      "description": "Issue number (string key) mapped to dependency array or skip/manual directive"
+    }
+  },
+  "required": ["strategy_name", "reasoning", "confidence", "graph"],
+  "additionalProperties": false
+}`
+
+// daemonDepGraphResponse is the parsed structured output from a daemon dep graph LLM call.
+type daemonDepGraphResponse struct {
+	StrategyName string                     `json:"strategy_name"`
+	Reasoning    string                     `json:"reasoning"`
+	Confidence   float64                    `json:"confidence"`
+	Graph        map[string]json.RawMessage `json:"graph"`
+}
+
+// BuildDaemonDepGraph generates a single conservative dependency graph for unattended/daemon mode.
+// Unlike buildDepOptions which returns 3 options for interactive selection, this uses --json-schema
+// to produce a single conservative strategy and auto-applies it.
+func (s *Supervisor) BuildDaemonDepGraph(ctx context.Context, tasks []*db.AutopilotTask) (*DepOption, string, float64, error) {
+	// Separate agent tasks from manual tasks.
+	var agentTasks, manualTasks []*db.AutopilotTask
+	for _, t := range tasks {
+		if t.Status == "manual" {
+			manualTasks = append(manualTasks, t)
+		} else {
+			agentTasks = append(agentTasks, t)
+		}
+	}
+
+	if len(agentTasks) == 0 {
+		graph := make(map[string]json.RawMessage, len(manualTasks))
+		for _, t := range manualTasks {
+			graph[strconv.Itoa(t.IssueNumber)] = json.RawMessage(`"manual"`)
+		}
+		return &DepOption{
+			Name:      "No agent tasks",
+			Rationale: "Only manual (non-AI) tasks — watching for completion.",
+			Graph:     graph,
+			Unblocked: 0,
+		}, "Only manual tasks present.", 1.0, nil
+	}
+
+	if len(agentTasks) <= 1 && len(manualTasks) == 0 {
+		graph := make(map[string]json.RawMessage, 1)
+		graph[strconv.Itoa(agentTasks[0].IssueNumber)] = json.RawMessage("[]")
+		return &DepOption{
+			Name:      "No dependencies",
+			Rationale: "Only one task — no dependencies possible.",
+			Graph:     graph,
+			Unblocked: 1,
+		}, "Single task, trivial graph.", 1.0, nil
+	}
+
+	// Build task issue numbers set for quick lookup.
+	taskIssues := make(map[int]bool, len(tasks))
+	for _, t := range tasks {
+		taskIssues[t.IssueNumber] = true
+	}
+
+	// Build issue list for the LLM.
+	var issueList strings.Builder
+	issueList.WriteString("## Issues to be worked on by agents:\n")
+	for _, t := range agentTasks {
+		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+		if t.IssueBody != "" {
+			body := t.IssueBody
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	if len(manualTasks) > 0 {
+		issueList.WriteString("\n## Manual tasks (non-AI, human-driven — can block agent tasks, will be watched for completion):\n")
+		for _, t := range manualTasks {
+			fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+			if t.IssueBody != "" {
+				body := t.IssueBody
+				if len(body) > 200 {
+					body = body[:200] + "..."
+				}
+				fmt.Fprintf(&issueList, "  %s\n", body)
+			}
+		}
+	}
+
+	// Include other tracked issues as context.
+	trackedItems, _ := s.store.GetTrackedItems(s.project.ID)
+	var contextList strings.Builder
+	for _, item := range trackedItems {
+		if taskIssues[item.Number] || item.ItemType != "issue" {
+			continue
+		}
+		fmt.Fprintf(&contextList, "Issue #%d [%s]: %s\n", item.Number, item.State, item.Title)
+	}
+	if contextList.Len() > 0 {
+		issueList.WriteString("\n## Other tracked issues (not being worked on by agents, but may be dependencies):\n")
+		issueList.WriteString(contextList.String())
+	}
+
+	prompt := fmt.Sprintf(`Analyze these GitHub issues and determine dependencies between them.
+This is running in unattended daemon mode — produce a SINGLE conservative dependency strategy.
+
+A dependency means issue B cannot start until issue A is completed (e.g., B builds on A's infrastructure or schema changes).
+Dependencies can include issues from ALL sections — an agent task can depend on a manual task or other tracked issue.
+
+Conservative means: when uncertain whether a dependency exists, prefer to add it. This avoids conflicts from parallel work on related issues. But do NOT add dependencies between clearly unrelated issues.
+
+%s
+The "graph" object:
+- Keys for AGENT tasks: values are arrays of integer issue numbers that must complete first. No deps = empty array.
+- Keys for MANUAL tasks: value MUST be the string "manual".
+- IMPORTANT: Use integer values in dependency arrays, not strings. Agent tasks CAN depend on manual task issue numbers.
+
+Provide a confidence score between 0.0 and 1.0:
+- 1.0 = obvious, clear-cut dependencies
+- 0.7-0.9 = confident analysis with some ambiguity
+- 0.4-0.6 = multiple viable interpretations, low certainty
+- Below 0.4 = largely guessing`, issueList.String())
+
+	depModel := s.project.LLMAnalyzerModel
+	if depModel == "" {
+		depModel = "opus"
+	}
+
+	debugLog("daemon dep graph", "stage", "dep-analysis", "step", "start", "model", depModel, "tasks", len(tasks))
+
+	resp, err := s.completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: "You are analyzing issue dependencies for an unattended CI/CD system. Produce a single conservative dependency graph. Respond using the provided JSON schema.",
+		Prompt:       prompt,
+		Model:        depModel,
+		JSONSchema:   daemonDepGraphSchema,
+		DisableTools: true,
+	})
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("daemon dep graph LLM call: %w", err)
+	}
+
+	var result daemonDepGraphResponse
+	content := resp.Content()
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		debugLog("daemon dep graph parse error", "stage", "dep-analysis", "step", "error", "content", content, "error", err.Error())
+		return nil, "", 0, fmt.Errorf("parse daemon dep graph: %w", err)
+	}
+
+	debugLog("daemon dep graph result", "stage", "dep-analysis", "step", "complete",
+		"strategy", result.StrategyName, "confidence", result.Confidence, "graph_entries", len(result.Graph))
+
+	opt := DepOption{
+		Name:      result.StrategyName,
+		Rationale: result.Reasoning,
+		Graph:     result.Graph,
+		Unblocked: countUnblocked(result.Graph, tasks),
+	}
+
+	return &opt, result.Reasoning, result.Confidence, nil
+}
+
+// daemonIncrementalDepGraphSchema is the JSON schema for incremental daemon dep graph updates.
+const daemonIncrementalDepGraphSchema = `{
+  "type": "object",
+  "properties": {
+    "strategy_name": {"type": "string", "description": "Name of the incremental update strategy"},
+    "reasoning": {"type": "string", "description": "Explanation of dependency decisions for new issues"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score from 0.0 to 1.0"},
+    "graph": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "array", "items": {"type": "integer"}},
+          {"type": "string", "enum": ["skip", "manual"]}
+        ]
+      },
+      "description": "Issue number (string key) mapped to dependency array or skip/manual directive. MUST include all new issues. MAY include existing queued/blocked tasks whose deps changed."
+    }
+  },
+  "required": ["strategy_name", "reasoning", "confidence", "graph"],
+  "additionalProperties": false
+}`
+
+// BuildIncrementalDaemonDepGraph generates incremental dependency analysis for new tasks in daemon mode.
+// It analyzes only new issues (queued with no deps) while providing existing tasks as context.
+// Supports reverse dependency injection — existing queued/blocked tasks can gain new dependencies.
+func (s *Supervisor) BuildIncrementalDaemonDepGraph(ctx context.Context, allTasks []db.AutopilotTask) (*DepOption, string, float64, error) {
+	// Identify new tasks (queued with no deps, added by watch loop).
+	var newTasks []*db.AutopilotTask
+	var existingTasks []*db.AutopilotTask
+	for i := range allTasks {
+		t := &allTasks[i]
+		if t.Status == "queued" && t.Dependencies == "[]" {
+			newTasks = append(newTasks, t)
+		} else {
+			existingTasks = append(existingTasks, t)
+		}
+	}
+
+	if len(newTasks) == 0 {
+		return nil, "", 0, nil
+	}
+
+	// Single new task with no existing tasks — trivial.
+	if len(newTasks) == 1 && len(existingTasks) == 0 {
+		graph := make(map[string]json.RawMessage, 1)
+		graph[strconv.Itoa(newTasks[0].IssueNumber)] = json.RawMessage("[]")
+		return &DepOption{
+			Name:      "No dependencies",
+			Rationale: "Only one new task — no dependencies possible.",
+			Graph:     graph,
+			Unblocked: 1,
+		}, "Single new task, trivial graph.", 1.0, nil
+	}
+
+	// Build prompt with new issues as focus and existing as context.
+	var issueList strings.Builder
+	issueList.WriteString("## NEW issues to analyze dependencies for:\n")
+	for _, t := range newTasks {
+		fmt.Fprintf(&issueList, "Issue #%d: %s\n", t.IssueNumber, t.IssueTitle)
+		if t.IssueBody != "" {
+			body := t.IssueBody
+			if len(body) > 200 {
+				body = body[:200] + "..."
+			}
+			fmt.Fprintf(&issueList, "  %s\n", body)
+		}
+	}
+
+	// Separate existing tasks by mutability.
+	var mutableTasks, immutableTasks []*db.AutopilotTask
+	for _, t := range existingTasks {
+		switch t.Status {
+		case "queued", "blocked":
+			mutableTasks = append(mutableTasks, t)
+		default:
+			immutableTasks = append(immutableTasks, t)
+		}
+	}
+
+	if len(mutableTasks) > 0 {
+		issueList.WriteString("\n## Existing queued/blocked tasks (deps may be updated if a new issue should block them):\n")
+		for _, t := range mutableTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s (current deps: %s)\n", t.IssueNumber, t.Status, t.IssueTitle, t.Dependencies)
+		}
+	}
+	if len(immutableTasks) > 0 {
+		issueList.WriteString("\n## Existing tasks (context only — deps cannot be changed):\n")
+		for _, t := range immutableTasks {
+			fmt.Fprintf(&issueList, "Issue #%d [%s]: %s (deps: %s)\n", t.IssueNumber, t.Status, t.IssueTitle, t.Dependencies)
+		}
+	}
+
+	prompt := fmt.Sprintf(`Analyze these NEW GitHub issues and determine their dependencies.
+This is running in unattended daemon mode — produce a SINGLE conservative dependency analysis.
+
+Also check if any existing queued/blocked tasks should now depend on a new issue (reverse dependencies).
+
+Rules:
+- New issues can depend on existing tasks or other new issues.
+- Existing queued/blocked tasks can gain new dependencies on new issues. If so, include that task's FULL updated dependency array (not just the new dep).
+- Do NOT include entries for existing running/review/done/manual tasks — their deps are locked.
+
+Conservative means: when uncertain whether a dependency exists, prefer to add it.
+
+%s
+The "graph" MUST contain entries for all NEW issues. It MAY also contain entries for existing queued/blocked tasks whose deps changed.
+Values are arrays of integer issue numbers (deps) or "skip"/"manual".
+
+Provide a confidence score between 0.0 and 1.0.`, issueList.String())
+
+	depModel := s.project.LLMAnalyzerModel
+	if depModel == "" {
+		depModel = "opus"
+	}
+
+	debugLog("daemon incremental dep graph", "stage", "dep-analysis", "step", "start", "model", depModel, "new_tasks", len(newTasks))
+
+	resp, err := s.completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: "You are analyzing issue dependencies for an unattended CI/CD system. Produce a single conservative dependency analysis for new issues. Respond using the provided JSON schema.",
+		Prompt:       prompt,
+		Model:        depModel,
+		JSONSchema:   daemonIncrementalDepGraphSchema,
+		DisableTools: true,
+	})
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("daemon incremental dep graph LLM call: %w", err)
+	}
+
+	var result daemonDepGraphResponse
+	content := resp.Content()
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		debugLog("daemon incremental dep graph parse error", "stage", "dep-analysis", "step", "error", "content", content, "error", err.Error())
+		return nil, "", 0, fmt.Errorf("parse daemon incremental dep graph: %w", err)
+	}
+
+	debugLog("daemon incremental dep graph result", "stage", "dep-analysis", "step", "complete",
+		"strategy", result.StrategyName, "confidence", result.Confidence, "graph_entries", len(result.Graph))
+
+	opt := DepOption{
+		Name:      result.StrategyName,
+		Rationale: result.Reasoning,
+		Graph:     result.Graph,
+		Unblocked: countUnblocked(result.Graph, newTasks),
+	}
+
+	return &opt, result.Reasoning, result.Confidence, nil
+}
+
+// ApplyDaemonDepGraph applies a daemon-generated dep graph, stores it with reasoning/confidence,
+// and emits a warning concern if confidence is below the threshold.
+func (s *Supervisor) ApplyDaemonDepGraph(ctx context.Context, opt DepOption, reasoning string, confidence float64) error {
+	// Apply the graph to tasks using the standard method.
+	if err := s.ApplyDepOption(ctx, opt); err != nil {
+		return err
+	}
+
+	// Save with full metadata.
+	graphJSON, _ := json.Marshal(opt.Graph)
+	_ = s.store.SaveDepGraphFull(s.project.ID, string(graphJSON), opt.Name, reasoning, confidence)
+
+	// Emit warning if confidence is low.
+	if confidence > 0 && confidence < DaemonDepGraphConfidenceThreshold {
+		msg := fmt.Sprintf("Low confidence (%.0f%%) dep graph: %s — %s", confidence*100, opt.Name, reasoning)
+		s.emitEvent("warning", msg, nil)
+
+		// Store as a concern for API/TUI visibility.
+		_ = s.store.AddConcern(&db.Concern{ProjectID: s.project.ID, Severity: "warning", Message: msg})
+
+		// Fire notification if configured.
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:    notify.EventAgentError,
+				Project: s.project.Name,
+				Summary: msg,
+			})
+		}
+	}
+
+	return nil
+}
+
+// ApplyIncrementalDaemonDepGraph applies incremental daemon dep analysis, merges into the stored graph,
+// and handles confidence warnings.
+func (s *Supervisor) ApplyIncrementalDaemonDepGraph(ctx context.Context, opt DepOption, reasoning string, confidence float64) error {
+	// Apply using the standard incremental method.
+	if err := s.ApplyIncrementalDepOption(ctx, opt); err != nil {
+		return err
+	}
+
+	// Update stored graph metadata with latest reasoning/confidence.
+	storedGraph, _ := s.store.GetDepGraph(s.project.ID)
+	if storedGraph != nil {
+		_ = s.store.SaveDepGraphFull(s.project.ID, storedGraph.GraphJSON, storedGraph.OptionName, reasoning, confidence)
+	}
+
+	// Emit warning if confidence is low.
+	if confidence > 0 && confidence < DaemonDepGraphConfidenceThreshold {
+		msg := fmt.Sprintf("Low confidence (%.0f%%) incremental dep update: %s — %s", confidence*100, opt.Name, reasoning)
+		s.emitEvent("warning", msg, nil)
+		_ = s.store.AddConcern(&db.Concern{ProjectID: s.project.ID, Severity: "warning", Message: msg})
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:    notify.EventAgentError,
+				Project: s.project.Name,
+				Summary: msg,
+			})
+		}
+	}
+
+	return nil
+}
+
 func (s *Supervisor) fillSlots(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

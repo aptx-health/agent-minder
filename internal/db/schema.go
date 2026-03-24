@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentVersion = 27
+const currentVersion = 28
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -180,6 +180,8 @@ CREATE TABLE IF NOT EXISTS autopilot_dep_graphs (
 	project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 	graph_json  TEXT NOT NULL,
 	option_name TEXT DEFAULT '',
+	reasoning   TEXT DEFAULT '',
+	confidence  REAL DEFAULT 0,
 	created_at  TEXT DEFAULT (datetime('now')),
 	UNIQUE(project_id)
 );
@@ -373,6 +375,12 @@ func migrate(db *sqlx.DB) error {
 	if version < 27 {
 		if err := migrateV27(db); err != nil {
 			return fmt.Errorf("apply migration v27: %w", err)
+		}
+	}
+
+	if version < 28 {
+		if err := migrateV28(db); err != nil {
+			return fmt.Errorf("apply migration v28: %w", err)
 		}
 	}
 
@@ -804,6 +812,19 @@ func migrateV27(db *sqlx.DB) error {
 	_, err := db.Exec(`ALTER TABLE projects ADD COLUMN carried_cost_usd REAL DEFAULT 0`)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("add carried_cost_usd: %w", err)
+	}
+	return nil
+}
+
+func migrateV28(db *sqlx.DB) error {
+	stmts := []struct{ col, ddl string }{
+		{"reasoning", `ALTER TABLE autopilot_dep_graphs ADD COLUMN reasoning TEXT DEFAULT ''`},
+		{"confidence", `ALTER TABLE autopilot_dep_graphs ADD COLUMN confidence REAL DEFAULT 0`},
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s.ddl); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("add %s: %w", s.col, err)
+		}
 	}
 	return nil
 }

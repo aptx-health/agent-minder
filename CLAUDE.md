@@ -89,13 +89,13 @@ Supervisor manages N concurrent Claude Code agents working on GitHub issues in i
 
 **autopilot_tasks**: project_id, issue_number, issue_title, issue_body, dependencies (JSON), status (queued/running/review/reviewing/reviewed/done/bailed/blocked/manual/skipped), worktree_path, branch, pr_number, agent_log, started_at, completed_at, max_turns_override (nullable), max_budget_override (nullable), review_risk (nullable), review_comment_id (nullable) — UNIQUE on project_id+issue_number
 
-**autopilot_dep_graphs**: project_id (UNIQUE), graph_json, option_name, created_at — persists the selected dependency graph across autopilot restarts
+**autopilot_dep_graphs**: project_id (UNIQUE), graph_json, option_name, reasoning, confidence, created_at — persists the selected dependency graph across autopilot restarts; reasoning and confidence populated by daemon mode auto-selection
 
 **completed_items**: project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at — archived from tracked_items when they reach terminal state (only if progress_summary was non-empty)
 
 **Also**: repos, worktrees, topics, concerns (see `schema.go` for full DDL)
 
-Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns), v20 (autopilot_dep_graphs table for persisting dep graphs), v21 (per-task max_turns_override + max_budget_override columns), v23 (review automation: autopilot_auto_merge, review_max_turns/budget on projects; review_risk, review_comment_id on tasks; reviewing/reviewed statuses).
+Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns), v20 (autopilot_dep_graphs table for persisting dep graphs), v21 (per-task max_turns_override + max_budget_override columns), v23 (review automation: autopilot_auto_merge, review_max_turns/budget on projects; review_risk, review_comment_id on tasks; reviewing/reviewed statuses), v28 (daemon dep graph: reasoning + confidence columns on autopilot_dep_graphs).
 
 `Poll.LLMResponse()` accessor returns tier2 > tier1 > raw (backward compat).
 

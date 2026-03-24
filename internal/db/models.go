@@ -271,11 +271,13 @@ type RepoOnboarding struct {
 
 // DepGraph represents a stored dependency graph for an autopilot session.
 type DepGraph struct {
-	ID         int64  `db:"id"`
-	ProjectID  int64  `db:"project_id"`
-	GraphJSON  string `db:"graph_json"`
-	OptionName string `db:"option_name"`
-	CreatedAt  string `db:"created_at"`
+	ID         int64   `db:"id"`
+	ProjectID  int64   `db:"project_id"`
+	GraphJSON  string  `db:"graph_json"`
+	OptionName string  `db:"option_name"`
+	Reasoning  string  `db:"reasoning"`
+	Confidence float64 `db:"confidence"`
+	CreatedAt  string  `db:"created_at"`
 }
 
 // LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.
