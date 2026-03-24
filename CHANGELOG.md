@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Long-lived supervisor**: Supervisor stays alive after all tasks complete instead of exiting — both daemon and TUI modes. Watch loop creates supervisor once at startup; new tasks are inserted as `pending` and ingested by the supervisor's 30-second ticker with incremental dep analysis. TUI autopilot mode stays active with idle slots visible until user explicitly presses `A` to stop. Eliminates dual-goroutine dep graph race conditions. (#336)
+
 ### Added
 - **Automated dep graph resolution for daemon mode**: In watch/unattended mode, the LLM now auto-selects a single conservative dependency strategy using `--json-schema` structured output, eliminating the interactive carousel. Includes `reasoning` and `confidence` fields stored in `autopilot_dep_graphs` for auditability. Low-confidence graphs (below 60%) emit a warning concern and webhook notification but do not block. Incremental dep analysis with reverse dependency injection runs automatically when new issues are discovered by the watch loop. Schema v28 adds `reasoning` and `confidence` columns. (#279)
 - **Observability TUI tab**: New tab (keybinding `4`) showing daily, weekly, and overall project cost breakdowns with per-task cost detail, using live data from the cost aggregation backend (#228)

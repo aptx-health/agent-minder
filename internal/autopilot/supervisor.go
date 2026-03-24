@@ -122,6 +122,7 @@ type Supervisor struct {
 	gitSetupMu      sync.Mutex   // serializes git branch/worktree ops to avoid ref lock contention
 	slots           []*slotState // len == maxAgents; nil = idle
 	active          bool
+	daemonMode      bool // when true, supervisor stays alive even when all work completes
 	paused          bool // when true, fillSlots returns early
 	budgetPaused    bool // when true, budget ceiling was hit — fillSlots returns early
 	budgetWarned    bool // true once the 80% warning has been emitted (avoids repeats)
@@ -182,6 +183,14 @@ func (s *Supervisor) SetNotifier(n *notify.Notifier) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notifier = n
+}
+
+// SetDaemonMode configures the supervisor to stay alive even when all work completes.
+// When true, the supervisor waits for new tasks instead of exiting. Safe to call before Launch().
+func (s *Supervisor) SetDaemonMode(daemon bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.daemonMode = daemon
 }
 
 // Events returns the channel of events for the TUI.
@@ -1690,8 +1699,9 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.checkReviewTasks(ctx)
 				s.checkManualTasks(ctx)
 				labelChanges := s.checkLabelChanges(ctx)
+				ingested := s.ingestPendingTasks(ctx)
 				unblocked := s.unblockSatisfiedTasks()
-				if unblocked > 0 || labelChanges > 0 {
+				if unblocked > 0 || labelChanges > 0 || ingested > 0 {
 					s.fillSlots(ctx)
 				}
 			default:
@@ -1720,7 +1730,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 			if !hasWork {
 				tasks, _ := s.store.GetAutopilotTasks(s.project.ID)
 				for _, t := range tasks {
-					if t.Status == "queued" || t.Status == "review" || t.Status == "reviewing" || t.Status == "reviewed" || t.Status == "manual" || t.Status == "blocked" {
+					if t.Status == "queued" || t.Status == "pending" || t.Status == "review" || t.Status == "reviewing" || t.Status == "reviewed" || t.Status == "manual" || t.Status == "blocked" {
 						hasWork = true
 						break
 					}
@@ -1729,8 +1739,9 @@ func (s *Supervisor) Launch(ctx context.Context) {
 			if !hasWork {
 				s.mu.Lock()
 				isPaused := s.paused
+				isDaemon := s.daemonMode
 				s.mu.Unlock()
-				if isPaused {
+				if isPaused || isDaemon {
 					hasWork = true
 				}
 			}
@@ -3741,6 +3752,72 @@ func formatReviewComment(agentOutput, label string) string {
 
 // unblockSatisfiedTasks re-evaluates blocked tasks and promotes them to queued
 // when all their dependencies are satisfied. Returns the number of tasks unblocked.
+// ingestPendingTasks finds tasks with status "pending" (inserted by the watch loop
+// or other external callers), runs incremental dependency analysis, and transitions
+// them to "queued" or "blocked". Returns the number of tasks ingested.
+//
+// All dep graph mutations happen here inside the supervisor goroutine, naturally
+// serialized with label change detection, unblocking, and other dep graph work.
+//
+// NOTE: After #279 lands, this should call BuildDaemonDepGraph (for initial graph
+// when no stored graph exists) or BuildIncrementalDaemonDepGraph (when adding to
+// an existing graph), then ApplyDaemonDepGraph / ApplyIncrementalDaemonDepGraph
+// for reasoning/confidence storage.
+func (s *Supervisor) ingestPendingTasks(ctx context.Context) int {
+	allTasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0
+	}
+
+	var pending []db.AutopilotTask
+	for _, t := range allTasks {
+		if t.Status == "pending" {
+			pending = append(pending, t)
+		}
+	}
+	if len(pending) == 0 {
+		return 0
+	}
+
+	s.emitEvent("discovered", fmt.Sprintf("Discovered %d new task(s) — analyzing dependencies", len(pending)), nil)
+
+	// Transition pending → queued with empty deps so BuildIncrementalDepOptions
+	// can identify them as new (queued + "[]" deps).
+	for _, t := range pending {
+		_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+	}
+
+	// Re-fetch after status update.
+	allTasks, err = s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return len(pending)
+	}
+
+	// Run incremental dep analysis for the new tasks.
+	options, err := s.BuildIncrementalDepOptions(ctx, allTasks, "")
+	if err != nil {
+		debugLog("ingestPendingTasks: incremental dep analysis failed", "error", err.Error())
+		s.emitEvent("warning", fmt.Sprintf("Dep analysis failed for new tasks: %v — queued without deps", err), nil)
+		return len(pending)
+	}
+
+	if len(options) > 0 {
+		// Auto-select the first (most conservative) option.
+		opt := options[0]
+
+		// Apply using the incremental method — only touches mutable tasks,
+		// handles reverse dep injection, and merges into stored graph.
+		if err := s.ApplyIncrementalDepOption(ctx, opt); err != nil {
+			debugLog("ingestPendingTasks: apply incremental dep option failed", "error", err.Error())
+			s.emitEvent("warning", fmt.Sprintf("Failed to apply dep graph: %v", err), nil)
+		} else {
+			s.emitEvent("info", fmt.Sprintf("Applied dep graph %q for %d new task(s)", opt.Name, len(pending)), nil)
+		}
+	}
+
+	return len(pending)
+}
+
 func (s *Supervisor) unblockSatisfiedTasks() int {
 	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
 	if err != nil {

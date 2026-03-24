@@ -912,14 +912,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rebuildAutopilotTaskContent()
 		if event.Type == "finished" {
-			m.autopilotMode = "completed"
-			// Restore status interval.
-			if m.origPollInterval > 0 {
-				m.poller.SetStatusInterval(m.origPollInterval)
-				m.origPollInterval = 0
+			// If the supervisor was explicitly stopped (via A key), clean up.
+			// Otherwise (daemon mode, all work done), stay in running mode
+			// with idle slots visible.
+			if m.autopilotSupervisor != nil && !m.autopilotSupervisor.IsActive() {
+				m.autopilotMode = "completed"
+				if m.origPollInterval > 0 {
+					m.poller.SetStatusInterval(m.origPollInterval)
+					m.origPollInterval = 0
+				}
+				m.poller.SetAutopilotDepGraphFunc(nil)
+				m.autopilotSupervisor = nil
 			}
-			m.poller.SetAutopilotDepGraphFunc(nil)
-			m.autopilotSupervisor = nil
+			// If supervisor is still active (daemon mode idle), stay in "running".
 		}
 		m.resizeViewports()
 		cmds := []tea.Cmd{listenForAutopilotEvents(m.autopilotSupervisor)}
@@ -2397,6 +2402,9 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 	}
 	m.poller.SetStatusInterval(newInterval)
 
+	// Supervisor stays alive after all tasks complete — shows idle slots.
+	// User presses A to stop explicitly.
+	sup.SetDaemonMode(true)
 	sup.Launch(context.Background())
 
 	// Show temporary notification with autopilot limits.
