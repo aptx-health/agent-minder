@@ -57,6 +57,14 @@ func NewClient(token string) *Client {
 	}
 }
 
+// NewClientWithBaseURL creates a GitHub client pointing at a custom API base URL.
+// Used for testing with httptest servers.
+func NewClientWithBaseURL(token, baseURL string) *Client {
+	c := github.NewClient(nil).WithAuthToken(token)
+	c.BaseURL, _ = c.BaseURL.Parse(baseURL)
+	return &Client{gh: c}
+}
+
 // FetchItem fetches the current status of an issue or PR.
 // It first tries as a PR (to detect merged state), then falls back to issue.
 func (c *Client) FetchItem(ctx context.Context, owner, repo string, number int) (*ItemStatus, error) {
