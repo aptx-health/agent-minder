@@ -36,7 +36,8 @@ func (s *Store) CreateProject(p *Project) error {
 			autopilot_filter_type, autopilot_filter_value, autopilot_max_agents,
 			autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label,
 			autopilot_base_branch, is_deploy,
-			autopilot_auto_merge, autopilot_review_max_turns, autopilot_review_max_budget_usd)
+			autopilot_auto_merge, autopilot_review_max_turns, autopilot_review_max_budget_usd,
+			total_budget_usd, budget_pause_running)
 		VALUES (:name, :goal_type, :goal_description, :refresh_interval_sec,
 			:message_ttl_sec, :auto_enroll_worktrees, :minder_identity, :llm_provider, :llm_model,
 			:llm_summarizer_model, :llm_analyzer_model, :status_interval_sec, :analysis_interval_sec,
@@ -44,7 +45,8 @@ func (s *Store) CreateProject(p *Project) error {
 			:autopilot_filter_type, :autopilot_filter_value, :autopilot_max_agents,
 			:autopilot_max_turns, :autopilot_max_budget_usd, :autopilot_skip_label,
 			:autopilot_base_branch, :is_deploy,
-			:autopilot_auto_merge, :autopilot_review_max_turns, :autopilot_review_max_budget_usd)
+			:autopilot_auto_merge, :autopilot_review_max_turns, :autopilot_review_max_budget_usd,
+			:total_budget_usd, :budget_pause_running)
 	`, p)
 	if err != nil {
 		return fmt.Errorf("insert project: %w", err)
@@ -941,6 +943,34 @@ func (s *Store) ClearAutopilotTasks(projectID int64) error {
 	return err
 }
 
+// BankAndClearAutopilotTasks atomically adds all task costs to the project's
+// carried_cost_usd, then deletes the tasks. This preserves the cost history
+// across task clears (e.g., prepareFresh).
+func (s *Store) BankAndClearAutopilotTasks(projectID int64) error {
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var costSum float64
+	if err := tx.Get(&costSum, `SELECT COALESCE(SUM(cost_usd), 0) FROM autopilot_tasks WHERE project_id = ?`, projectID); err != nil {
+		return fmt.Errorf("sum costs: %w", err)
+	}
+
+	if costSum > 0 {
+		if _, err := tx.Exec(`UPDATE projects SET carried_cost_usd = carried_cost_usd + ? WHERE id = ?`, costSum, projectID); err != nil {
+			return fmt.Errorf("bank costs: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(`DELETE FROM autopilot_tasks WHERE project_id = ?`, projectID); err != nil {
+		return fmt.Errorf("clear tasks: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // ResetStaleAutopilotTasks resets interrupted tasks back to "queued".
 // "running" tasks are always reset (the process is gone).
 // "bailed" tasks are only reset if completed_at is NULL (interrupted before finishing).
@@ -1128,6 +1158,22 @@ func (s *Store) ReviewTasks(projectID int64) ([]AutopilotTask, error) {
 
 // --- Cost Aggregation ---
 
+// TotalSpend returns the cumulative spend for a project: carried cost from
+// previous task batches plus current task costs. Used for budget ceiling checks.
+func (s *Store) TotalSpend(projectID int64) (float64, error) {
+	var total float64
+	err := s.db.Get(&total, `
+		SELECT COALESCE(p.carried_cost_usd, 0) + COALESCE(SUM(t.cost_usd), 0)
+		FROM projects p
+		LEFT JOIN autopilot_tasks t ON t.project_id = p.id
+		WHERE p.id = ?
+	`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("total spend: %w", err)
+	}
+	return total, nil
+}
+
 // DailyCost returns the aggregated cost for a project on a given date (YYYY-MM-DD).
 // Only includes tasks with terminal status (done, bailed, failed, stopped).
 func (s *Store) DailyCost(projectID int64, date string) (*CostSummary, error) {
@@ -1165,15 +1211,17 @@ func (s *Store) WeeklyCost(projectID int64, endDate string) (*CostSummary, error
 	return &cs, nil
 }
 
-// OverallCost returns the aggregated cost for all terminal tasks in a project.
+// OverallCost returns the aggregated cost for all terminal tasks in a project,
+// plus carried cost from previous task batches. Task count reflects current session only.
 func (s *Store) OverallCost(projectID int64) (*CostSummary, error) {
 	var cs CostSummary
 	err := s.db.Get(&cs, `
-		SELECT COALESCE(SUM(cost_usd), 0) AS total_cost,
-		       COUNT(*) AS task_count
-		FROM autopilot_tasks
-		WHERE project_id = ?
-		  AND status IN ('done', 'bailed', 'failed', 'stopped')
+		SELECT COALESCE(p.carried_cost_usd, 0) + COALESCE(SUM(t.cost_usd), 0) AS total_cost,
+		       COUNT(t.id) AS task_count
+		FROM projects p
+		LEFT JOIN autopilot_tasks t ON t.project_id = p.id
+		  AND t.status IN ('done', 'bailed', 'failed', 'stopped')
+		WHERE p.id = ?
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("overall cost: %w", err)

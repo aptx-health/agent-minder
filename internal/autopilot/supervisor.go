@@ -123,6 +123,8 @@ type Supervisor struct {
 	slots           []*slotState // len == maxAgents; nil = idle
 	active          bool
 	paused          bool // when true, fillSlots returns early
+	budgetPaused    bool // when true, budget ceiling was hit — fillSlots returns early
+	budgetWarned    bool // true once the 80% warning has been emitted (avoids repeats)
 	preparedAt      time.Time
 	events          chan Event
 	parentCtx       context.Context // parent context for the session (used by slot goroutines for fillSlots)
@@ -790,9 +792,9 @@ func (s *Supervisor) prepareWithExisting(ctx context.Context, existingTasks []db
 
 // prepareFresh runs the full fresh prepare flow: clear old tasks, convert tracked items, build dep graph.
 func (s *Supervisor) prepareFresh(ctx context.Context, guidance string, agentDef AgentDefSource) (*PrepareResult, error) {
-	// Clean up any leftovers.
-	if err := s.store.ClearAutopilotTasks(s.project.ID); err != nil {
-		return nil, fmt.Errorf("clear autopilot tasks: %w", err)
+	// Bank existing task costs and clean up.
+	if err := s.store.BankAndClearAutopilotTasks(s.project.ID); err != nil {
+		return nil, fmt.Errorf("bank and clear autopilot tasks: %w", err)
 	}
 	_ = s.store.DeleteDepGraph(s.project.ID)
 	s.cleanOrphanedWorktrees()
@@ -1581,6 +1583,105 @@ func (s *Supervisor) Stop() {
 	}
 }
 
+// IsBudgetPaused returns true if the supervisor is paused due to total budget ceiling.
+func (s *Supervisor) IsBudgetPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.budgetPaused
+}
+
+// ResumeBudget clears the budget-paused state so new tasks can launch again.
+func (s *Supervisor) ResumeBudget() {
+	s.mu.Lock()
+	s.budgetPaused = false
+	s.budgetWarned = false
+	s.mu.Unlock()
+	s.emitEvent("info", "Budget pause cleared — resuming task launches", nil)
+}
+
+// checkBudgetCeiling checks total spend against the project's total budget ceiling.
+// If the ceiling is exceeded, it pauses the supervisor. Returns true if budget is exceeded.
+// Must NOT be called with s.mu held.
+func (s *Supervisor) checkBudgetCeiling() bool {
+	ceiling := s.project.TotalBudgetUSD
+	if ceiling <= 0 {
+		return false // No ceiling configured.
+	}
+
+	totalSpend, err := s.store.TotalSpend(s.project.ID)
+	if err != nil {
+		debugLog("checkBudgetCeiling: query failed", "error", err.Error())
+		return false
+	}
+
+	warningThreshold := ceiling * 0.8
+
+	// Single lock acquisition to atomically check-and-set flags, avoiding TOCTOU races
+	// between concurrent calls from fillSlots and inspectOutcome.
+	s.mu.Lock()
+	var sendWarning, sendPause, shouldStopRunning bool
+
+	if totalSpend >= warningThreshold && !s.budgetWarned && !s.budgetPaused {
+		s.budgetWarned = true
+		sendWarning = true
+	}
+
+	if totalSpend >= ceiling && !s.budgetPaused {
+		s.budgetPaused = true
+		sendPause = true
+		shouldStopRunning = s.project.BudgetPauseRunning
+	}
+
+	exceeded := s.budgetPaused
+	s.mu.Unlock()
+
+	// Emit events and notifications outside the lock.
+	if sendWarning {
+		msg := fmt.Sprintf("Budget warning: $%.2f of $%.2f spent (%.0f%%)", totalSpend, ceiling, (totalSpend/ceiling)*100)
+		s.emitEvent("warning", msg, nil)
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:      notify.EventBudgetLimit,
+				Project:   s.project.Name,
+				Summary:   msg,
+				Timestamp: time.Now(),
+			})
+		}
+	}
+
+	if sendPause {
+		msg := fmt.Sprintf("Budget ceiling hit: $%.2f of $%.2f — pausing new task launches", totalSpend, ceiling)
+		s.emitEvent("warning", msg, nil)
+		if s.notifier != nil {
+			s.notifier.Notify(notify.Event{
+				Type:      notify.EventBudgetLimit,
+				Project:   s.project.Name,
+				Summary:   msg,
+				Timestamp: time.Now(),
+			})
+		}
+		if shouldStopRunning {
+			s.stopRunningAgents()
+		}
+	}
+
+	return exceeded
+}
+
+// stopRunningAgents cancels all currently running agent slots.
+// Must NOT be called with s.mu held.
+func (s *Supervisor) stopRunningAgents() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, slot := range s.slots {
+		if slot != nil && slot.cancelFunc != nil {
+			debugLog("stopRunningAgents: stopping slot", "slot", i, "issue", slot.task.IssueNumber)
+			slot.stoppedByUser = true
+			slot.cancelFunc()
+		}
+	}
+}
+
 // SlotStatus returns the current state of all agent slots.
 func (s *Supervisor) SlotStatus() []SlotInfo {
 	s.mu.Lock()
@@ -2110,13 +2211,23 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.paused {
+	if s.paused || s.budgetPaused {
 		return
 	}
 
 	// Don't launch new agents if the context is cancelled (e.g. Stop() was called).
 	if ctx.Err() != nil {
 		return
+	}
+
+	// Check budget ceiling before launching (query requires no lock held).
+	if s.project.TotalBudgetUSD > 0 {
+		s.mu.Unlock()
+		exceeded := s.checkBudgetCeiling()
+		s.mu.Lock()
+		if exceeded || s.paused || s.budgetPaused || ctx.Err() != nil {
+			return
+		}
 	}
 
 	// Single fetch for all agents about to launch — avoids concurrent fetches
@@ -3137,6 +3248,9 @@ func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask,
 		if agentResult.TotalCost > 0 {
 			_ = s.store.UpdateAutopilotTaskCost(task.ID, agentResult.TotalCost)
 		}
+
+		// Check budget ceiling after recording cost — may trigger pause for remaining work.
+		s.checkBudgetCeiling()
 
 		effectiveTurns := task.EffectiveMaxTurns(s.project.AutopilotMaxTurns)
 		effectiveBudget := task.EffectiveMaxBudget(s.project.AutopilotMaxBudgetUSD)
