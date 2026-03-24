@@ -759,7 +759,7 @@ func (m Model) renderTaskDetail() string {
 
 	// Cost (shown for completed tasks).
 	switch task.Status {
-	case "done", "bailed", "review", "reviewing", "reviewed", "stopped", "failed":
+	case "done", "bailed", "review", "reviewed", "stopped", "failed":
 		if task.CostUSD > 0 {
 			b.WriteString(mutedStyle().Render(fmt.Sprintf("  Cost: $%.2f", task.CostUSD)))
 		} else {
@@ -800,7 +800,7 @@ func (m Model) taskStatusDisplay(status string) string {
 	case "reviewing":
 		return reviewingStyle().Render("\u25cf review\u2026")
 	case "reviewed":
-		return statusRunningStyle().Render("\u25c9 reviewed")
+		return broadcastStyle().Render("\u25c9 reviewed")
 	case "done":
 		return statusRunningStyle().Render("\u2713 done   ")
 	case "failed":
@@ -818,8 +818,8 @@ func (m Model) taskStatusDisplay(status string) string {
 	}
 }
 
-// renderRiskSummary returns a one-line summary of reviewed task risk tiers.
-// Returns empty string if no reviewed tasks exist.
+// renderRiskSummary returns a one-line summary of risk tiers across reviewed and done tasks.
+// Returns empty string if no tasks have risk ratings.
 func (m Model) renderRiskSummary() string {
 	var lowRisk, needsTesting, suspect int
 	for _, t := range m.autopilotTasks {
