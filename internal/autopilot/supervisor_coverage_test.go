@@ -5498,6 +5498,210 @@ func TestAutoMerge_HappyPath_MergesAndPromotes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// checkLabelChanges — skip label removal/addition
+// ---------------------------------------------------------------------------
+
+func TestCheckLabelChanges_ManualToQueued(t *testing.T) {
+	// Simulate an issue that was manual (had no-agent label) but label was removed.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		// PR lookup returns 404 (it's an issue, not a PR).
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/pulls/"):
+			w.WriteHeader(404)
+			_, _ = fmt.Fprintf(w, `{"message":"Not Found"}`)
+
+		// Issue lookup — no skip label anymore.
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/issues/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"number":42,"title":"Design work","state":"open","labels":[{"name":"enhancement"}]}`)
+
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer ts.Close()
+
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+	sup.ghClientFactory = func(token string) *ghpkg.Client {
+		return ghpkg.NewClientWithBaseURL(token, ts.URL+"/")
+	}
+
+	// Save a dep graph with #42 as manual.
+	_ = store.SaveDepGraph(project.ID, `{"42":"manual","10":[42]}`, "Conservative")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		Owner:        "owner",
+		Repo:         "repo",
+		IssueNumber:  42,
+		IssueTitle:   "Design work",
+		Dependencies: `"manual"`,
+		Status:       "manual",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drain events.
+	go func() {
+		for range sup.Events() {
+		}
+	}()
+
+	changed := sup.checkLabelChanges(context.Background())
+
+	if changed != 1 {
+		t.Errorf("checkLabelChanges = %d, want 1", changed)
+	}
+
+	// Verify task is now queued with empty deps.
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tk := range tasks {
+		if tk.IssueNumber == 42 {
+			if tk.Status != "queued" {
+				t.Errorf("task status = %q, want queued", tk.Status)
+			}
+			if tk.Dependencies != "[]" {
+				t.Errorf("task deps = %q, want []", tk.Dependencies)
+			}
+		}
+	}
+
+	// Verify dep graph updated.
+	dg, _ := store.GetDepGraph(project.ID)
+	if dg == nil {
+		t.Fatal("dep graph should exist")
+	}
+	if !strings.Contains(dg.GraphJSON, `"42":[]`) {
+		t.Errorf("dep graph should have 42:[], got %s", dg.GraphJSON)
+	}
+}
+
+func TestCheckLabelChanges_QueuedToManual(t *testing.T) {
+	// Simulate a queued task that gains the no-agent label.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/pulls/"):
+			w.WriteHeader(404)
+			_, _ = fmt.Fprintf(w, `{"message":"Not Found"}`)
+
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/issues/10"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"number":10,"title":"Some task","state":"open","labels":[{"name":"no-agent"},{"name":"enhancement"}]}`)
+
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer ts.Close()
+
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+	sup.ghClientFactory = func(token string) *ghpkg.Client {
+		return ghpkg.NewClientWithBaseURL(token, ts.URL+"/")
+	}
+
+	_ = store.SaveDepGraph(project.ID, `{"10":[]}`, "Conservative")
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		Owner:        "owner",
+		Repo:         "repo",
+		IssueNumber:  10,
+		IssueTitle:   "Some task",
+		Dependencies: "[]",
+		Status:       "queued",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for range sup.Events() {
+		}
+	}()
+
+	changed := sup.checkLabelChanges(context.Background())
+
+	if changed != 1 {
+		t.Errorf("checkLabelChanges = %d, want 1", changed)
+	}
+
+	tasks, _ := store.GetAutopilotTasks(project.ID)
+	for _, tk := range tasks {
+		if tk.IssueNumber == 10 {
+			if tk.Status != "manual" {
+				t.Errorf("task status = %q, want manual", tk.Status)
+			}
+		}
+	}
+}
+
+func TestCheckLabelChanges_StillManual(t *testing.T) {
+	// Issue still has the no-agent label — no change.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/pulls/"):
+			w.WriteHeader(404)
+			_, _ = fmt.Fprintf(w, `{"message":"Not Found"}`)
+
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/issues/42"):
+			w.WriteHeader(200)
+			_, _ = fmt.Fprintf(w, `{"number":42,"title":"Manual work","state":"open","labels":[{"name":"no-agent"}]}`)
+
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer ts.Close()
+
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+	sup.ghClientFactory = func(token string) *ghpkg.Client {
+		return ghpkg.NewClientWithBaseURL(token, ts.URL+"/")
+	}
+
+	task := &db.AutopilotTask{
+		ProjectID:    project.ID,
+		Owner:        "owner",
+		Repo:         "repo",
+		IssueNumber:  42,
+		IssueTitle:   "Manual work",
+		Dependencies: `"manual"`,
+		Status:       "manual",
+	}
+	if err := store.CreateAutopilotTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		for range sup.Events() {
+		}
+	}()
+
+	changed := sup.checkLabelChanges(context.Background())
+
+	if changed != 0 {
+		t.Errorf("checkLabelChanges = %d, want 0 (still has skip label)", changed)
+	}
+}
+
+func TestCheckLabelChanges_NoTasks(t *testing.T) {
+	store := openTestStore(t)
+	project := createTestProject(t, store)
+	sup := New(store, project, nil, "/tmp/repo", "owner", "repo", "fake-token")
+
+	changed := sup.checkLabelChanges(context.Background())
+	if changed != 0 {
+		t.Errorf("checkLabelChanges = %d, want 0 (no tasks)", changed)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 

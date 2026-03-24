@@ -1689,8 +1689,9 @@ func (s *Supervisor) Launch(ctx context.Context) {
 			case <-reviewCheckTicker.C:
 				s.checkReviewTasks(ctx)
 				s.checkManualTasks(ctx)
+				labelChanges := s.checkLabelChanges(ctx)
 				unblocked := s.unblockSatisfiedTasks()
-				if unblocked > 0 {
+				if unblocked > 0 || labelChanges > 0 {
 					s.fillSlots(ctx)
 				}
 			default:
@@ -3427,6 +3428,85 @@ func (s *Supervisor) checkManualTasks(ctx context.Context) int {
 	}
 
 	return promoted
+}
+
+// checkLabelChanges detects when labels change on tasks and reclassifies them.
+// - Manual tasks that lose the skip label → queued (so they get agent slots)
+// - Queued/blocked tasks that gain the skip label → manual
+// Returns the number of tasks reclassified.
+func (s *Supervisor) checkLabelChanges(ctx context.Context) int {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return 0
+	}
+
+	matcher := newSkipMatcher(s.project.AutopilotSkipLabel)
+	ghClient := s.newGHClient()
+	reclassified := 0
+
+	for _, task := range tasks {
+		switch task.Status {
+		case "manual":
+			// Check if skip label was removed — task should become an agent task.
+			item, err := ghClient.FetchItem(ctx, task.Owner, task.Repo, task.IssueNumber)
+			if err != nil || item.State != "open" {
+				continue
+			}
+
+			isStillManual := matcher.matches(item.Labels) ||
+				hasLabel(item.Labels, "in-progress") ||
+				hasLabel(item.Labels, "needs-review") ||
+				hasLabel(item.Labels, "blocked")
+
+			if !isStillManual {
+				_ = s.store.UpdateAutopilotTaskStatus(task.ID, "queued")
+				_ = s.store.UpdateAutopilotTaskDeps(task.ID, "[]")
+				s.updateDepGraphEntry(task.IssueNumber, json.RawMessage("[]"))
+				s.emitEvent("info", fmt.Sprintf("Task #%d skip label removed — queued for agent work", task.IssueNumber), &task)
+				reclassified++
+			}
+
+		case "queued", "blocked":
+			// Check if skip label was added — task should become manual.
+			item, err := ghClient.FetchItem(ctx, task.Owner, task.Repo, task.IssueNumber)
+			if err != nil || item.State != "open" {
+				continue
+			}
+
+			shouldBeManual := matcher.matches(item.Labels)
+			if shouldBeManual {
+				_ = s.store.UpdateAutopilotTaskStatus(task.ID, "manual")
+				_ = s.store.UpdateAutopilotTaskDeps(task.ID, `"manual"`)
+				s.updateDepGraphEntry(task.IssueNumber, json.RawMessage(`"manual"`))
+				s.emitEvent("info", fmt.Sprintf("Task #%d skip label added — moved to manual", task.IssueNumber), &task)
+				reclassified++
+			}
+		}
+	}
+
+	return reclassified
+}
+
+// updateDepGraphEntry updates a single entry in the stored dependency graph.
+func (s *Supervisor) updateDepGraphEntry(issueNumber int, value json.RawMessage) {
+	dg, err := s.store.GetDepGraph(s.project.ID)
+	if err != nil || dg == nil {
+		return
+	}
+
+	var graph map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(dg.GraphJSON), &graph); err != nil {
+		return
+	}
+
+	graph[strconv.Itoa(issueNumber)] = value
+
+	updated, err := json.Marshal(graph)
+	if err != nil {
+		return
+	}
+
+	_ = s.store.SaveDepGraph(s.project.ID, string(updated), dg.OptionName)
 }
 
 func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.AutopilotTask, exitCode int) string {
