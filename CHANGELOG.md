@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
+### Fixed
+- **Max turns fallback detection**: When an agent's stream-json result event is missing (nil result), the supervisor now counts assistant events from the log file to detect turn limit exhaustion. Previously these agents were misclassified as "bailed" instead of "failed" with reason "max_turns". (#340)
+- **Autopilot settings display**: Settings panel and autopilot confirm screen now show effective defaults (150 turns, $10.00 budget) instead of raw DB zeros when no override is configured. Bumped default fallbacks from 50→150 turns and $3.00→$10.00. (#341)
+- **Worktree preserved until PR merge**: Worktrees for review tasks are no longer deleted immediately when the agent posts a PR. They are now cleaned up only when the task reaches `done` (PR merged), preventing disruption to users with active terminal sessions in the worktree. (#342)
+
 ### Changed
 - **Long-lived supervisor**: Supervisor stays alive after all tasks complete instead of exiting — both daemon and TUI modes. Watch loop creates supervisor once at startup; new tasks are inserted as `pending` and ingested by the supervisor's 30-second ticker with incremental dep analysis. TUI autopilot mode stays active with idle slots visible until user explicitly presses `A` to stop. Eliminates dual-goroutine dep graph race conditions. (#336)
 
