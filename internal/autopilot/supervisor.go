@@ -3256,11 +3256,10 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Autopil
 		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit code %d)", task.IssueNumber, exitCode), task)
 	}
 
-	// Cleanup: remove worktree for review tasks (restored on demand later);
-	// retain worktree and branch for failed/bailed tasks so work can be recovered.
-	if status == "review" {
-		s.cleanup(task, false)
-	}
+	// Retain worktree for all non-terminal statuses:
+	// - review: user may have an active terminal session in the worktree
+	// - failed/bailed: work can be recovered
+	// Worktrees are cleaned up when the task reaches "done" (PR merged).
 }
 
 // defaultReviewMaxRetries is the default number of transient-failure retries
@@ -3327,7 +3326,7 @@ func (s *Supervisor) checkReviewTasks(ctx context.Context) int {
 	return promoted
 }
 
-// promoteTaskToDone marks a task as done, cleans up labels, and emits a completion event.
+// promoteTaskToDone marks a task as done, cleans up labels and worktree, and emits a completion event.
 func (s *Supervisor) promoteTaskToDone(ctx context.Context, ghClient *ghpkg.Client, task db.AutopilotTask, eventMsg string) {
 	_ = s.store.UpdateAutopilotTaskStatus(task.ID, "done")
 	ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
@@ -3335,6 +3334,10 @@ func (s *Supervisor) promoteTaskToDone(ctx context.Context, ghClient *ghpkg.Clie
 		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.PRNumber, *task.ReviewRisk)
 	}
 	s.emitEvent("completed", eventMsg, &task)
+
+	// Clean up worktree now that the task has reached terminal state.
+	// The branch is preserved since it was already pushed for the PR.
+	s.cleanup(&task, false)
 }
 
 // promoteIfMerged checks if a task's PR has been merged or closed, and if so
@@ -3661,8 +3664,8 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.A
 			task.IssueNumber, task.PRNumber, label), task)
 	}
 
-	// Clean up worktree after review — it can be restored again if needed.
-	s.cleanup(task, false)
+	// Worktree is preserved — user may have an active session in it.
+	// It will be cleaned up when the task reaches "done" (PR merged).
 }
 
 // parseReviewRisk extracts the risk level from a review agent's output.
