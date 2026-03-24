@@ -240,8 +240,8 @@ func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSe
 	if task == nil {
 		return nil, fmt.Errorf("task %d not found", taskID)
 	}
-	if task.Status != "review" {
-		return nil, fmt.Errorf("task #%d has status %q — only review tasks can start a review session", task.IssueNumber, task.Status)
+	if task.Status != "review" && task.Status != "reviewed" {
+		return nil, fmt.Errorf("task #%d has status %q — only review/reviewed tasks can start a review session", task.IssueNumber, task.Status)
 	}
 	if task.PRNumber <= 0 {
 		return nil, fmt.Errorf("task #%d has no associated PR", task.IssueNumber)
@@ -330,6 +330,137 @@ func (s *Supervisor) ReviewSession(ctx context.Context, taskID int64) (*ReviewSe
 		WorktreePath: task.WorktreePath,
 		SessionID:    sessionID,
 		PRNumber:     task.PRNumber,
+		IssueNumber:  task.IssueNumber,
+	}, nil
+}
+
+// ManualSession creates a worktree for a manual task and launches a Claude session
+// pre-loaded with issue and dependency context. Returns the session ID so the user can resume it.
+func (s *Supervisor) ManualSession(ctx context.Context, taskID int64) (*ReviewSessionResult, error) {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %d not found", taskID)
+	}
+	if task.Status != "manual" {
+		return nil, fmt.Errorf("task #%d has status %q — only manual tasks can start a manual session", task.IssueNumber, task.Status)
+	}
+
+	// Set up worktree path and branch.
+	home, _ := os.UserHomeDir()
+	worktreeBase := filepath.Join(home, ".agent-minder", "worktrees", s.project.Name)
+	worktreePath := filepath.Join(worktreeBase, fmt.Sprintf("issue-%d", task.IssueNumber))
+	branch := fmt.Sprintf("manual/issue-%d", task.IssueNumber)
+
+	// Determine base branch.
+	baseBranch := s.project.AutopilotBaseBranch
+	if baseBranch == "" {
+		baseBranch, _ = gitpkg.DefaultBranch(s.repoDir)
+	}
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+
+	// Create worktree if it doesn't exist yet.
+	if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
+		s.gitSetupMu.Lock()
+		_ = gitpkg.Fetch(s.repoDir)
+		_ = gitpkg.DeleteBranch(s.repoDir, branch)
+		gitErr := gitpkg.WorktreeAdd(s.repoDir, worktreePath, branch, "origin/"+baseBranch)
+		s.gitSetupMu.Unlock()
+		if gitErr != nil {
+			return nil, fmt.Errorf("create worktree: %w", gitErr)
+		}
+	}
+
+	// Persist worktree info on the task (without changing status).
+	task.WorktreePath = worktreePath
+	task.Branch = branch
+	if err := s.store.UpdateAutopilotTaskWorktree(task.ID, worktreePath, branch); err != nil {
+		return nil, fmt.Errorf("update task worktree: %w", err)
+	}
+
+	// Build related work context.
+	var rw *relatedWork
+	dg, dgErr := s.store.GetDepGraph(s.project.ID)
+	siblings, sibErr := s.store.GetAutopilotTasks(s.project.ID)
+	if dgErr == nil || sibErr == nil {
+		rw = &relatedWork{}
+		if dgErr == nil && dg != nil {
+			rw.depGraph = dg.GraphJSON
+		}
+		if sibErr == nil {
+			rw.siblingTasks = siblings
+		}
+	}
+
+	// Build manual session prompt.
+	prompt := renderManualSessionPrompt(task, s.owner, s.repo, rw)
+
+	// Launch claude -p with stream-json so we can capture the session ID.
+	allowedTools := resolveAllowedTools(s.repoDir)
+	args := []string{
+		"-p",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--max-turns", "3",
+		"--allowedTools", toCliAllowedTools(allowedTools),
+		"--", prompt,
+	}
+
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	cmd.Dir = worktreePath
+	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start claude: %w", err)
+	}
+
+	// Parse stream-json output for session_id from the init event.
+	var sessionID string
+	scanner := json.NewDecoder(stdout)
+	for scanner.More() {
+		var raw json.RawMessage
+		if err := scanner.Decode(&raw); err != nil {
+			break
+		}
+		var initEvt struct {
+			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal(raw, &initEvt) == nil && initEvt.Type == "system" && initEvt.Subtype == "init" && initEvt.SessionID != "" {
+			sessionID = initEvt.SessionID
+		}
+	}
+
+	_ = cmd.Wait()
+
+	if sessionID == "" {
+		return &ReviewSessionResult{
+			WorktreePath: worktreePath,
+			IssueNumber:  task.IssueNumber,
+		}, nil
+	}
+
+	return &ReviewSessionResult{
+		WorktreePath: worktreePath,
+		SessionID:    sessionID,
 		IssueNumber:  task.IssueNumber,
 	}, nil
 }
