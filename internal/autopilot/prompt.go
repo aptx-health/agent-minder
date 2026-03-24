@@ -187,6 +187,18 @@ Evaluate the PR against these criteria:
 - Are names clear and consistent with the codebase?
 - Is the code readable without excessive comments?
 
+### Simplification
+
+After reviewing correctness, actively look for opportunities to simplify the changed code:
+
+**Code reuse**: Search for existing utilities, helpers, and patterns in the codebase that could replace newly written code. Flag new functions that duplicate existing functionality and inline logic that could use an existing utility (hand-rolled string manipulation, manual path handling, ad-hoc type checks).
+
+**Redundant patterns**: Look for state that duplicates existing state or cached values that could be derived, parameter sprawl (adding new parameters instead of generalizing), copy-paste with slight variation that should be unified, and leaky abstractions that expose internal details or break existing abstraction boundaries.
+
+**Efficiency**: Check for redundant computations, repeated file reads, duplicate API calls, N+1 query patterns, independent operations run sequentially that could be concurrent, unnecessary existence checks before operations (TOCTOU), unbounded data structures or missing cleanup, and overly broad operations (reading entire files/collections when only a portion is needed).
+
+**Unnecessary comments**: Delete comments explaining WHAT the code does (well-named identifiers already do that), narrating the change, or referencing the task/caller. Keep only non-obvious WHY comments (hidden constraints, subtle invariants, workarounds).
+
 ### Big picture
 - How does this PR fit into the project's goals and current milestone?
 - Does it conflict with or duplicate other tracked work?
@@ -203,6 +215,10 @@ You may make direct fixes for:
 - Resource leaks (unclosed files, missing defers, abandoned goroutines)
 - Minor test gaps where the test pattern is clear from existing tests
 - Sloppy code that works but is fragile or misleading (e.g., swallowed errors, shadowed variables)
+- Replacing new code with existing utilities or helpers found in the codebase
+- Consolidating copy-paste code into a shared function when the pattern is clear
+- Removing unnecessary comments that narrate the obvious
+- Simplifying sequential operations into concurrent ones when independence is clear
 
 Do NOT make direct fixes for:
 - Architectural or design issues — request changes instead
@@ -229,6 +245,9 @@ After completing your review, output your assessment in this exact format:
 
 ### Findings
 - **<severity>**: <description> (file:line if applicable)
+
+### Simplification
+- <reuse, efficiency, or cleanup findings and fixes, or "None">
 
 ### Fixes applied
 - <description of each fix you made, or "None">
