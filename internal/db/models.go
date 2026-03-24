@@ -39,6 +39,9 @@ type Project struct {
 	AutopilotReviewMaxTurns     *int     `db:"autopilot_review_max_turns"`
 	AutopilotReviewMaxBudgetUSD *float64 `db:"autopilot_review_max_budget_usd"`
 	AutopilotReviewMaxRetries   *int     `db:"autopilot_review_max_retries"`
+	WebhookURL                  string   `db:"webhook_url"`
+	WebhookFormat               string   `db:"webhook_format"`
+	WebhookEvents               string   `db:"webhook_events"` // comma-separated event types, empty = all
 	CreatedAt                   string   `db:"created_at"`
 }
 

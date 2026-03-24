@@ -18,6 +18,7 @@ import (
 	"github.com/dustinlange/agent-minder/internal/db"
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	ghpkg "github.com/dustinlange/agent-minder/internal/github"
+	"github.com/dustinlange/agent-minder/internal/notify"
 	"github.com/dustinlange/agent-minder/internal/onboarding"
 )
 
@@ -129,14 +130,27 @@ type Supervisor struct {
 	done            chan struct{}
 	reviewRetries   map[int64]int                    // in-memory retry count for review agent transient failures
 	ghClientFactory func(token string) *ghpkg.Client // override for testing; nil uses ghpkg.NewClient
+	notifier        *notify.Notifier                 // webhook notifier; nil if not configured
 }
 
-// New creates a new Supervisor.
+// New creates a new Supervisor. If the project has a webhook URL configured,
+// a webhook notifier is automatically created for task state change notifications.
 func New(store *db.Store, project *db.Project, completer claudecli.Completer, repoDir, owner, repo, ghToken string) *Supervisor {
 	maxAgents := project.AutopilotMaxAgents
 	if maxAgents < 1 {
 		maxAgents = 3
 	}
+
+	// Auto-configure notifier from project settings.
+	var n *notify.Notifier
+	if project.WebhookURL != "" {
+		n = notify.New(notify.Config{
+			WebhookURL: project.WebhookURL,
+			Format:     project.WebhookFormat,
+			Events:     notify.ParseEventTypes(project.WebhookEvents),
+		})
+	}
+
 	return &Supervisor{
 		store:         store,
 		project:       project,
@@ -148,6 +162,7 @@ func New(store *db.Store, project *db.Project, completer claudecli.Completer, re
 		slots:         make([]*slotState, maxAgents),
 		events:        make(chan Event, 64),
 		reviewRetries: make(map[int64]int),
+		notifier:      n,
 	}
 }
 
@@ -157,6 +172,14 @@ func (s *Supervisor) newGHClient() *ghpkg.Client {
 		return s.ghClientFactory(s.ghToken)
 	}
 	return ghpkg.NewClient(s.ghToken)
+}
+
+// SetNotifier configures the webhook notifier for task state change notifications.
+// Pass nil to disable notifications. Safe to call before Launch().
+func (s *Supervisor) SetNotifier(n *notify.Notifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifier = n
 }
 
 // Events returns the channel of events for the TUI.
@@ -1406,6 +1429,11 @@ func (s *Supervisor) Stop() {
 	// Wait for done signal.
 	if s.done != nil {
 		<-s.done
+	}
+
+	// Flush any pending webhook notifications.
+	if s.notifier != nil {
+		s.notifier.Close()
 	}
 }
 
@@ -3030,6 +3058,22 @@ func (s *Supervisor) emitEvent(typ, summary string, task *db.AutopilotTask) {
 	}:
 	default:
 		// Drop event if channel is full.
+	}
+
+	// Dispatch to webhook notifier if configured.
+	if evtType := notify.MapEventType(typ); evtType != "" && s.notifier != nil {
+		evt := notify.Event{
+			Type:      evtType,
+			Project:   s.project.Name,
+			Summary:   summary,
+			Timestamp: time.Now(),
+		}
+		if task != nil {
+			evt.IssueNumber = task.IssueNumber
+			evt.IssueTitle = task.IssueTitle
+			evt.PRNumber = task.PRNumber
+		}
+		s.notifier.Notify(evt)
 	}
 }
 
