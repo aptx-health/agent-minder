@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **Max turns fallback detection**: When an agent's stream-json result event is missing (nil result), the supervisor now counts assistant events from the log file to detect turn limit exhaustion. Previously these agents were misclassified as "bailed" instead of "failed" with reason "max_turns". (#340)
 - **Autopilot settings display**: Settings panel and autopilot confirm screen now show effective defaults (150 turns, $10.00 budget) instead of raw DB zeros when no override is configured. Bumped default fallbacks from 50→150 turns and $3.00→$10.00. (#341)
 - **Worktree preserved until PR merge**: Worktrees for review tasks are no longer deleted immediately when the agent posts a PR. They are now cleaned up only when the task reaches `done` (PR merged), preventing disruption to users with active terminal sessions in the worktree. (#342)
 
