@@ -1739,7 +1739,7 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 		isRunning := m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" ||
 			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" ||
 			m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "review-confirm" ||
-			m.autopilotMode == "manual-confirm" || m.autopilotMode == "completed"
+			m.autopilotMode == "manual-confirm" || m.autopilotMode == "design-confirm" || m.autopilotMode == "completed"
 		if isRunning {
 			// Slot section.
 			if m.autopilotSupervisor != nil {
@@ -2174,6 +2174,18 @@ func (m Model) renderBottomBar() string {
 				issueNum = task.IssueNumber
 			}
 			b.WriteString(headerStyle().Render(fmt.Sprintf("  Spin off worktree for #%d? ", issueNum)))
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": launch • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "design-confirm" {
+			task := m.selectedAutopilotTask()
+			issueNum := 0
+			if task != nil {
+				issueNum = task.IssueNumber
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Launch design interview for #%d? ", issueNum)))
 			b.WriteString(helpKeyStyle().Render("enter"))
 			b.WriteString(helpStyle().Render(": launch • "))
 			b.WriteString(helpKeyStyle().Render("esc"))

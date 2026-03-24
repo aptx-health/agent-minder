@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -76,9 +75,7 @@ func (m DeployViewer) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor < len(m.tasks) {
 				t := m.tasks[m.cursor]
 				if t.WorktreePath != "" {
-					cmd := exec.Command("pbcopy")
-					cmd.Stdin = strings.NewReader(t.WorktreePath)
-					if err := cmd.Run(); err == nil {
+					if err := copyToClipboard(t.WorktreePath); err == nil {
 						m.flash = fmt.Sprintf("Copied: %s", t.WorktreePath)
 					} else {
 						m.flash = fmt.Sprintf("Copy failed: %v", err)

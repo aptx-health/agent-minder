@@ -101,7 +101,7 @@ func TestRenderTaskContext(t *testing.T) {
 		Branch:       "agent/issue-42",
 	}
 
-	ctx := renderTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil)
+	ctx := renderTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil, "")
 
 	checks := []string{
 		"#42",
@@ -131,7 +131,7 @@ func TestRenderTaskContext(t *testing.T) {
 	}
 
 	// Empty test command should omit the section entirely.
-	ctxNoTest := renderTaskContext(task, "main", "myorg", "myrepo", "", nil)
+	ctxNoTest := renderTaskContext(task, "main", "myorg", "myrepo", "", nil, "")
 	if strings.Contains(ctxNoTest, "## Test command") {
 		t.Error("task context should omit test command section when empty")
 	}
@@ -146,7 +146,7 @@ func TestRenderTaskContextEmptyBody(t *testing.T) {
 		Branch:       "agent/issue-1",
 	}
 
-	ctx := renderTaskContext(task, "main", "owner", "repo", "", nil)
+	ctx := renderTaskContext(task, "main", "owner", "repo", "", nil, "")
 
 	if strings.Contains(ctx, "\n\n\n\n") {
 		t.Error("task context has excessive blank lines when body is empty")
@@ -165,7 +165,7 @@ func TestRenderTaskContextNoBehavioralInstructions(t *testing.T) {
 		Branch:       "agent/issue-42",
 	}
 
-	ctx := renderTaskContext(task, "main", "org", "repo", "", nil)
+	ctx := renderTaskContext(task, "main", "org", "repo", "", nil, "")
 
 	// Task context must NOT contain behavioral instructions — those belong in the agent definition.
 	behavioral := []string{
@@ -303,7 +303,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 
 	t.Run("always uses --agent autopilot", func(t *testing.T) {
 		tools := []string{"Read", "Edit", "Write", "Bash(git *)"}
-		args := buildClaudeArgs(task, "main", "org", "repo", "go test ./...", 50, 3.00, tools, nil)
+		args := buildClaudeArgs(task, "main", "org", "repo", "go test ./...", 50, 3.00, tools, nil, "")
 
 		// Should always use --agent autopilot as first args.
 		if args[0] != "--agent" || args[1] != "autopilot" {
@@ -354,7 +354,7 @@ func TestBuildClaudeArgs(t *testing.T) {
 	})
 
 	t.Run("includes max turns and budget", func(t *testing.T) {
-		args := buildClaudeArgs(task, "main", "org", "repo", "", 75, 5.50, defaultAllowedTools, nil)
+		args := buildClaudeArgs(task, "main", "org", "repo", "", 75, 5.50, defaultAllowedTools, nil, "")
 		joined := strings.Join(args, " ")
 
 		if !strings.Contains(joined, "--max-turns 75") {
@@ -729,7 +729,7 @@ func TestRenderResumeTaskContext(t *testing.T) {
 		FailureDetail: "used 50 of 50 turns",
 	}
 
-	prompt := renderResumeTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil)
+	prompt := renderResumeTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil, "")
 
 	// Should contain resume header.
 	if !strings.Contains(prompt, "Resuming Previous Work") {
@@ -768,7 +768,7 @@ func TestRenderResumeTaskContextNoFailure(t *testing.T) {
 		Branch:       "agent/issue-10",
 	}
 
-	prompt := renderResumeTaskContext(task, "main", "org", "repo", "", nil)
+	prompt := renderResumeTaskContext(task, "main", "org", "repo", "", nil, "")
 
 	if !strings.Contains(prompt, "Resuming Previous Work") {
 		t.Error("should contain resume header")
@@ -795,7 +795,7 @@ func TestBuildResumeClaudeArgs(t *testing.T) {
 		FailureDetail: "spent $3.00 of $3.00 budget",
 	}
 
-	args := buildResumeClaudeArgs(task, "main", "org", "repo", "go test ./...", 50, 3.00, defaultAllowedTools, nil)
+	args := buildResumeClaudeArgs(task, "main", "org", "repo", "go test ./...", 50, 3.00, defaultAllowedTools, nil, "")
 	joined := strings.Join(args, " ")
 
 	// Should use --agent autopilot.
@@ -914,7 +914,7 @@ func TestRenderReviewTaskContext(t *testing.T) {
 		PRNumber:     99,
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", "go test ./...", nil)
+	ctx := renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", "go test ./...", nil, "")
 
 	checks := []string{
 		"#99", // PR number
@@ -949,7 +949,7 @@ func TestRenderReviewTaskContextEmptyGoal(t *testing.T) {
 		PRNumber:     15,
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "org", "repo", "", "", nil)
+	ctx := renderReviewTaskContext(task, "main", "org", "repo", "", "", nil, "")
 
 	if strings.Contains(ctx, "Project Goal") {
 		t.Error("should not include project goal section when empty")
@@ -970,7 +970,7 @@ func TestBuildReviewClaudeArgs(t *testing.T) {
 	}
 
 	tools := []string{"Read", "Edit", "Write", "Bash(git *)"}
-	args := buildReviewClaudeArgs(task, "main", "org", "repo", "Project goal", "npm test", 30, 2.00, tools, nil)
+	args := buildReviewClaudeArgs(task, "main", "org", "repo", "Project goal", "npm test", 30, 2.00, tools, nil, "")
 
 	// Should use --agent reviewer.
 	if args[0] != "--agent" || args[1] != "reviewer" {
@@ -1098,7 +1098,7 @@ func TestRenderReviewTaskContextWithRelatedWork(t *testing.T) {
 		},
 	}
 
-	ctx := renderReviewTaskContext(task, "main", "org", "repo", "Goal", "", rw)
+	ctx := renderReviewTaskContext(task, "main", "org", "repo", "Goal", "", rw, "")
 
 	if !strings.Contains(ctx, "Related Work") {
 		t.Error("should contain Related Work section")
@@ -1148,14 +1148,14 @@ func TestPrintPrompts(t *testing.T) {
 	fmt.Println(renderPrompt(task, "main", "myorg", "myrepo"))
 
 	fmt.Printf("\n%s\n  TASK CONTEXT (used with --agent autopilot)\n%s\n\n", sep, sep)
-	fmt.Println(renderTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil))
+	fmt.Println(renderTaskContext(task, "main", "myorg", "myrepo", "go test ./...", nil, ""))
 
 	fmt.Printf("\n%s\n  BUILT-IN DEFAULT AGENT DEFINITION\n%s\n\n", sep, sep)
 	fmt.Print(defaultAgentDef)
 
 	fmt.Printf("\n%s\n  REVIEW TASK CONTEXT (used with --agent reviewer)\n%s\n\n", sep, sep)
 	task.PRNumber = 123
-	fmt.Println(renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", "go test ./...", nil))
+	fmt.Println(renderReviewTaskContext(task, "main", "myorg", "myrepo", "Build a secure healthcare platform", "go test ./...", nil, ""))
 
 	fmt.Printf("\n%s\n  BUILT-IN DEFAULT REVIEWER DEFINITION\n%s\n\n", sep, sep)
 	fmt.Print(defaultReviewerDef)

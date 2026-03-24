@@ -4,7 +4,7 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os/exec"
+
 	"strings"
 	"time"
 
@@ -238,7 +238,7 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor       *autopilot.Supervisor
-	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "manual-confirm", "add-slot-confirm", "completed", "reprepare-choice"
+	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "manual-confirm", "design-confirm", "add-slot-confirm", "completed", "reprepare-choice"
 	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
 	autopilotPrepareResult    *autopilot.PrepareResult
 	autopilotStatus           string
@@ -286,8 +286,9 @@ type Model struct {
 	logViewerAtBottom bool
 	logViewerStatus   string
 
-	// Warning banner (persistent, dismissible with 'w').
-	warningBanner string
+	// Warning banner (persistent, dismissible with 'd').
+	warningBanner   string
+	bannerClipboard string // command to copy to clipboard when banner is dismissed
 }
 
 // safeViewportKeyMap returns a viewport KeyMap that only uses arrow keys and
@@ -663,15 +664,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return clearAutopilotStatusMsg{}
 			})
 		} else if msg.result.SessionID != "" {
-			m.warningBanner = fmt.Sprintf(
-				"Review ready for #%d — cd %s && claude --resume %s",
-				msg.result.IssueNumber, msg.result.WorktreePath, msg.result.SessionID,
-			)
+			clipCmd := fmt.Sprintf("cd %s && claude --resume %s", msg.result.WorktreePath, msg.result.SessionID)
+			m.warningBanner = fmt.Sprintf("Session ready for #%d — %s", msg.result.IssueNumber, clipCmd)
+			m.bannerClipboard = clipCmd
 		} else {
-			m.warningBanner = fmt.Sprintf(
-				"Worktree restored for #%d — cd %s && claude",
-				msg.result.IssueNumber, msg.result.WorktreePath,
-			)
+			clipCmd := fmt.Sprintf("cd %s && claude", msg.result.WorktreePath)
+			m.warningBanner = fmt.Sprintf("Worktree restored for #%d — %s", msg.result.IssueNumber, clipCmd)
+			m.bannerClipboard = clipCmd
 		}
 		m.autopilotStatus = ""
 		return m, nil
@@ -940,6 +939,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autopilotStatus = ""
 		return m, nil
 
+	case clearBannerMsg:
+		m.warningBanner = ""
+		return m, nil
+
 	case logRefreshMsg:
 		if !m.showLogViewer {
 			return m, nil
@@ -1061,7 +1064,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickEvery()
 
 	case autopilotTickMsg:
-		if m.autopilotMode == "running" || m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" || m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "review-confirm" {
+		if m.autopilotMode == "running" || m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" || m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "review-confirm" || m.autopilotMode == "design-confirm" {
 			m.rebuildAutopilotTaskContent()
 			return m, autopilotTick()
 		}
@@ -1071,6 +1074,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+type clearBannerMsg struct{}
 type clearBroadcastStatusMsg struct{}
 type clearOnboardStatusMsg struct{}
 type clearRebuildDepsStatusMsg struct{}
@@ -1249,6 +1253,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.autopilotMode == "design-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "enter":
+			return m.launchDesignSession()
+		case "esc":
+			m.autopilotMode = m.autopilotModeBeforeReview
+			return m, nil
+		}
+	}
 	if m.autopilotMode == "add-slot-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
 		case "enter":
@@ -1293,6 +1306,17 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.resizeViewports()
 		return m, nil
 	case "d":
+		if m.bannerClipboard != "" {
+			if err := copyToClipboard(m.bannerClipboard); err == nil {
+				m.warningBanner = "Command copied to clipboard"
+			} else {
+				m.warningBanner = ""
+			}
+			m.bannerClipboard = ""
+			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
+				return clearBannerMsg{}
+			})
+		}
 		m.warningBanner = ""
 		return m, nil
 	case "q", "ctrl+c":
@@ -1345,6 +1369,16 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			p.PollNow(context.Background())
 			return nil
 		})
+	case "g":
+		// Design interview: available on any task during autopilot running/completed.
+		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
+			task := m.selectedAutopilotTask()
+			if task != nil {
+				m.autopilotModeBeforeReview = m.autopilotMode
+				m.autopilotMode = "design-confirm"
+				return m, nil
+			}
+		}
 	case "e":
 		if m.activeTab == tabAnalysis {
 			m.analysisExpanded = !m.analysisExpanded
@@ -1604,10 +1638,7 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if task == nil || task.WorktreePath == "" {
 			return m, nil
 		}
-		// Copy worktree path to clipboard via pbcopy.
-		cmd := exec.Command("pbcopy")
-		cmd.Stdin = strings.NewReader(task.WorktreePath)
-		if err := cmd.Run(); err == nil {
+		if err := copyToClipboard(task.WorktreePath); err == nil {
 			m.autopilotStatus = fmt.Sprintf("Copied: %s", task.WorktreePath)
 		} else {
 			m.autopilotStatus = fmt.Sprintf("Copy failed: %v", err)
@@ -2652,6 +2683,31 @@ func (m Model) launchManualSession() (tea.Model, tea.Cmd) {
 
 	return m, func() tea.Msg {
 		result, err := sup.ManualSession(context.Background(), taskID)
+		return reviewSessionResultMsg{result: result, err: err}
+	}
+}
+
+// launchDesignSession creates a worktree and launches a pre-warmed Claude session for a design interview.
+func (m Model) launchDesignSession() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil {
+		m.autopilotMode = m.autopilotModeBeforeReview
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = m.autopilotModeBeforeReview
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+	m.autopilotMode = m.autopilotModeBeforeReview
+	m.autopilotStatus = fmt.Sprintf("Launching design interview for #%d...", issueNum)
+
+	return m, func() tea.Msg {
+		result, err := sup.DesignSession(context.Background(), taskID)
 		return reviewSessionResultMsg{result: result, err: err}
 	}
 }
