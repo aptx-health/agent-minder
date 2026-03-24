@@ -5,6 +5,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dustinlange/agent-minder/internal/api"
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/deploy"
 	"github.com/spf13/cobra"
@@ -13,7 +14,7 @@ import (
 var deployStopCmd = &cobra.Command{
 	Use:   "stop <deploy-id>",
 	Short: "Stop a running deployment",
-	Args:  cobra.ExactArgs(1),
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runDeployStop,
 }
 
@@ -21,7 +22,15 @@ func init() {
 	deployCmd.AddCommand(deployStopCmd)
 }
 
-func runDeployStop(cmd *cobra.Command, args []string) error {
+func runDeployStop(_ *cobra.Command, args []string) error {
+	// Remote mode: send stop via HTTP API.
+	if client := remoteClient(); client != nil {
+		return runDeployStopRemote(client)
+	}
+
+	if len(args) == 0 {
+		return fmt.Errorf("deploy ID required (or use --remote to stop a remote daemon)")
+	}
 	id := args[0]
 
 	conn, err := db.Open(db.DefaultDBPath())
@@ -76,5 +85,26 @@ func runDeployStop(cmd *cobra.Command, args []string) error {
 		fmt.Printf(" %d tasks marked as stopped.", stopped)
 	}
 	fmt.Println()
+	return nil
+}
+
+func runDeployStopRemote(client *api.Client) error {
+	// First get the status so we can show the deploy ID.
+	status, err := client.GetStatus()
+	if err != nil {
+		return fmt.Errorf("remote: %w", err)
+	}
+
+	if !status.Alive {
+		fmt.Printf("Deploy %s is not running.\n", status.DeployID)
+		return nil
+	}
+
+	fmt.Printf("Stopping deploy %s (remote, PID %d)...\n", status.DeployID, status.PID)
+	if err := client.Stop(); err != nil {
+		return fmt.Errorf("remote stop: %w", err)
+	}
+
+	fmt.Printf("Stop signal sent to deploy %s.\n", status.DeployID)
 	return nil
 }
