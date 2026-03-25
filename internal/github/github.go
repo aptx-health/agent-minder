@@ -4,7 +4,9 @@ package github
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v72/github"
 )
@@ -51,9 +53,11 @@ type Client struct {
 }
 
 // NewClient creates a GitHub client authenticated with the given PAT.
+// Uses a 30-second HTTP timeout to prevent indefinite hangs on network issues.
 func NewClient(token string) *Client {
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 	return &Client{
-		gh: github.NewClient(nil).WithAuthToken(token),
+		gh: github.NewClient(httpClient).WithAuthToken(token),
 	}
 }
 

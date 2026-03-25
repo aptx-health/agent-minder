@@ -2,9 +2,11 @@
 package sqliteutil
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
@@ -24,8 +26,13 @@ import (
 // Returns (healthy bool, error). If healthy is false and error is nil,
 // stale files were removed and the caller should reopen the connection.
 func CheckAndRecover(db *sqlx.DB, dbPath string) (bool, error) {
+	return CheckAndRecoverContext(context.Background(), db, dbPath)
+}
+
+// CheckAndRecoverContext is like CheckAndRecover but respects context cancellation.
+func CheckAndRecoverContext(ctx context.Context, db *sqlx.DB, dbPath string) (bool, error) {
 	// Quick check: can we ping?
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		if isIOError(err) {
 			_ = db.Close()
 			if removeErr := removeStaleFiles(dbPath); removeErr != nil {
@@ -38,7 +45,7 @@ func CheckAndRecover(db *sqlx.DB, dbPath string) (bool, error) {
 
 	// Deeper check: integrity_check catches corrupted WAL state that ping misses.
 	var result string
-	if err := db.Get(&result, "PRAGMA integrity_check"); err != nil {
+	if err := db.GetContext(ctx, &result, "PRAGMA integrity_check"); err != nil {
 		if isIOError(err) {
 			_ = db.Close()
 			if removeErr := removeStaleFiles(dbPath); removeErr != nil {
@@ -90,12 +97,19 @@ func isIOError(err error) bool {
 // health checks and automatic WAL recovery if stale files are detected.
 // It will attempt recovery once before giving up.
 func OpenWithRecovery(dbPath, dsn string) (*sqlx.DB, error) {
+	return OpenWithRecoveryContext(context.Background(), dbPath, dsn)
+}
+
+// OpenWithRecoveryContext is like OpenWithRecovery but respects context cancellation
+// and configures the connection pool for resilience after sleep/wake cycles.
+func OpenWithRecoveryContext(ctx context.Context, dbPath, dsn string) (*sqlx.DB, error) {
 	db, err := sqlx.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dbPath, err)
 	}
+	configurePool(db)
 
-	healthy, err := CheckAndRecover(db, dbPath)
+	healthy, err := CheckAndRecoverContext(ctx, db, dbPath)
 	if healthy {
 		return db, nil
 	}
@@ -111,11 +125,20 @@ func OpenWithRecovery(dbPath, dsn string) (*sqlx.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reopen after recovery %s: %w", dbPath, err)
 	}
+	configurePool(db)
 
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping after recovery %s: %w", dbPath, err)
 	}
 
 	return db, nil
+}
+
+// configurePool sets connection pool parameters for resilience.
+// SQLite is single-writer, so one connection suffices. ConnMaxIdleTime
+// ensures stale connections (e.g., after laptop sleep) are recycled.
+func configurePool(db *sqlx.DB) {
+	db.SetMaxOpenConns(1)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 }
