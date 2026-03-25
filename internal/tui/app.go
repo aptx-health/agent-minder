@@ -1427,10 +1427,10 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return nil
 		})
 	case "R":
-		// Refresh: reset a done/review/reviewed task back to queued.
+		// Refresh: reset a terminal/review task back to queued.
 		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
 			task := m.selectedAutopilotTask()
-			if task != nil && (task.Status == "done" || task.Status == "review" || task.Status == "reviewing" || task.Status == "reviewed") {
+			if task != nil && (task.Status == "done" || task.Status == "review" || task.Status == "reviewing" || task.Status == "reviewed" || task.Status == "bailed" || task.Status == "failed" || task.Status == "stopped") {
 				m.autopilotMode = "refresh-confirm"
 				return m, nil
 			}
