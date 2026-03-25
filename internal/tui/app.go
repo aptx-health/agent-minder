@@ -2328,9 +2328,12 @@ func (m Model) startAutopilot() (tea.Model, tea.Cmd) {
 		})
 	}
 
-	// Check prerequisites: need tracked issues or existing tasks.
+	// Check prerequisites: need tracked issues, existing tasks, or a watch filter.
+	// Watch filters (milestone/label) discover issues via watchPoll() after launch,
+	// so skip the tracked-items check when a filter is configured.
+	hasWatchFilter := m.project.AutopilotFilterType != "" && m.project.AutopilotFilterValue != ""
 	existingTasks, _ := m.store.GetAutopilotTasks(m.project.ID)
-	if len(existingTasks) == 0 {
+	if len(existingTasks) == 0 && !hasWatchFilter {
 		trackedItems, _ := m.store.GetTrackedItems(m.project.ID)
 		hasOpenIssue := false
 		for _, item := range trackedItems {
