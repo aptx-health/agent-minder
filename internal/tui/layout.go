@@ -2281,6 +2281,7 @@ func (m Model) renderHelpBar() string {
 				case "failed":
 					condensed = append(condensed,
 						hint{"r", "restart"},
+						hint{"R", "refresh"},
 						hint{"i", "detail"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
@@ -2288,6 +2289,7 @@ func (m Model) renderHelpBar() string {
 				case "bailed", "stopped":
 					condensed = append(condensed,
 						hint{"r", "restart"},
+						hint{"R", "refresh"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
@@ -2328,6 +2330,7 @@ func (m Model) renderHelpBar() string {
 				switch task.Status {
 				case "failed", "bailed", "stopped":
 					condensed = append(condensed,
+						hint{"R", "refresh"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
