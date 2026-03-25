@@ -215,3 +215,34 @@ rm -f ~/.agent-minder/deploys/launchd-watch-id
 rm -f ~/.agent-minder/launchd-daemon.log
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dustinlange.agent-minder.plist
 ```
+
+## Menu Bar Status Indicator (xbar)
+
+[xbar](https://xbarapp.com/) (formerly BitBar) can show a live agent-minder status indicator in your macOS menu bar.
+
+### Install
+
+```bash
+brew install --cask xbar
+```
+
+### Set Up the Plugin
+
+Symlink the plugin into xbar's plugins directory:
+
+```bash
+mkdir -p ~/Library/Application\ Support/xbar/plugins
+ln -s /path/to/agent-minder/scripts/agent-minder.30s.sh \
+      ~/Library/Application\ Support/xbar/plugins/agent-minder.30s.sh
+```
+
+Open xbar and the plugin will auto-detect. The `30s` in the filename controls the refresh interval.
+
+### What It Shows
+
+**Menu bar:** `🤖 2↑ 3✓ 1✗` — running agents, completed, errored
+
+**Dropdown:**
+- Per-deploy task list with status icons and costs
+- Quick actions: view status, stop deploy, open logs
+- Works across all active deployments
