@@ -56,10 +56,11 @@ type Model struct {
 	taskLog  string // log content for selected task
 
 	// Log viewer state.
-	logTaskID   int // issue number of task whose log is shown
-	logOffset   int // scroll offset into log lines
-	logLines    []string
-	logAutoTail bool
+	logTaskID    int // issue number of task whose log is shown
+	logOffset    int // scroll offset into log lines
+	logLines     []string
+	logAutoTail  bool
+	logTickAlive bool // true when a log tick chain is running
 
 	// Error tracking.
 	lastErr error
@@ -191,6 +192,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flash = "Analysis poll triggered"
 		}
 
+	case stopDaemonMsg:
+		if msg.err != nil {
+			m.flash = fmt.Sprintf("Stop failed: %v", msg.err)
+		} else {
+			m.flash = "Daemon stop signal sent"
+		}
+
 	case taskTickMsg:
 		m.flash = ""
 		return m, tea.Batch(m.fetchStatus(), m.fetchTasks(), m.taskTick())
@@ -202,6 +210,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeTab == tabLog && m.logTaskID > 0 {
 			return m, tea.Batch(m.fetchTaskLog(m.logTaskID), m.logTick())
 		}
+		// Not on log tab or no task selected — let the tick chain die.
+		m.logTickAlive = false
 	}
 
 	return m, nil
@@ -288,7 +298,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.activeTab == tabTasks && m.cursor < len(m.tasks) {
 			t := m.tasks[m.cursor]
 			if t.Status == "running" {
-				return m, m.stopTask(t.IssueNumber)
+				// Per-task stop not yet supported server-side; stop the whole daemon.
+				m.flash = fmt.Sprintf("Stopping daemon (no per-task stop for #%d yet)…", t.IssueNumber)
+				return m, m.stopDaemon()
 			}
 		}
 
@@ -319,7 +331,12 @@ func (m Model) enterLogTab() (Model, tea.Cmd) {
 		}
 	}
 	if m.logTaskID > 0 {
-		return m, tea.Batch(m.fetchTaskLog(m.logTaskID), m.logTick())
+		cmds := []tea.Cmd{m.fetchTaskLog(m.logTaskID)}
+		if !m.logTickAlive {
+			m.logTickAlive = true
+			cmds = append(cmds, m.logTick())
+		}
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -436,20 +453,9 @@ func (m Model) renderTasksTab(b *strings.Builder) {
 			prStr = fmt.Sprintf("#%d", t.PRNumber)
 		}
 
-		// Dependencies.
-		deps := parseDeps(t)
-		depStr := ""
-		if len(deps) > 0 {
-			parts := make([]string, len(deps))
-			for j, d := range deps {
-				parts[j] = fmt.Sprintf("#%v", d)
-			}
-			depStr = " ← " + strings.Join(parts, ",")
-		}
-
-		fmt.Fprintf(b, "%s%s #%-5d %-*s  %-10s  %-6s  %-8s  %s%s\n",
+		fmt.Fprintf(b, "%s%s #%-5d %-*s  %-10s  %-6s  %-8s  %s\n",
 			cursor, icon, t.IssueNumber, maxTitle, title,
-			statusStr, prStr, costStr, elapsed, depStr)
+			statusStr, prStr, costStr, elapsed)
 	}
 
 	// Expanded detail.
@@ -647,7 +653,7 @@ func (m Model) renderLogTab(b *strings.Builder) {
 
 	logStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8"))
 	for _, line := range m.logLines[start:end] {
-		if len(line) > m.width-2 {
+		if m.width > 7 && len(line) > m.width-2 {
 			line = line[:m.width-5] + "..."
 		}
 		fmt.Fprintf(b, " %s\n", logStyle.Render(line))
@@ -727,13 +733,12 @@ func (m Model) triggerPoll() tea.Cmd {
 	}
 }
 
-func (m Model) stopTask(issueNumber int) tea.Cmd {
+type stopDaemonMsg struct{ err error }
+
+func (m Model) stopDaemon() tea.Cmd {
 	return func() tea.Msg {
-		err := m.client.StopTask(fmt.Sprintf("%d", issueNumber))
-		if err != nil {
-			return triggerPollMsg{err: fmt.Errorf("stop #%d: %w", issueNumber, err)}
-		}
-		return triggerPollMsg{err: nil}
+		err := m.client.Stop()
+		return stopDaemonMsg{err: err}
 	}
 }
 
@@ -861,13 +866,6 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
 	}
 	return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
-}
-
-func parseDeps(t api.TaskResponse) []any {
-	// TaskResponse doesn't directly expose Dependencies, but the raw JSON
-	// from GetTasks includes it. We parse it from the available fields.
-	// For now, return nil — deps are shown in the dep graph tab.
-	return nil
 }
 
 func wordWrap(s string, width int) string {

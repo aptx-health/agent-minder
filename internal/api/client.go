@@ -170,12 +170,6 @@ func (c *Client) GetTaskLog(id string) (string, error) {
 	return string(data), nil
 }
 
-// StopTask calls POST /tasks/{id}/stop on the remote daemon (if supported).
-// Falls back to POST /stop for the whole daemon if the endpoint doesn't exist.
-func (c *Client) StopTask(id string) error {
-	return c.post("/tasks/"+id+"/stop", nil)
-}
-
 // getRaw performs an authenticated GET request and returns the raw response body.
 func (c *Client) getRaw(path string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
