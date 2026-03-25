@@ -143,6 +143,33 @@ func (c *Client) Stop() error {
 	return c.post("/stop", nil)
 }
 
+// DepGraphResponse represents the /dep-graph endpoint response.
+type DepGraphResponse struct {
+	Strategy   string         `json:"strategy"`
+	Graph      map[string]any `json:"graph"`
+	CreatedAt  string         `json:"created_at"`
+	Reasoning  string         `json:"reasoning,omitempty"`
+	Confidence float64        `json:"confidence,omitempty"`
+}
+
+// GetDepGraph calls GET /dep-graph on the remote daemon.
+func (c *Client) GetDepGraph() (*DepGraphResponse, error) {
+	var resp DepGraphResponse
+	if err := c.get("/dep-graph", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetTaskLog calls GET /tasks/{id}/log on the remote daemon and returns the raw log content.
+func (c *Client) GetTaskLog(id string) (string, error) {
+	data, err := c.getRaw("/tasks/" + id + "/log")
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // getRaw performs an authenticated GET request and returns the raw response body.
 func (c *Client) getRaw(path string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
