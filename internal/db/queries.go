@@ -1059,7 +1059,8 @@ func (s *Store) ResetAutopilotTask(id int64) error {
 		UPDATE autopilot_tasks
 		SET status = 'queued', worktree_path = '', branch = '', agent_log = '',
 		    started_at = '', completed_at = '', pr_number = 0,
-		    failure_reason = '', failure_detail = ''
+		    failure_reason = '', failure_detail = '',
+		    review_risk = NULL, review_comment_id = NULL
 		WHERE id = ?
 	`, id)
 	return err

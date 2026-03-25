@@ -739,6 +739,58 @@ func (s *Supervisor) RestartTask(ctx context.Context, taskID int64) error {
 	return nil
 }
 
+// RefreshTask resets a completed/reviewed task back to queued so it can be re-run.
+// Unlike RestartTask (which handles failed/bailed/stopped), RefreshTask handles
+// tasks that reached a terminal or review state (done, review, reviewing, reviewed).
+func (s *Supervisor) RefreshTask(ctx context.Context, taskID int64) error {
+	tasks, err := s.store.GetAutopilotTasks(s.project.ID)
+	if err != nil {
+		return fmt.Errorf("get tasks: %w", err)
+	}
+
+	var task *db.AutopilotTask
+	for i := range tasks {
+		if tasks[i].ID == taskID {
+			task = &tasks[i]
+			break
+		}
+	}
+	if task == nil {
+		return fmt.Errorf("task %d not found", taskID)
+	}
+	validStatuses := map[string]bool{"done": true, "review": true, "reviewing": true, "reviewed": true}
+	if !validStatuses[task.Status] {
+		return fmt.Errorf("task #%d has status %q — only done, review, reviewing, or reviewed tasks can be refreshed", task.IssueNumber, task.Status)
+	}
+
+	// Clean up worktree and branch from the previous attempt.
+	if task.WorktreePath != "" {
+		if err := gitpkg.WorktreeRemove(s.repoDir, task.WorktreePath); err != nil {
+			if rmErr := os.RemoveAll(task.WorktreePath); rmErr != nil {
+				return fmt.Errorf("failed to clean up worktree at %s (git remove: %v, rm: %v)", task.WorktreePath, err, rmErr)
+			}
+			_ = gitpkg.WorktreePrune(s.repoDir)
+		}
+		if _, statErr := os.Stat(task.WorktreePath); statErr == nil {
+			return fmt.Errorf("worktree directory %s still exists after cleanup — remove it manually and retry", task.WorktreePath)
+		}
+	}
+	if task.Branch != "" {
+		_ = gitpkg.DeleteBranch(s.repoDir, task.Branch)
+	}
+
+	// Reset task fields in DB (clears PR number, review fields, etc.).
+	if err := s.store.ResetAutopilotTask(task.ID); err != nil {
+		return fmt.Errorf("reset task: %w", err)
+	}
+
+	s.emitEvent("started", fmt.Sprintf("Task #%d refreshed — re-queued", task.IssueNumber), task)
+
+	// Try to fill slots with the re-queued task.
+	s.fillSlots(ctx)
+	return nil
+}
+
 // ResumeTask resumes a failed or stopped task in its existing worktree.
 // Unlike RestartTask which nukes the worktree and starts fresh, ResumeTask
 // preserves the prior work and launches the agent with a continuation prompt.

@@ -1744,7 +1744,8 @@ func (m Model) computeHeightBudget() (analysisH, eventLogH, autopilotTaskH int) 
 		// Autopilot tab: slot section + task list header + VP + detail panel
 		isRunning := m.autopilotMode == "running" || m.autopilotMode == "stop-confirm" ||
 			m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" ||
-			m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "review-confirm" ||
+			m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "refresh-confirm" ||
+			m.autopilotMode == "review-confirm" ||
 			m.autopilotMode == "manual-confirm" || m.autopilotMode == "design-confirm" || m.autopilotMode == "completed"
 		if isRunning {
 			// Slot section.
@@ -2110,6 +2111,18 @@ func (m Model) renderBottomBar() string {
 			b.WriteString(helpKeyStyle().Render("esc"))
 			b.WriteString(helpStyle().Render(": cancel"))
 			b.WriteString("\n")
+		} else if m.activeTab == tabAutopilot && m.autopilotMode == "refresh-confirm" {
+			task := m.selectedAutopilotTask()
+			issueNum := 0
+			if task != nil {
+				issueNum = task.IssueNumber
+			}
+			b.WriteString(headerStyle().Render(fmt.Sprintf("  Refresh #%d? Will reset to queued and re-run from scratch. ", issueNum)))
+			b.WriteString(helpKeyStyle().Render("enter"))
+			b.WriteString(helpStyle().Render(": refresh • "))
+			b.WriteString(helpKeyStyle().Render("esc"))
+			b.WriteString(helpStyle().Render(": cancel"))
+			b.WriteString("\n")
 		} else if m.activeTab == tabAutopilot && m.autopilotMode == "restart-confirm" {
 			task := m.selectedAutopilotTask()
 			issueNum := 0
@@ -2283,11 +2296,19 @@ func (m Model) renderHelpBar() string {
 				case "review":
 					condensed = append(condensed,
 						hint{"r", "review"},
+						hint{"R", "refresh"},
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "reviewing", "reviewed":
+					condensed = append(condensed,
+						hint{"R", "refresh"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
 				case "done":
 					condensed = append(condensed,
+						hint{"R", "refresh"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
@@ -2305,14 +2326,27 @@ func (m Model) renderHelpBar() string {
 			task := m.selectedAutopilotTask()
 			if task != nil {
 				switch task.Status {
-				case "failed", "bailed", "stopped", "done":
+				case "failed", "bailed", "stopped":
 					condensed = append(condensed,
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "done":
+					condensed = append(condensed,
+						hint{"R", "refresh"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)
 				case "review":
 					condensed = append(condensed,
 						hint{"r", "review"},
+						hint{"R", "refresh"},
+						hint{"l", "log"},
+						hint{"c", "copy path"},
+					)
+				case "reviewing", "reviewed":
+					condensed = append(condensed,
+						hint{"R", "refresh"},
 						hint{"l", "log"},
 						hint{"c", "copy path"},
 					)

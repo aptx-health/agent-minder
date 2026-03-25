@@ -237,7 +237,7 @@ type Model struct {
 
 	// Autopilot.
 	autopilotSupervisor       *autopilot.Supervisor
-	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "review-confirm", "manual-confirm", "design-confirm", "add-slot-confirm", "completed", "reprepare-choice"
+	autopilotMode             string // "", "scan-confirm", "dep-select", "confirm", "running", "stop-confirm", "stop-task-confirm", "restart-confirm", "resume-or-restart-confirm", "refresh-confirm", "review-confirm", "manual-confirm", "design-confirm", "add-slot-confirm", "completed", "reprepare-choice"
 	autopilotModeBeforeReview string // saved mode to restore on review-confirm cancel
 	autopilotPrepareResult    *autopilot.PrepareResult
 	autopilotStatus           string
@@ -1104,7 +1104,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickEvery()
 
 	case autopilotTickMsg:
-		if m.autopilotMode == "running" || m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" || m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "review-confirm" || m.autopilotMode == "design-confirm" {
+		if m.autopilotMode == "running" || m.autopilotMode == "stop-task-confirm" || m.autopilotMode == "restart-confirm" || m.autopilotMode == "resume-or-restart-confirm" || m.autopilotMode == "refresh-confirm" || m.autopilotMode == "review-confirm" || m.autopilotMode == "design-confirm" {
 			m.rebuildAutopilotTaskContent()
 			return m, autopilotTick()
 		}
@@ -1279,6 +1279,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.autopilotMode == "refresh-confirm" && m.activeTab == tabAutopilot {
+		switch msg.String() {
+		case "enter":
+			return m.confirmRefreshTask()
+		case "esc":
+			m.autopilotMode = "running"
+			return m, nil
+		}
+	}
 	if m.autopilotMode == "review-confirm" && m.activeTab == tabAutopilot {
 		switch msg.String() {
 		case "enter":
@@ -1417,6 +1426,15 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			p.PollNow(ctx)
 			return nil
 		})
+	case "R":
+		// Refresh: reset a done/review/reviewed task back to queued.
+		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
+			task := m.selectedAutopilotTask()
+			if task != nil && (task.Status == "done" || task.Status == "review" || task.Status == "reviewing" || task.Status == "reviewed") {
+				m.autopilotMode = "refresh-confirm"
+				return m, nil
+			}
+		}
 	case "g":
 		// Design interview: available on any task during autopilot running/completed.
 		if m.activeTab == tabAutopilot && (m.autopilotMode == "running" || m.autopilotMode == "completed") {
@@ -2602,6 +2620,42 @@ func (m Model) confirmRestartTask() (tea.Model, tea.Cmd) {
 			Time:    time.Now(),
 			Type:    "started",
 			Summary: fmt.Sprintf("Restarted #%d — re-queued", issueNum),
+		})
+	}
+}
+
+// confirmRefreshTask resets a done/review/reviewed task back to queued.
+func (m Model) confirmRefreshTask() (tea.Model, tea.Cmd) {
+	task := m.selectedAutopilotTask()
+	if task == nil || (task.Status != "done" && task.Status != "review" && task.Status != "reviewing" && task.Status != "reviewed") {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	sup := m.autopilotSupervisor
+	if sup == nil {
+		m.autopilotMode = "running"
+		return m, nil
+	}
+
+	taskID := task.ID
+	issueNum := task.IssueNumber
+	m.autopilotMode = "running"
+
+	return m, func() tea.Msg {
+		ctx, cancel := opCtx()
+		defer cancel()
+		if err := sup.RefreshTask(ctx, taskID); err != nil {
+			return autopilotEventMsg(autopilot.Event{
+				Time:    time.Now(),
+				Type:    "error",
+				Summary: fmt.Sprintf("Failed to refresh #%d: %v", issueNum, err),
+			})
+		}
+		return autopilotEventMsg(autopilot.Event{
+			Time:    time.Now(),
+			Type:    "started",
+			Summary: fmt.Sprintf("Refreshed #%d — re-queued", issueNum),
 		})
 	}
 }
