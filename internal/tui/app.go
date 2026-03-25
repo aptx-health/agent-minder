@@ -790,7 +790,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.polling = true
 				m.activeTab = tabAutopilot
 				return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-					result, err := sup.ReprepareKeep(context.Background())
+					ctx, cancel := opCtx()
+					defer cancel()
+					result, err := sup.ReprepareKeep(ctx)
 					return reprepareKeepResultMsg{result: result, err: err}
 				})
 			}
@@ -933,7 +935,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p := m.poller
 			cmds = append(cmds, func() tea.Msg {
 				time.Sleep(4 * time.Second)
-				p.StatusNow(context.Background())
+				ctx, cancel := opCtx()
+				defer cancel()
+				p.StatusNow(ctx)
 				return nil
 			})
 		}
@@ -1147,7 +1151,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.autopilotStatus = "Keeping existing graph..."
 			m.polling = true
 			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				result, err := sup.ReprepareKeep(context.Background())
+				ctx, cancel := opCtx()
+				defer cancel()
+				result, err := sup.ReprepareKeep(ctx)
 				return reprepareKeepResultMsg{result: result, err: err}
 			})
 		case "r":
@@ -1161,7 +1167,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.polling = true
 			guidance := m.autopilotDepGuidance
 			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				result, err := sup.ReprepareRebuild(context.Background(), guidance)
+				ctx, cancel := opCtx()
+				defer cancel()
+				result, err := sup.ReprepareRebuild(ctx, guidance)
 				return reprepareRebuildResultMsg{result: result, err: err}
 			})
 		case "esc", "n":
@@ -1391,12 +1399,16 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.activeTab == tabOperations {
 			// Sync only — gather git/bus data without LLM analysis.
 			return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-				p.StatusNow(context.Background())
+				ctx, cancel := opCtx()
+				defer cancel()
+				p.StatusNow(ctx)
 				return nil
 			})
 		}
 		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-			p.PollNow(context.Background())
+			ctx, cancel := opCtx()
+			defer cancel()
+			p.PollNow(ctx)
 			return nil
 		})
 	case "g":
@@ -1639,7 +1651,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.autopilotPaused {
-			m.autopilotSupervisor.Resume(context.Background())
+			ctx, cancel := opCtx()
+			defer cancel()
+			m.autopilotSupervisor.Resume(ctx)
 			m.autopilotPaused = false
 			m.autopilotStatus = "Resumed — filling slots"
 		} else {
@@ -1790,7 +1804,9 @@ func (m Model) updateBroadcast(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.broadcastInput.Blur()
 		p := m.poller
 		return m, func() tea.Msg {
-			busMsg, err := p.Broadcast(context.Background(), value)
+			ctx, cancel := opCtx()
+			defer cancel()
+			busMsg, err := p.Broadcast(ctx, value)
 			if err != nil {
 				return broadcastResultMsg{err: err}
 			}
@@ -1822,7 +1838,9 @@ func (m Model) updateUserMsg(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.userMsgInput.Blur()
 		p := m.poller
 		return m, func() tea.Msg {
-			response, err := p.QueryAnalyzer(context.Background(), value)
+			ctx, cancel := opCtx()
+			defer cancel()
+			response, err := p.QueryAnalyzer(ctx, value)
 			if err != nil {
 				return userMsgResultMsg{err: err}
 			}
@@ -1849,7 +1867,9 @@ func (m Model) updateOnboard(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.onboardInput.Blur()
 		p := m.poller
 		return m, func() tea.Msg {
-			busMsg, err := p.Onboard(context.Background(), guidance)
+			ctx, cancel := opCtx()
+			defer cancel()
+			busMsg, err := p.Onboard(ctx, guidance)
 			if err != nil {
 				return onboardResultMsg{err: err}
 			}
@@ -1906,7 +1926,9 @@ func (m Model) updateRebuildDeps(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.rebuildDepsInput.Blur()
 		sup := m.autopilotSupervisor
 		return m, func() tea.Msg {
-			options, err := sup.RebuildDependencies(context.Background(), guidance)
+			ctx, cancel := opCtx()
+			defer cancel()
+			options, err := sup.RebuildDependencies(ctx, guidance)
 			return rebuildDepsResultMsg{options: options, err: err}
 		}
 	}
@@ -2117,9 +2139,11 @@ func (m Model) submitTrackForm() (tea.Model, tea.Cmd) {
 		m.trackStatus = fmt.Sprintf("Fetching %d items...", len(refs))
 		p := m.poller
 		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+			ctx, cancel := opCtx()
+			defer cancel()
 			var items []trackPreviewItem
 			for _, ref := range refs {
-				status, err := p.FetchItemStatus(context.Background(), ref)
+				status, err := p.FetchItemStatus(ctx, ref)
 				if err != nil {
 					return trackFetchResultMsg{err: fmt.Errorf("%s/%s#%d: %w", ref.Owner, ref.Repo, ref.Number, err)}
 				}
@@ -2221,10 +2245,12 @@ func (m Model) executeTrackAction() (tea.Model, tea.Cmd) {
 			refs[i] = item.ref
 		}
 		return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
+			ctx, cancel := opCtx()
+			defer cancel()
 			var added, failed int
 			var errs []string
 			for _, ref := range refs {
-				_, err := p.AddTrackedItemByRef(context.Background(), ref)
+				_, err := p.AddTrackedItemByRef(ctx, ref)
 				if err != nil {
 					failed++
 					errs = append(errs, fmt.Sprintf("%s/%s#%d: %v", ref.Owner, ref.Repo, ref.Number, err))
@@ -2257,6 +2283,13 @@ func (m Model) executeTrackAction() (tea.Model, tea.Cmd) {
 		}
 		return bulkUntrackResultMsg{removed: removed, failed: failed, errors: errs}
 	})
+}
+
+// opCtx returns a context with a 2-minute timeout for TUI async operations.
+// This prevents indefinite hangs when network or database connections are stale
+// (e.g., after laptop sleep/wake).
+func opCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 2*time.Minute)
 }
 
 // listenForEvents returns a command that waits for the next poller event.
@@ -2364,7 +2397,9 @@ func (m Model) prepareAutopilot() (tea.Model, tea.Cmd) {
 	guidance := m.autopilotDepGuidance
 
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-		result, err := sup.Prepare(context.Background(), guidance)
+		ctx, cancel := opCtx()
+		defer cancel()
+		result, err := sup.Prepare(ctx, guidance)
 		return autopilotPrepareResultMsg{result: result, err: err}
 	})
 }
@@ -2388,7 +2423,9 @@ func (m Model) applyDepSelection() (tea.Model, tea.Cmd) {
 		m.autopilotMode = "running"
 		m.autopilotDepOptions = nil
 		return m, func() tea.Msg {
-			result, err := sup.ApplyRebuildDepOption(context.Background(), opt)
+			ctx, cancel := opCtx()
+			defer cancel()
+			result, err := sup.ApplyRebuildDepOption(ctx, opt)
 			return applyDepOptionResultMsg{result: result, err: err}
 		}
 	}
@@ -2397,7 +2434,9 @@ func (m Model) applyDepSelection() (tea.Model, tea.Cmd) {
 	m.autopilotStatus = "Applying dependencies..."
 	m.polling = true
 	return m, tea.Batch(m.spinner.Tick, func() tea.Msg {
-		err := sup.ApplyDepOption(context.Background(), opt)
+		ctx, cancel := opCtx()
+		defer cancel()
+		err := sup.ApplyDepOption(ctx, opt)
 		if err != nil {
 			return autopilotApplyResultMsg{err: err}
 		}
@@ -2444,6 +2483,7 @@ func (m Model) confirmAutopilot() (tea.Model, tea.Cmd) {
 	// Supervisor stays alive after all tasks complete — shows idle slots.
 	// User presses A to stop explicitly.
 	sup.SetDaemonMode(true)
+	// Launch uses a long-lived context — autopilot runs until explicitly stopped.
 	sup.Launch(context.Background())
 
 	// Show temporary notification with autopilot limits.
@@ -2540,7 +2580,9 @@ func (m Model) confirmRestartTask() (tea.Model, tea.Cmd) {
 	m.autopilotMode = "running"
 
 	return m, func() tea.Msg {
-		if err := sup.RestartTask(context.Background(), taskID); err != nil {
+		ctx, cancel := opCtx()
+		defer cancel()
+		if err := sup.RestartTask(ctx, taskID); err != nil {
 			return autopilotEventMsg(autopilot.Event{
 				Time:    time.Now(),
 				Type:    "error",
@@ -2574,7 +2616,9 @@ func (m Model) confirmResumeTask() (tea.Model, tea.Cmd) {
 	m.autopilotMode = "running"
 
 	return m, func() tea.Msg {
-		if err := sup.ResumeTask(context.Background(), taskID); err != nil {
+		ctx, cancel := opCtx()
+		defer cancel()
+		if err := sup.ResumeTask(ctx, taskID); err != nil {
 			return autopilotEventMsg(autopilot.Event{
 				Time:    time.Now(),
 				Type:    "error",
@@ -2608,6 +2652,8 @@ func (m Model) confirmBumpAndResumeTask() (tea.Model, tea.Cmd) {
 	m.autopilotMode = "running"
 
 	return m, func() tea.Msg {
+		ctx, cancel := opCtx()
+		defer cancel()
 		newTurns, newBudget, err := sup.BumpTaskLimits(taskID)
 		if err != nil {
 			return autopilotEventMsg(autopilot.Event{
@@ -2616,7 +2662,7 @@ func (m Model) confirmBumpAndResumeTask() (tea.Model, tea.Cmd) {
 				Summary: fmt.Sprintf("Failed to bump limits for #%d: %v", issueNum, err),
 			})
 		}
-		if err := sup.ResumeTask(context.Background(), taskID); err != nil {
+		if err := sup.ResumeTask(ctx, taskID); err != nil {
 			return autopilotEventMsg(autopilot.Event{
 				Time:    time.Now(),
 				Type:    "error",
@@ -2671,7 +2717,9 @@ func (m Model) confirmAddSlot() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	newCount := sup.AddSlot(context.Background())
+	ctx, cancel := opCtx()
+	defer cancel()
+	newCount := sup.AddSlot(ctx)
 
 	// Persist to project settings.
 	m.project.AutopilotMaxAgents = newCount
@@ -2704,7 +2752,9 @@ func (m Model) launchReviewSession() (tea.Model, tea.Cmd) {
 	m.autopilotStatus = fmt.Sprintf("Launching review session for #%d...", issueNum)
 
 	return m, func() tea.Msg {
-		result, err := sup.ReviewSession(context.Background(), taskID)
+		ctx, cancel := opCtx()
+		defer cancel()
+		result, err := sup.ReviewSession(ctx, taskID)
 		return reviewSessionResultMsg{result: result, err: err}
 	}
 }
@@ -2729,7 +2779,9 @@ func (m Model) launchManualSession() (tea.Model, tea.Cmd) {
 	m.autopilotStatus = fmt.Sprintf("Spinning off worktree for #%d...", issueNum)
 
 	return m, func() tea.Msg {
-		result, err := sup.ManualSession(context.Background(), taskID)
+		ctx, cancel := opCtx()
+		defer cancel()
+		result, err := sup.ManualSession(ctx, taskID)
 		return reviewSessionResultMsg{result: result, err: err}
 	}
 }
@@ -2754,7 +2806,9 @@ func (m Model) launchDesignSession() (tea.Model, tea.Cmd) {
 	m.autopilotStatus = fmt.Sprintf("Launching design interview for #%d...", issueNum)
 
 	return m, func() tea.Msg {
-		result, err := sup.DesignSession(context.Background(), taskID)
+		ctx, cancel := opCtx()
+		defer cancel()
+		result, err := sup.DesignSession(ctx, taskID)
 		return reviewSessionResultMsg{result: result, err: err}
 	}
 }

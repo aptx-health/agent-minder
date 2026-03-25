@@ -662,7 +662,7 @@ func (p *Poller) gatherActivity(ctx context.Context) (*gatherResult, error) {
 	// Gather message bus activity.
 	var msgSummary strings.Builder
 	dbPath := msgbus.DefaultDBPath()
-	client, err := msgbus.Open(dbPath)
+	client, err := msgbus.OpenContext(ctx, dbPath)
 	if err == nil {
 		defer func() { _ = client.Close() }()
 		msgs, _ := client.RecentMessages(p.project.AnalysisInterval()*2, p.project.Name)
