@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  agent-minder deploy watch — macOS LaunchAgent
+
+  Install with: scripts/install-macos.sh
+  Or manually:
+    1. Replace __HOME__ with your home directory path
+    2. Copy to ~/Library/LaunchAgents/com.dustinlange.agent-minder.plist
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dustinlange.agent-minder.plist
+-->
+<dict>
+    <key>Label</key>
+    <string>com.dustinlange.agent-minder</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>exec "__HOME__/.agent-minder/deploy/start-daemon-macos.sh"</string>
+    </array>
+
+    <!-- Start when the agent is loaded (at login if enabled) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on crash, stay dead on clean exit (deploy stop) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Min seconds between restarts -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Background scheduling priority — good macOS citizen -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityBackgroundIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <!-- Logs (launchd cannot expand $HOME — install script replaces __HOME__) -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/.agent-minder/launchd-daemon.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.agent-minder/launchd-daemon.log</string>
+</dict>
+</plist>

@@ -96,7 +96,7 @@ fi
 # --- Step 6: Clone and build agent-minder ---
 info "Building agent-minder..."
 BUILD_DIR=$(mktemp -d)
-trap "rm -rf ${BUILD_DIR}" EXIT
+trap 'rm -rf "${BUILD_DIR}"' EXIT
 git clone --depth 1 https://github.com/aptx-health/agent-minder.git "${BUILD_DIR}"
 export PATH=$PATH:/usr/local/go/bin
 cd "${BUILD_DIR}"
@@ -106,6 +106,7 @@ chmod +x /usr/local/bin/agent-minder
 # Copy deploy assets for later steps
 mkdir -p /opt/agent-minder
 cp -r "${BUILD_DIR}/deploy" "${DEPLOY_ASSETS}"
+chmod +x "${DEPLOY_ASSETS}/start-daemon.sh"
 
 # --- Step 7: Set up directories ---
 info "Setting up directories..."

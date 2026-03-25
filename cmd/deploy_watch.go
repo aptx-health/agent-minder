@@ -32,6 +32,7 @@ var (
 	watchBudgetPauseRunning bool
 	watchDryRun             bool
 	watchDaemon             bool
+	watchForeground         bool
 	watchDeployID           string
 	watchProject            string
 )
@@ -66,6 +67,7 @@ func init() {
 	deployWatchCmd.Flags().BoolVar(&watchBudgetPauseRunning, "budget-pause-running", false, "Also stop running agents when total budget ceiling is hit")
 	deployWatchCmd.Flags().BoolVar(&watchDryRun, "dry-run", false, "Show matching issues without launching")
 	deployWatchCmd.Flags().StringVar(&watchProject, "project", "", "Inherit settings from an existing project")
+	deployWatchCmd.Flags().BoolVar(&watchForeground, "foreground", false, "Run in foreground instead of daemonizing (for launchd/systemd)")
 
 	// Hidden flags for daemon re-exec.
 	deployWatchCmd.Flags().BoolVar(&watchDaemon, "daemon", false, "Run as background daemon")
@@ -268,6 +270,20 @@ func runDeployWatch(cmd *cobra.Command, _ []string) error {
 	}
 	if err := store.AddRepo(repoRecord); err != nil {
 		return fmt.Errorf("enroll repo: %w", err)
+	}
+
+	// Foreground mode: run daemon inline (for launchd/systemd).
+	if watchForeground {
+		watchDeployID = id
+		_ = os.Setenv("GITHUB_TOKEN", ghToken)
+		// Persist deploy-id so launchd restarts can skip project creation.
+		if err := deploy.SaveForegroundID("watch", id); err != nil {
+			log.Printf("Warning: could not save foreground deploy-id: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "Watch %s starting in foreground (PID %d)\n", id, os.Getpid())
+		fmt.Fprintf(os.Stderr, "Repo:   %s/%s\n", owner, repo)
+		fmt.Fprintf(os.Stderr, "Filter: %s = %q\n", filterType, filterValue)
+		return runWatchDaemon()
 	}
 
 	// Re-exec as daemon.

@@ -336,6 +336,8 @@ sudo -u minder claude auth login
 sudo systemctl restart agent-minder-daemon
 ```
 
+> **Note:** The systemd unit uses `ProtectHome=read-only`, so the daemon can read existing auth tokens but cannot write new ones. If Claude Code needs to refresh its token, the interactive `claude auth login` step above must be done outside the service.
+
 ### Disk Full
 
 **Symptom:** SQLite errors, agent failures, git clone failures.
