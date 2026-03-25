@@ -606,7 +606,7 @@ func renderTaskContext(task *db.AutopilotTask, baseBranch, owner, repo, testComm
 	fmt.Fprintf(&b, "Rebase before push:\n")
 	fmt.Fprintf(&b, "  git fetch origin %s\n", baseBranch)
 	fmt.Fprintf(&b, "  git rebase origin/%s\n", baseBranch)
-	fmt.Fprintf(&b, "Draft PR target: %s\n", baseBranch)
+	fmt.Fprintf(&b, "Draft PR: gh pr create --draft --base %s -R %s/%s\n", baseBranch, owner, repo)
 	fmt.Fprintf(&b, "Label blocked (if bailing): gh issue edit %d --add-label \"blocked\" -R %s/%s\n", task.IssueNumber, owner, repo)
 	fmt.Fprintf(&b, "Remove in-progress (if bailing): gh issue edit %d --remove-label \"in-progress\" -R %s/%s\n", task.IssueNumber, owner, repo)
 

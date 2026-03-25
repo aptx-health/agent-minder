@@ -11,6 +11,7 @@ import (
 
 	"github.com/dustinlange/agent-minder/internal/db"
 	"github.com/dustinlange/agent-minder/internal/discovery"
+	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	"github.com/dustinlange/agent-minder/internal/onboarding"
 	"github.com/spf13/cobra"
 )
@@ -191,7 +192,22 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 8. Write to database.
+	// 8. Base branch for autopilot worktrees and PRs.
+	// Auto-detect from the first repo, but always ask the user to confirm.
+	detectedBranch := "main"
+	if len(repos) > 0 {
+		if detected, err := gitpkg.DefaultBranch(repos[0].Path); err == nil && detected != "" {
+			detectedBranch = detected
+		}
+	}
+	fmt.Printf("\nAutopilot base branch (worktrees and PR targets) [%s]: ", detectedBranch)
+	baseBranchInput := readLine(reader)
+	baseBranch := detectedBranch
+	if baseBranchInput != "" {
+		baseBranch = baseBranchInput
+	}
+
+	// 9. Write to database.
 	project := &db.Project{
 		Name:                projectName,
 		GoalType:            goal.Name,
@@ -202,6 +218,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		AutoEnrollWorktrees: autoEnrollBool,
 		IdlePauseSec:        idlePauseSec,
 		AutopilotSkipLabel:  skipLabel,
+		AutopilotBaseBranch: baseBranch,
 		MinderIdentity:      projectName + "/minder",
 		LLMSummarizerModel:  "haiku",
 		LLMAnalyzerModel:    "opus",
