@@ -882,12 +882,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.autopilotTotal = r.Total
-		m.autopilotDepOptions = r.Options
-		m.autopilotDepSelection = 0
 		if len(r.Options) > 0 {
+			m.autopilotDepOptions = r.Options
+			m.autopilotDepSelection = 0
 			m.autopilotUnblocked = r.Options[0].Unblocked
+			m.autopilotMode = "dep-select"
+			m.rebuildAutopilotTaskContent()
+			return m, nil
 		}
-		m.autopilotMode = "dep-select"
+		// No workable tasks after rebuild — go straight to confirm.
+		unblockedTasks, _ := m.store.QueuedUnblockedTasks(m.project.ID)
+		m.autopilotUnblocked = len(unblockedTasks)
+		m.autopilotMode = "confirm"
 		m.rebuildAutopilotTaskContent()
 		return m, nil
 
