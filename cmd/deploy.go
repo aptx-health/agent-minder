@@ -27,16 +27,17 @@ import (
 )
 
 var (
-	deployMaxAgents int
-	deployMaxTurns  int
-	deployMaxBudget float64
-	deployDryRun    bool
-	deployDaemon    bool
-	deployID        string
-	deployProject   string
-	deployServe     string
-	deployAPIKey    string
-	deployRemote    string
+	deployMaxAgents  int
+	deployMaxTurns   int
+	deployMaxBudget  float64
+	deployDryRun     bool
+	deployDaemon     bool
+	deployForeground bool
+	deployID         string
+	deployProject    string
+	deployServe      string
+	deployAPIKey     string
+	deployRemote     string
 )
 
 var deployCmd = &cobra.Command{
@@ -81,6 +82,7 @@ func init() {
 	deployCmd.Flags().StringVar(&deployProject, "project", "", "Inherit settings (agents, turns, budget, skip label, base branch) from an existing project")
 
 	deployCmd.Flags().StringVar(&deployServe, "serve", "", "Enable HTTP API server on the given address (e.g. :7749)")
+	deployCmd.Flags().BoolVar(&deployForeground, "foreground", false, "Run in foreground instead of daemonizing (for launchd/systemd)")
 
 	// Persistent flags shared by all subcommands (list, status, stop).
 	deployCmd.PersistentFlags().StringVar(&deployRemote, "remote", "", "Query a remote daemon at host:port (or set MINDER_REMOTE)")
@@ -311,6 +313,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		// Clean up the ephemeral project since we're not launching.
 		_ = store.DeleteProject(project.ID)
 		return nil
+	}
+
+	// Foreground mode: run daemon inline (for launchd/systemd).
+	if deployForeground {
+		deployID = id
+		_ = os.Setenv("GITHUB_TOKEN", ghToken)
+		// Persist deploy-id so launchd restarts can skip project creation.
+		if err := deploy.SaveForegroundID("deploy", id); err != nil {
+			log.Printf("Warning: could not save foreground deploy-id: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "Deploy %s starting in foreground (PID %d)\n", id, os.Getpid())
+		return runDeployDaemon()
 	}
 
 	// Re-exec as daemon.

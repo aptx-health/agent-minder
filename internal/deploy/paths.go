@@ -61,6 +61,22 @@ func RemovePID(id string) error {
 	return os.Remove(PIDPath(id))
 }
 
+// ForegroundIDPath returns the path where the deploy-id is saved for
+// foreground/launchd restarts. The tag distinguishes between different
+// foreground services (e.g., "watch" vs "deploy").
+func ForegroundIDPath(tag string) string {
+	return filepath.Join(Dir(), "launchd-"+tag+"-id")
+}
+
+// SaveForegroundID persists the deploy ID for launchd restart recovery.
+func SaveForegroundID(tag, id string) error {
+	dir := Dir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create deploy dir: %w", err)
+	}
+	return os.WriteFile(ForegroundIDPath(tag), []byte(id), 0o644)
+}
+
 // RespawnDaemon re-launches the deploy daemon for the given deploy ID.
 // Used when a task is restarted but the daemon has already exited.
 func RespawnDaemon(id string) error {
