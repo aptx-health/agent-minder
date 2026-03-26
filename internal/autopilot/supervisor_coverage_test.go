@@ -5750,21 +5750,29 @@ func TestWatchPoll_LabelFilter_CreatesNewTasks(t *testing.T) {
 	defer ts.Close()
 
 	sup, store := newWatchPollSupervisor(t, "label", "ready", ts.URL)
-	if got := sup.watchPoll(context.Background()); got != 2 {
-		t.Errorf("watchPoll = %d, want 2 (issues 10 and 12, skip 11)", got)
+	if got := sup.watchPoll(context.Background()); got != 3 {
+		t.Errorf("watchPoll = %d, want 3 (issues 10, 11 manual, and 12)", got)
 	}
 
 	tasks, err := store.GetAutopilotTasks(sup.project.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 2 {
-		t.Fatalf("task count = %d, want 2", len(tasks))
+	if len(tasks) != 3 {
+		t.Fatalf("task count = %d, want 3", len(tasks))
 	}
+	statusByIssue := make(map[int]string, len(tasks))
 	for _, task := range tasks {
-		if task.Status != "pending" {
-			t.Errorf("task #%d status = %q, want pending", task.IssueNumber, task.Status)
-		}
+		statusByIssue[task.IssueNumber] = task.Status
+	}
+	if s := statusByIssue[10]; s != "pending" {
+		t.Errorf("task #10 status = %q, want pending", s)
+	}
+	if s := statusByIssue[11]; s != "manual" {
+		t.Errorf("task #11 status = %q, want manual (has no-agent label)", s)
+	}
+	if s := statusByIssue[12]; s != "pending" {
+		t.Errorf("task #12 status = %q, want pending", s)
 	}
 }
 
