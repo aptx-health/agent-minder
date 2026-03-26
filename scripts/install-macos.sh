@@ -90,9 +90,9 @@ mkdir -p "${HOME}/Library/LaunchAgents"
 # --- Copy wrapper scripts ---
 info "Installing wrapper scripts..."
 cp "${DEPLOY_DIR}/start-daemon-macos.sh" "${HOME}/.agent-minder/deploy/"
-cp "${DEPLOY_DIR}/start-discord-macos.sh" "${HOME}/.agent-minder/deploy/"
 chmod +x "${HOME}/.agent-minder/deploy/start-daemon-macos.sh"
-chmod +x "${HOME}/.agent-minder/deploy/start-discord-macos.sh"
+# Clean up legacy Discord wrapper (now embedded in the daemon).
+rm -f "${HOME}/.agent-minder/deploy/start-discord-macos.sh"
 
 # --- Copy env file (if not exists) ---
 if [[ ! -f "${HOME}/.agent-minder/deploy/agent-minder.env" ]]; then
@@ -104,14 +104,13 @@ else
 fi
 
 # --- Generate plists (expand __HOME__) ---
-info "Installing LaunchAgent plists..."
+info "Installing LaunchAgent plist..."
 sed "s|__HOME__|${HOME}|g" "${DEPLOY_DIR}/com.dustinlange.agent-minder.plist.template" \
     > "${HOME}/Library/LaunchAgents/com.dustinlange.agent-minder.plist"
+# Clean up legacy Discord plist (now embedded in the daemon).
+rm -f "${HOME}/Library/LaunchAgents/com.dustinlange.agent-minder.discord.plist"
 
-sed "s|__HOME__|${HOME}|g" "${DEPLOY_DIR}/com.dustinlange.agent-minder.discord.plist.template" \
-    > "${HOME}/Library/LaunchAgents/com.dustinlange.agent-minder.discord.plist"
-
-info "Plists installed to ~/Library/LaunchAgents/"
+info "Plist installed to ~/Library/LaunchAgents/"
 
 # --- Done ---
 echo ""
@@ -137,7 +136,7 @@ echo ""
 echo "  To stop:    launchctl bootout gui/\$(id -u)/com.dustinlange.agent-minder"
 echo "  To restart: launchctl kickstart -k gui/\$(id -u)/com.dustinlange.agent-minder"
 echo ""
-echo "  Optional — Discord bot (requires SERVE_ADDR + Discord tokens in env):"
-echo "       launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.dustinlange.agent-minder.discord.plist"
+echo "  Optional — Discord bot (runs embedded, no separate service needed):"
+echo "       Set SERVE_ADDR + Discord tokens in env, or run 'agent-minder setup'"
 echo ""
 echo "See docs/macos-launchagent.md for the full guide."

@@ -68,6 +68,8 @@ func init() {
 	deployWatchCmd.Flags().BoolVar(&watchDryRun, "dry-run", false, "Show matching issues without launching")
 	deployWatchCmd.Flags().StringVar(&watchProject, "project", "", "Inherit settings from an existing project")
 	deployWatchCmd.Flags().BoolVar(&watchForeground, "foreground", false, "Run in foreground instead of daemonizing (for launchd/systemd)")
+	deployWatchCmd.Flags().StringVar(&deployServe, "serve", "", "Enable HTTP API server on the given address (e.g. :7749)")
+	deployWatchCmd.Flags().StringVar(&deployAPIKey, "api-key", "", "API key for HTTP server authentication (or set MINDER_API_KEY)")
 
 	// Hidden flags for daemon re-exec.
 	deployWatchCmd.Flags().BoolVar(&watchDaemon, "daemon", false, "Run as background daemon")
@@ -415,6 +417,20 @@ func runWatchDaemon() error {
 	go drainEvents(supervisor)
 	log.Printf("Watch %s: launched long-lived supervisor", watchDeployID)
 
+	// Start HTTP API server + Discord bot if --serve is set.
+	svc := startDaemonServices(ctx, serviceConfig{
+		Store:     store,
+		ProjectID: project.ID,
+		DeployID:  watchDeployID,
+		StopDaemon: func() {
+			log.Printf("Stop requested via API")
+			supervisor.Stop()
+			cancel()
+		},
+		BudgetResume:   supervisor.ResumeBudget,
+		IsBudgetPaused: supervisor.IsBudgetPaused,
+	})
+
 	for {
 		// Poll GitHub for matching issues and queue new ones as "pending".
 		// The supervisor's 30s ticker will ingest them, run dep analysis,
@@ -433,6 +449,9 @@ func runWatchDaemon() error {
 		case sig := <-sigCh:
 			timer.Stop()
 			log.Printf("Received signal %v, stopping...", sig)
+			if svc != nil {
+				svc.Shutdown()
+			}
 			supervisor.Stop()
 			cancel()
 			log.Printf("Watch %s stopped", watchDeployID)

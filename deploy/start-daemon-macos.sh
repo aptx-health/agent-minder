@@ -8,6 +8,7 @@
 #   - Environment sourcing from ~/.agent-minder/deploy/agent-minder.env
 #   - Deploy-id persistence across restarts (first run vs crash recovery)
 #   - Conditional --milestone / --label flag
+#   - HTTP API server + Discord bot (if SERVE_ADDR / Discord tokens are set)
 #
 # On first run:  uses --foreground to do full setup + run daemon inline
 # On restart:    uses --daemon --deploy-id <saved-id> to skip duplicate setup
