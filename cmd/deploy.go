@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -490,38 +489,20 @@ func runDeployDaemon() error {
 		return nil
 	}
 
-	// Start HTTP API server if --serve is set.
-	var apiServer *api.Server
-	serveAddr := deployServe
-	if serveAddr == "" {
-		serveAddr = os.Getenv("MINDER_SERVE")
-	}
-	if serveAddr != "" {
-		apiKeyVal := deployAPIKey
-		if apiKeyVal == "" {
-			apiKeyVal = os.Getenv("MINDER_API_KEY")
-		}
-		apiServer = api.New(api.Config{
-			Store:       store,
-			ProjectID:   project.ID,
-			DeployID:    deployID,
-			APIKey:      apiKeyVal,
-			BindAddr:    serveAddr,
-			TriggerPoll: triggerPoll,
-			StopDaemon: func() {
-				log.Printf("Stop requested via API")
-				supervisor.Stop()
-				cancel()
-			},
-			BudgetResume:   supervisor.ResumeBudget,
-			IsBudgetPaused: supervisor.IsBudgetPaused,
-		})
-		go func() {
-			if err := apiServer.ListenAndServe(serveAddr); err != nil && err != http.ErrServerClosed {
-				log.Printf("API server error: %v", err)
-			}
-		}()
-	}
+	// Start HTTP API server + Discord bot if --serve is set.
+	svc := startDaemonServices(ctx, serviceConfig{
+		Store:     store,
+		ProjectID: project.ID,
+		DeployID:  deployID,
+		StopDaemon: func() {
+			log.Printf("Stop requested via API")
+			supervisor.Stop()
+			cancel()
+		},
+		TriggerPoll:    triggerPoll,
+		BudgetResume:   supervisor.ResumeBudget,
+		IsBudgetPaused: supervisor.IsBudgetPaused,
+	})
 
 	// Drain supervisor events to log.
 	go func() {
@@ -551,13 +532,9 @@ func runDeployDaemon() error {
 		}
 	}
 
-	// Gracefully shut down API server.
-	if apiServer != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := apiServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("API server shutdown error: %v", err)
-		}
+	// Gracefully shut down API server + Discord bot.
+	if svc != nil {
+		svc.Shutdown()
 	}
 
 	return nil

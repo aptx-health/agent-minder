@@ -61,9 +61,7 @@ See `deploy/agent-minder.env.macos.example` for the full list of options.
 
 ```bash
 cp deploy/start-daemon-macos.sh ~/.agent-minder/deploy/
-cp deploy/start-discord-macos.sh ~/.agent-minder/deploy/
 chmod +x ~/.agent-minder/deploy/start-daemon-macos.sh
-chmod +x ~/.agent-minder/deploy/start-discord-macos.sh
 ```
 
 ### 5. Install LaunchAgent Plist
@@ -133,14 +131,13 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dustinlange.agent-mi
 
 ## Discord Bot (Optional)
 
-Requires the daemon to be running with `SERVE_ADDR` configured. Set the Discord tokens in your env file, then:
+The Discord bot runs embedded in the daemon process — no separate service needed. To enable it:
 
-```bash
-sed "s|__HOME__|${HOME}|g" deploy/com.dustinlange.agent-minder.discord.plist.template \
-    > ~/Library/LaunchAgents/com.dustinlange.agent-minder.discord.plist
+1. Set `SERVE_ADDR` in your env file (e.g., `SERVE_ADDR=:7749`)
+2. Configure Discord credentials via `agent-minder setup` (stored in keychain) or set `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID` in the env file
+3. Restart the service — the bot starts automatically when credentials are detected
 
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.dustinlange.agent-minder.discord.plist
-```
+The standalone `agent-minder discord` command is still available for connecting to a remote daemon.
 
 ## How It Works
 
