@@ -54,8 +54,13 @@ type Client struct {
 
 // NewClient creates a GitHub client authenticated with the given PAT.
 // Uses a 30-second HTTP timeout to prevent indefinite hangs on network issues.
+// Wraps the transport with ETag caching so conditional requests (304 Not Modified)
+// don't count against the GitHub API rate limit.
 func NewClient(token string) *Client {
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: newETagTransport(http.DefaultTransport),
+	}
 	return &Client{
 		gh: github.NewClient(httpClient).WithAuthToken(token),
 	}
