@@ -1170,6 +1170,10 @@ func (s *Supervisor) ReprepareKeep(ctx context.Context) (*PrepareResult, error) 
 	}
 	s.cleanOrphanedWorktrees()
 
+	// Re-evaluate manual tasks against current labels — if a skip label was
+	// removed since last run, the task should become queued for agent work.
+	s.checkLabelChanges(ctx)
+
 	// Discover and add new tracked items as tasks.
 	added := s.addNewTrackedItems(ctx)
 
@@ -1241,6 +1245,10 @@ func (s *Supervisor) ReprepareRebuild(ctx context.Context, guidance string) (*Pr
 	}
 	_ = s.store.DeleteDepGraph(s.project.ID)
 	s.cleanOrphanedWorktrees()
+
+	// Re-evaluate manual tasks against current labels — tasks whose skip label
+	// was removed should become queued so convertTrackedItems doesn't skip them.
+	s.checkLabelChanges(ctx)
 
 	// Convert all tracked items (will skip those already in task table via BulkCreateAutopilotTasks INSERT OR IGNORE).
 	tasks, err := s.convertTrackedItems(ctx)
