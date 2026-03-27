@@ -1217,7 +1217,8 @@ func (s *Store) TotalSpend(projectID int64) (float64, error) {
 }
 
 // DailyCost returns the aggregated cost for a project on a given date (YYYY-MM-DD).
-// Only includes tasks with terminal status (done, bailed, failed, stopped).
+// Includes all tasks with non-zero cost, using completed_at (or started_at for
+// still-running tasks) for date filtering.
 func (s *Store) DailyCost(projectID int64, date string) (*CostSummary, error) {
 	var cs CostSummary
 	err := s.db.Get(&cs, `
@@ -1225,8 +1226,8 @@ func (s *Store) DailyCost(projectID int64, date string) (*CostSummary, error) {
 		       COUNT(*) AS task_count
 		FROM autopilot_tasks
 		WHERE project_id = ?
-		  AND status IN ('done', 'bailed', 'failed', 'stopped')
-		  AND date(completed_at) = date(?)
+		  AND cost_usd > 0
+		  AND date(COALESCE(completed_at, started_at)) = date(?)
 	`, projectID, date)
 	if err != nil {
 		return nil, fmt.Errorf("daily cost: %w", err)
@@ -1235,7 +1236,7 @@ func (s *Store) DailyCost(projectID int64, date string) (*CostSummary, error) {
 }
 
 // WeeklyCost returns the aggregated cost for a project in the 7-day window
-// ending on the given date (inclusive). Only includes terminal tasks.
+// ending on the given date (inclusive). Includes all tasks with non-zero cost.
 func (s *Store) WeeklyCost(projectID int64, endDate string) (*CostSummary, error) {
 	var cs CostSummary
 	err := s.db.Get(&cs, `
@@ -1243,9 +1244,9 @@ func (s *Store) WeeklyCost(projectID int64, endDate string) (*CostSummary, error
 		       COUNT(*) AS task_count
 		FROM autopilot_tasks
 		WHERE project_id = ?
-		  AND status IN ('done', 'bailed', 'failed', 'stopped')
-		  AND date(completed_at) >= date(?, '-6 days')
-		  AND date(completed_at) <= date(?)
+		  AND cost_usd > 0
+		  AND date(COALESCE(completed_at, started_at)) >= date(?, '-6 days')
+		  AND date(COALESCE(completed_at, started_at)) <= date(?)
 	`, projectID, endDate, endDate)
 	if err != nil {
 		return nil, fmt.Errorf("weekly cost: %w", err)
@@ -1253,7 +1254,7 @@ func (s *Store) WeeklyCost(projectID int64, endDate string) (*CostSummary, error
 	return &cs, nil
 }
 
-// OverallCost returns the aggregated cost for all terminal tasks in a project,
+// OverallCost returns the aggregated cost for all tasks in a project with non-zero cost,
 // plus carried cost from previous task batches. Task count reflects current session only.
 func (s *Store) OverallCost(projectID int64) (*CostSummary, error) {
 	var cs CostSummary
@@ -1262,7 +1263,7 @@ func (s *Store) OverallCost(projectID int64) (*CostSummary, error) {
 		       COUNT(t.id) AS task_count
 		FROM projects p
 		LEFT JOIN autopilot_tasks t ON t.project_id = p.id
-		  AND t.status IN ('done', 'bailed', 'failed', 'stopped')
+		  AND t.cost_usd > 0
 		WHERE p.id = ?
 	`, projectID)
 	if err != nil {
@@ -1275,12 +1276,13 @@ func (s *Store) OverallCost(projectID int64) (*CostSummary, error) {
 func (s *Store) DailyTaskCosts(projectID int64, date string) ([]TaskCostDetail, error) {
 	var details []TaskCostDetail
 	err := s.db.Select(&details, `
-		SELECT issue_number, issue_title, status, cost_usd, completed_at
+		SELECT issue_number, issue_title, status, cost_usd,
+		       COALESCE(completed_at, started_at) AS completed_at
 		FROM autopilot_tasks
 		WHERE project_id = ?
-		  AND status IN ('done', 'bailed', 'failed', 'stopped')
-		  AND date(completed_at) = date(?)
-		ORDER BY completed_at DESC
+		  AND cost_usd > 0
+		  AND date(COALESCE(completed_at, started_at)) = date(?)
+		ORDER BY COALESCE(completed_at, started_at) DESC
 	`, projectID, date)
 	if err != nil {
 		return nil, fmt.Errorf("daily task costs: %w", err)
