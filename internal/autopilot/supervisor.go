@@ -1375,12 +1375,12 @@ func (s *Supervisor) mergeStoredGraphIntoOptions(options []DepOption, allTasks [
 // BuildIncrementalDepOptions sends only new issues to LLM for dependency analysis,
 // including existing tasks as context. Returns options that cover only the new issues.
 func (s *Supervisor) BuildIncrementalDepOptions(ctx context.Context, allTasks []db.AutopilotTask, guidance string) ([]DepOption, error) {
-	// Identify new tasks (queued with no deps, added by discoverNewTasks).
+	// Identify new tasks (queued or manual with no deps, added by discoverNewTasks/watchPoll).
 	var newTasks []*db.AutopilotTask
 	var existingTasks []*db.AutopilotTask
 	for i := range allTasks {
 		t := &allTasks[i]
-		if t.Status == "queued" && t.Dependencies == "[]" {
+		if (t.Status == "queued" || t.Status == "manual") && t.Dependencies == "[]" {
 			newTasks = append(newTasks, t)
 		} else {
 			existingTasks = append(existingTasks, t)
@@ -1394,7 +1394,11 @@ func (s *Supervisor) BuildIncrementalDepOptions(ctx context.Context, allTasks []
 	// Single new task — trivial option.
 	if len(newTasks) == 1 && len(existingTasks) == 0 {
 		graph := make(map[string]json.RawMessage, 1)
-		graph[strconv.Itoa(newTasks[0].IssueNumber)] = json.RawMessage("[]")
+		val := json.RawMessage("[]")
+		if newTasks[0].Status == "manual" {
+			val = json.RawMessage(`"manual"`)
+		}
+		graph[strconv.Itoa(newTasks[0].IssueNumber)] = val
 		return []DepOption{{
 			Name:      "No dependencies",
 			Rationale: "Only one new task — no dependencies possible.",
@@ -1556,7 +1560,7 @@ func (s *Supervisor) ApplyIncrementalDepOption(ctx context.Context, opt DepOptio
 			continue
 		}
 
-		isNew := t.Dependencies == "[]" && t.Status == "queued"
+		isNew := t.Dependencies == "[]" && (t.Status == "queued" || t.Status == "manual")
 
 		// Handle string directives: "skip" or "manual".
 		var strVal string
@@ -3915,9 +3919,16 @@ func (s *Supervisor) ingestPendingTasks(ctx context.Context) int {
 	}
 
 	var pending []db.AutopilotTask
+	var manualCount int
 	for _, t := range allTasks {
 		if t.Status == "pending" {
 			pending = append(pending, t)
+		} else if t.Status == "manual" && t.Dependencies == "[]" {
+			// Manual tasks discovered by watchPoll that haven't been
+			// through dep analysis yet — include them so the graph
+			// sees them.
+			pending = append(pending, t)
+			manualCount++
 		}
 	}
 	if len(pending) == 0 {
@@ -3927,9 +3938,11 @@ func (s *Supervisor) ingestPendingTasks(ctx context.Context) int {
 	s.emitEvent("discovered", fmt.Sprintf("Discovered %d new task(s) — analyzing dependencies", len(pending)), nil)
 
 	// Transition pending → queued with empty deps so BuildIncrementalDepOptions
-	// can identify them as new (queued + "[]" deps).
+	// can identify them as new (queued + "[]" deps). Manual tasks stay manual.
 	for _, t := range pending {
-		_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+		if t.Status == "pending" {
+			_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+		}
 	}
 
 	// Re-fetch after status update.
@@ -4027,27 +4040,24 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 		tracked[t.IssueNumber] = true
 	}
 
-	skipLabel := s.project.AutopilotSkipLabel
+	matcher := newSkipMatcher(s.project.AutopilotSkipLabel)
 	queued := 0
 
 	for _, issue := range items {
 		if tracked[issue.Number] {
 			continue
 		}
-		// Skip if the issue has the skip label.
-		skip := false
-		for _, l := range issue.Labels {
-			if l == skipLabel {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			continue
-		}
 		if issue.State != "open" {
 			continue
 		}
+
+		// Issues with skip label or external-work labels become manual tasks.
+		// They appear in the dep graph and are watched for completion but
+		// never get agent slots.
+		isManual := matcher.matches(issue.Labels) ||
+			hasLabel(issue.Labels, "in-progress") ||
+			hasLabel(issue.Labels, "needs-review") ||
+			hasLabel(issue.Labels, "blocked")
 
 		// Fetch full issue body if truncated.
 		body := issue.Body
@@ -4060,6 +4070,11 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 			}
 		}
 
+		status := "pending"
+		if isManual {
+			status = "manual"
+		}
+
 		task := &db.AutopilotTask{
 			ProjectID:    s.project.ID,
 			Owner:        s.owner,
@@ -4068,7 +4083,7 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 			IssueTitle:   issue.Title,
 			IssueBody:    body,
 			Dependencies: "[]",
-			Status:       "pending",
+			Status:       status,
 		}
 		if createErr := s.store.CreateAutopilotTask(task); createErr != nil {
 			debugLog("watchPoll: create task failed", "issue", issue.Number, "error", createErr.Error())
