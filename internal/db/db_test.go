@@ -2067,24 +2067,25 @@ func TestDailyCost(t *testing.T) {
 	}
 }
 
-func TestDailyCost_ExcludesQueuedAndRunning(t *testing.T) {
+func TestDailyCost_IncludesAllStatusesWithCost(t *testing.T) {
 	store := openTestDB(t)
-	p := createCostTestProject(t, store, "daily-excl")
+	p := createCostTestProject(t, store, "daily-all")
 
-	// A queued task and a running task should not count.
+	// All tasks with non-zero cost should be included regardless of status.
 	createTaskWithCost(t, store, p.ID, 1, "queued", 0.50, "2026-03-18 10:00:00")
 	createTaskWithCost(t, store, p.ID, 2, "running", 0.75, "2026-03-18 10:00:00")
 	createTaskWithCost(t, store, p.ID, 3, "done", 1.00, "2026-03-18 10:00:00")
+	createTaskWithCost(t, store, p.ID, 4, "review", 0.25, "2026-03-18 10:00:00")
 
 	cs, err := store.DailyCost(p.ID, "2026-03-18")
 	if err != nil {
 		t.Fatalf("DailyCost: %v", err)
 	}
-	if cs.TotalCost != 1.00 {
-		t.Errorf("TotalCost = %f, want 1.00 (only done task)", cs.TotalCost)
+	if cs.TotalCost != 2.50 {
+		t.Errorf("TotalCost = %f, want 2.50 (all tasks with cost)", cs.TotalCost)
 	}
-	if cs.TaskCount != 1 {
-		t.Errorf("TaskCount = %d, want 1", cs.TaskCount)
+	if cs.TaskCount != 4 {
+		t.Errorf("TaskCount = %d, want 4", cs.TaskCount)
 	}
 }
 
@@ -2689,20 +2690,20 @@ func TestOverallCostIncludesCarriedCost(t *testing.T) {
 		t.Fatalf("BankAndClear: %v", err)
 	}
 
-	// New terminal tasks.
+	// New tasks — all with cost should be included.
 	createTaskWithCost(t, store, p.ID, 2, "done", 1.50, "2026-01-16 10:00:00")
-	createTaskWithCost(t, store, p.ID, 3, "running", 0.50, "") // excluded from OverallCost
+	createTaskWithCost(t, store, p.ID, 3, "running", 0.50, "2026-01-16 10:00:00")
 
 	cs, err := store.OverallCost(p.ID)
 	if err != nil {
 		t.Fatalf("OverallCost: %v", err)
 	}
-	// 3.00 carried + 1.50 terminal = 4.50
-	if cs.TotalCost != 4.50 {
-		t.Errorf("TotalCost = %f, want 4.50", cs.TotalCost)
+	// 3.00 carried + 1.50 done + 0.50 running = 5.00
+	if cs.TotalCost != 5.00 {
+		t.Errorf("TotalCost = %f, want 5.00", cs.TotalCost)
 	}
-	// Task count is current session only.
-	if cs.TaskCount != 1 {
-		t.Errorf("TaskCount = %d, want 1", cs.TaskCount)
+	// Task count includes all tasks with cost.
+	if cs.TaskCount != 2 {
+		t.Errorf("TaskCount = %d, want 2", cs.TaskCount)
 	}
 }
