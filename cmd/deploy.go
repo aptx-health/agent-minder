@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -29,7 +31,9 @@ var (
 	deployMaxAgents  int
 	deployMaxTurns   int
 	deployMaxBudget  float64
+	deployBaseBranch string
 	deployDryRun     bool
+	deployYes        bool
 	deployDaemon     bool
 	deployForeground bool
 	deployID         string
@@ -77,7 +81,9 @@ func init() {
 	deployCmd.Flags().IntVar(&deployMaxAgents, "max-agents", 0, "Max concurrent agents (default: min(issues, 5), or from --project)")
 	deployCmd.Flags().IntVar(&deployMaxTurns, "max-turns", 0, "Max turns per agent (default: 50, or from --project)")
 	deployCmd.Flags().Float64Var(&deployMaxBudget, "max-budget", 0, "Max budget per agent in USD (default: 3.00, or from --project)")
+	deployCmd.Flags().StringVar(&deployBaseBranch, "base-branch", "", "Base branch for PRs (default: auto-detect from origin)")
 	deployCmd.Flags().BoolVar(&deployDryRun, "dry-run", false, "Show plan without launching")
+	deployCmd.Flags().BoolVarP(&deployYes, "yes", "y", false, "Skip confirmation and launch immediately")
 	deployCmd.Flags().StringVar(&deployProject, "project", "", "Inherit settings (agents, turns, budget, skip label, base branch) from an existing project")
 
 	deployCmd.Flags().StringVar(&deployServe, "serve", "", "Enable HTTP API server on the given address (e.g. :7749)")
@@ -174,11 +180,6 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Fetch issue details from GitHub.
 	ghClient := ghpkg.NewClient(ghToken)
 	ctx := context.Background()
-	type issueInfo struct {
-		Number int
-		Title  string
-		Body   string
-	}
 	var issueInfos []issueInfo
 	for _, num := range issues {
 		status, err := ghClient.FetchItem(ctx, owner, repo, num)
@@ -243,6 +244,54 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 	if cmd.Flags().Changed("max-budget") {
 		maxBudget = deployMaxBudget
+	}
+	if cmd.Flags().Changed("base-branch") {
+		baseBranch = deployBaseBranch
+	}
+
+	// Resolve display base branch (for confirmation screen).
+	displayBaseBranch := baseBranch
+	baseBranchExplicit := baseBranch != ""
+	if displayBaseBranch == "" {
+		detected, _ := gitpkg.DefaultBranch(repoDir)
+		if detected == "" {
+			detected = "main"
+		}
+		displayBaseBranch = detected
+	}
+
+	// Show confirmation screen (unless --yes or --dry-run).
+	if !deployYes && !deployDryRun {
+		settings := &deploySettings{
+			owner:              owner,
+			repo:               repo,
+			agentDefSource:     agentDefSource,
+			issues:             issueInfos,
+			maxAgents:          maxAgents,
+			maxTurns:           maxTurns,
+			maxBudget:          maxBudget,
+			baseBranch:         displayBaseBranch,
+			baseBranchExplicit: baseBranchExplicit,
+			analyzerModel:      analyzerModel,
+			skipLabel:          skipLabel,
+		}
+		confirmed, err := showDeployConfirmation(settings)
+		if err != nil {
+			return fmt.Errorf("confirmation: %w", err)
+		}
+		if !confirmed {
+			fmt.Println("Deploy cancelled.")
+			return nil
+		}
+		// Apply user edits back to local variables.
+		maxAgents = settings.maxAgents
+		maxTurns = settings.maxTurns
+		maxBudget = settings.maxBudget
+		analyzerModel = settings.analyzerModel
+		skipLabel = settings.skipLabel
+		if settings.baseBranchExplicit {
+			baseBranch = settings.baseBranch
+		}
 	}
 
 	// Create ephemeral project.
@@ -373,6 +422,135 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Status: agent-minder deploy status %s\n", id)
 	fmt.Printf("Stop:   agent-minder deploy stop %s\n", id)
 	return nil
+}
+
+type issueInfo struct {
+	Number int
+	Title  string
+	Body   string
+}
+
+// deploySettings holds mutable deploy configuration for the confirmation screen.
+type deploySettings struct {
+	owner          string
+	repo           string
+	agentDefSource autopilot.AgentDefSource
+	issues         []issueInfo
+
+	maxAgents          int
+	maxTurns           int
+	maxBudget          float64
+	baseBranch         string
+	baseBranchExplicit bool
+	analyzerModel      string
+	skipLabel          string
+}
+
+func printDeploySettings(s *deploySettings) {
+	fmt.Println()
+	fmt.Printf("  Deploy Settings\n")
+	fmt.Printf("  %s\n", strings.Repeat("─", 50))
+	fmt.Printf("  Repo:       %s/%s\n", s.owner, s.repo)
+	fmt.Printf("  Agent def:  %s\n", s.agentDefSource.Description())
+	fmt.Println()
+	fmt.Printf("  Issues:\n")
+	for _, ii := range s.issues {
+		fmt.Printf("    #%-6d %s\n", ii.Number, ii.Title)
+	}
+	fmt.Println()
+	branchNote := ""
+	if !s.baseBranchExplicit {
+		branchNote = " (auto-detected)"
+	}
+	fmt.Printf("  [1] Max agents:      %d\n", s.maxAgents)
+	fmt.Printf("  [2] Max turns:       %d\n", s.maxTurns)
+	fmt.Printf("  [3] Max budget:      $%.2f\n", s.maxBudget)
+	fmt.Printf("  [4] Base branch:     %s%s\n", s.baseBranch, branchNote)
+	fmt.Printf("  [5] Analyzer model:  %s\n", s.analyzerModel)
+	fmt.Printf("  [6] Skip label:      %s\n", s.skipLabel)
+	fmt.Printf("  %s\n", strings.Repeat("─", 50))
+}
+
+// showDeployConfirmation displays settings and lets the user edit them.
+// Returns true if the user confirms, false if cancelled.
+func showDeployConfirmation(s *deploySettings) (bool, error) {
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		printDeploySettings(s)
+		fmt.Printf("\n  Edit [1-6], Enter to launch, q to cancel: ")
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return false, err
+		}
+		input := strings.TrimSpace(line)
+
+		switch input {
+		case "":
+			return true, nil
+		case "q", "Q", "n", "N":
+			return false, nil
+		case "1":
+			if v, ok := promptDeployInt(reader, "Max agents"); ok {
+				s.maxAgents = v
+			}
+		case "2":
+			if v, ok := promptDeployInt(reader, "Max turns"); ok {
+				s.maxTurns = v
+			}
+		case "3":
+			if v, ok := promptDeployFloat(reader, "Max budget (USD)"); ok {
+				s.maxBudget = v
+			}
+		case "4":
+			if v, ok := promptDeployString(reader, "Base branch"); ok {
+				s.baseBranch = v
+				s.baseBranchExplicit = true
+			}
+		case "5":
+			if v, ok := promptDeployString(reader, "Analyzer model"); ok {
+				s.analyzerModel = v
+			}
+		case "6":
+			if v, ok := promptDeployString(reader, "Skip label"); ok {
+				s.skipLabel = v
+			}
+		default:
+			fmt.Printf("  Unknown option: %s\n", input)
+		}
+	}
+}
+
+func promptDeployInt(reader *bufio.Reader, label string) (int, bool) {
+	fmt.Printf("  %s: ", label)
+	v, err := strconv.Atoi(readLine(reader))
+	if err != nil || v <= 0 {
+		fmt.Println("  Invalid number, keeping current value.")
+		return 0, false
+	}
+	return v, true
+}
+
+func promptDeployFloat(reader *bufio.Reader, label string) (float64, bool) {
+	fmt.Printf("  %s: ", label)
+	input := strings.TrimPrefix(readLine(reader), "$")
+	v, err := strconv.ParseFloat(input, 64)
+	if err != nil || v <= 0 {
+		fmt.Println("  Invalid amount, keeping current value.")
+		return 0, false
+	}
+	return v, true
+}
+
+func promptDeployString(reader *bufio.Reader, label string) (string, bool) {
+	fmt.Printf("  %s: ", label)
+	v := readLine(reader)
+	if v == "" {
+		fmt.Println("  Empty input, keeping current value.")
+		return "", false
+	}
+	return v, true
 }
 
 func runDeployDaemon() error {
