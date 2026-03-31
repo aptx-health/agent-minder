@@ -288,6 +288,8 @@ func (m Model) filterDoFetch() (tea.Model, tea.Cmd) {
 		var err error
 		if ft == ghpkg.FilterMilestone && choiceID > 0 {
 			result, err = p.SearchIssuesByMilestone(context.Background(), owner, repo, choiceID)
+		} else if ft == ghpkg.FilterLabel {
+			result, err = p.SearchIssuesByLabel(context.Background(), owner, repo, fv)
 		} else {
 			result, err = p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
 		}
@@ -362,7 +364,13 @@ func (m Model) updateFilterInputValue(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		fv := fs.filterValue
 
 		return m, func() tea.Msg {
-			result, err := p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
+			var result *ghpkg.SearchResult
+			var err error
+			if ft == ghpkg.FilterLabel {
+				result, err = p.SearchIssuesByLabel(context.Background(), owner, repo, fv)
+			} else {
+				result, err = p.SearchGitHubIssues(context.Background(), owner, repo, ft, fv)
+			}
 			return filterSearchResultMsg{results: result, err: err}
 		}
 	}
