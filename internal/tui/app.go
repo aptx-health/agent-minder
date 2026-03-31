@@ -762,7 +762,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		r := msg.result
-		if r.Total == 0 && r.Existing == 0 {
+		if r.Total == 0 && r.Existing == 0 && !r.WatchMode {
 			m.autopilotStatus = "No issues found matching filter"
 			m.autopilotMode = ""
 			m.autopilotSupervisor = nil
@@ -770,6 +770,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(3*time.Second, func(t time.Time) tea.Msg {
 				return clearAutopilotStatusMsg{}
 			})
+		}
+		// Watch mode: no tasks yet but a watch filter is configured.
+		// Skip dep-select and go straight to confirm (or auto-launch on startup).
+		if r.WatchMode {
+			filterDesc := fmt.Sprintf("%s:%s", m.project.AutopilotFilterType, m.project.AutopilotFilterValue)
+			m.autopilotStatus = fmt.Sprintf("Watch mode — waiting for issues matching %s", filterDesc)
+			m.autopilotTotal = 0
+			if m.autopilotAutoloading {
+				m.autopilotAutoloading = false
+				m.activeTab = tabAutopilot
+				return m.confirmAutopilot()
+			}
+			m.autopilotMode = "confirm"
+			if m.activeTab != tabAutopilot {
+				m.autopilotHasNew = true
+			}
+			return m, nil
 		}
 		// If existing tasks found, offer keep/rebuild choice (or auto-keep on startup).
 		if r.HasGraph || r.Existing > 0 {

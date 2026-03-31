@@ -379,22 +379,35 @@ func (m Model) renderAutopilotTab() string {
 	// Confirm state: issue scan completed, awaiting launch confirmation.
 	if m.autopilotMode == "confirm" {
 		b.WriteString("\n")
-		b.WriteString(headerStyle().Render("  Autopilot — Ready to Launch"))
-		b.WriteString("\n\n")
-		b.WriteString(textStyle().Render(fmt.Sprintf("  %d issues found, %d unblocked",
-			m.autopilotTotal, m.autopilotUnblocked)))
-		b.WriteString("\n")
-		b.WriteString(textStyle().Render(fmt.Sprintf("  Will launch up to %d agents", m.project.AutopilotMaxAgents)))
-		b.WriteString("\n")
-		// Show dep graph at confirm time so user can verify before launching.
-		depGraph := m.renderDepGraph()
-		if depGraph != "" {
+		if m.autopilotTotal == 0 && m.autopilotSupervisor != nil && m.project.AutopilotFilterType != "" {
+			// Watch mode — no tasks yet, waiting for issues.
+			b.WriteString(headerStyle().Render("  Autopilot — Watch Mode"))
+			b.WriteString("\n\n")
+			b.WriteString(textStyle().Render(fmt.Sprintf("  Watching %s:%s for new issues",
+				m.project.AutopilotFilterType, m.project.AutopilotFilterValue)))
 			b.WriteString("\n")
-			b.WriteString(depGraph)
+			b.WriteString(textStyle().Render(fmt.Sprintf("  Will launch up to %d agents as issues arrive", m.project.AutopilotMaxAgents)))
+			b.WriteString("\n")
+			b.WriteString(textStyle().Render("  No dependency graph — tasks run independently"))
+			b.WriteString("\n")
+		} else {
+			b.WriteString(headerStyle().Render("  Autopilot — Ready to Launch"))
+			b.WriteString("\n\n")
+			b.WriteString(textStyle().Render(fmt.Sprintf("  %d issues found, %d unblocked",
+				m.autopilotTotal, m.autopilotUnblocked)))
+			b.WriteString("\n")
+			b.WriteString(textStyle().Render(fmt.Sprintf("  Will launch up to %d agents", m.project.AutopilotMaxAgents)))
+			b.WriteString("\n")
+			// Show dep graph at confirm time so user can verify before launching.
+			depGraph := m.renderDepGraph()
+			if depGraph != "" {
+				b.WriteString("\n")
+				b.WriteString(depGraph)
+			}
+			b.WriteString("\n")
+			b.WriteString(mutedStyle().Render("  Press G to rebuild dependencies with guidance, s to change settings."))
+			b.WriteString("\n")
 		}
-		b.WriteString("\n")
-		b.WriteString(mutedStyle().Render("  Press G to rebuild dependencies with guidance, s to change settings."))
-		b.WriteString("\n")
 		return b.String()
 	}
 

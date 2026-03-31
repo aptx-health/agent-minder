@@ -69,6 +69,7 @@ type PrepareResult struct {
 	Existing  int            // count of preserved tasks from previous session
 	NewIssues int            // count of newly discovered issues not yet in task table
 	HasGraph  bool           // true if a stored dep graph was found
+	WatchMode bool           // true if no tasks yet but a watch filter is configured — skip dep graph
 	// Status counts for existing tasks.
 	Done   int
 	Manual int
@@ -123,6 +124,7 @@ type Supervisor struct {
 	slots           []*slotState // len == maxAgents; nil = idle
 	active          bool
 	daemonMode      bool // when true, supervisor stays alive even when all work completes
+	watchMode       bool // when true, skip dep analysis for new tasks — just queue and run
 	paused          bool // when true, fillSlots returns early
 	budgetPaused    bool // when true, budget ceiling was hit — fillSlots returns early
 	budgetWarned    bool // true once the 80% warning has been emitted (avoids repeats)
@@ -971,6 +973,14 @@ func (s *Supervisor) IsPaused() bool {
 	return s.paused
 }
 
+// IsWatchMode returns true if the supervisor is in watch-and-wait mode
+// (no dep graph, tasks queued independently as they arrive).
+func (s *Supervisor) IsWatchMode() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watchMode
+}
+
 // Prepare fetches tracked issues, creates autopilot tasks, and builds a dependency graph.
 // If existing tasks are found from a previous session, returns PrepareResult with
 // HasGraph=true so the TUI can offer keep/rebuild choice. Otherwise builds fresh.
@@ -1114,6 +1124,14 @@ func (s *Supervisor) prepareFresh(ctx context.Context, guidance string, agentDef
 	}
 
 	if len(tasks) == 0 {
+		// If a watch filter is configured, enter watch mode — sit and wait for
+		// issues to appear without requiring a dep graph up front.
+		if s.project.AutopilotFilterType != "" && s.project.AutopilotFilterValue != "" {
+			s.mu.Lock()
+			s.watchMode = true
+			s.mu.Unlock()
+			return &PrepareResult{AgentDef: agentDef, WatchMode: true}, nil
+		}
 		return &PrepareResult{AgentDef: agentDef}, nil
 	}
 
@@ -1886,8 +1904,9 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.mu.Lock()
 				isPaused := s.paused
 				isDaemon := s.daemonMode
+				isWatch := s.watchMode
 				s.mu.Unlock()
-				if isPaused || isDaemon {
+				if isPaused || isDaemon || isWatch {
 					hasWork = true
 				}
 			}
@@ -3941,6 +3960,21 @@ func (s *Supervisor) ingestPendingTasks(ctx context.Context) int {
 	}
 	if len(pending) == 0 {
 		return 0
+	}
+
+	s.mu.Lock()
+	isWatchMode := s.watchMode
+	s.mu.Unlock()
+
+	if isWatchMode {
+		// In watch mode, skip dep analysis — just queue tasks directly.
+		s.emitEvent("discovered", fmt.Sprintf("Discovered %d new task(s) — queuing without dependencies", len(pending)), nil)
+		for _, t := range pending {
+			if t.Status == "pending" {
+				_ = s.store.UpdateAutopilotTaskStatus(t.ID, "queued")
+			}
+		}
+		return len(pending)
 	}
 
 	s.emitEvent("discovered", fmt.Sprintf("Discovered %d new task(s) — analyzing dependencies", len(pending)), nil)
