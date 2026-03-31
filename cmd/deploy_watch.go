@@ -488,7 +488,7 @@ func fetchMatchingIssues(ctx context.Context, ghClient *ghpkg.Client, owner, rep
 		return result.Items, nil
 
 	case "label":
-		result, err := ghClient.SearchIssues(ctx, owner, repo, ghpkg.FilterLabel, filterValue)
+		result, err := ghClient.ListIssuesByLabel(ctx, owner, repo, filterValue)
 		if err != nil {
 			return nil, fmt.Errorf("search by label: %w", err)
 		}

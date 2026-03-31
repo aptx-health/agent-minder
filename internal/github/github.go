@@ -441,6 +441,47 @@ func (c *Client) ListIssuesByMilestone(ctx context.Context, owner, repo string, 
 	}, nil
 }
 
+// ListIssuesByLabel returns open issues for a specific label.
+// Uses the Issues list API instead of the Search API to avoid permission issues
+// with tokens that lack search scope.
+func (c *Client) ListIssuesByLabel(ctx context.Context, owner, repo, label string) (*SearchResult, error) {
+	var allItems []ItemStatus
+	opts := &github.IssueListByRepoOptions{
+		Labels:    []string{label},
+		State:     "open",
+		Sort:      "created",
+		Direction: "desc",
+		ListOptions: github.ListOptions{
+			PerPage: 21,
+		},
+	}
+
+	issues, _, err := c.gh.Issues.ListByRepo(ctx, owner, repo, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list issues by label: %w", err)
+	}
+
+	for _, issue := range issues {
+		// Skip pull requests (Issues API returns PRs too).
+		if issue.PullRequestLinks != nil {
+			continue
+		}
+		allItems = append(allItems, ItemStatus{
+			Number:   issue.GetNumber(),
+			Title:    issue.GetTitle(),
+			Body:     issue.GetBody(),
+			State:    issue.GetState(),
+			Labels:   extractLabels(issue.Labels),
+			ItemType: "issue",
+		})
+	}
+
+	return &SearchResult{
+		Items:      allItems,
+		TotalCount: len(allItems),
+	}, nil
+}
+
 // BranchPRStatus holds the PR info found for a worktree branch.
 type BranchPRStatus struct {
 	Number      int

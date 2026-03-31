@@ -4060,7 +4060,7 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 		}
 		items = result.Items
 	case "label":
-		result, sErr := ghClient.SearchIssues(ctx, s.owner, s.repo, ghpkg.FilterLabel, filterValue)
+		result, sErr := ghClient.ListIssuesByLabel(ctx, s.owner, s.repo, filterValue)
 		if sErr != nil {
 			debugLog("watchPoll: search by label failed", "error", sErr.Error())
 			return 0

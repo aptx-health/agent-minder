@@ -5734,15 +5734,12 @@ func TestWatchPoll_UnknownFilterType(t *testing.T) {
 
 func TestWatchPoll_LabelFilter_CreatesNewTasks(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
-			_, _ = fmt.Fprint(w, `{
-				"total_count": 3, "incomplete_results": false,
-				"items": [
-					{"number": 10, "title": "Issue 10", "body": "Body 10", "state": "open", "labels": []},
-					{"number": 11, "title": "Issue 11", "body": "Body 11", "state": "open", "labels": [{"name": "no-agent"}]},
-					{"number": 12, "title": "Issue 12", "body": "Body 12", "state": "open", "labels": []}
-				]
-			}`)
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/issues") {
+			_, _ = fmt.Fprint(w, `[
+				{"number": 10, "title": "Issue 10", "body": "Body 10", "state": "open", "labels": []},
+				{"number": 11, "title": "Issue 11", "body": "Body 11", "state": "open", "labels": [{"name": "no-agent"}]},
+				{"number": 12, "title": "Issue 12", "body": "Body 12", "state": "open", "labels": []}
+			]`)
 			return
 		}
 		w.WriteHeader(404)
@@ -5778,14 +5775,11 @@ func TestWatchPoll_LabelFilter_CreatesNewTasks(t *testing.T) {
 
 func TestWatchPoll_LabelFilter_DeduplicatesExisting(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
-			_, _ = fmt.Fprint(w, `{
-				"total_count": 2, "incomplete_results": false,
-				"items": [
-					{"number": 20, "title": "Existing", "body": "body", "state": "open", "labels": []},
-					{"number": 21, "title": "New one", "body": "body", "state": "open", "labels": []}
-				]
-			}`)
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/issues") {
+			_, _ = fmt.Fprint(w, `[
+				{"number": 20, "title": "Existing", "body": "body", "state": "open", "labels": []},
+				{"number": 21, "title": "New one", "body": "body", "state": "open", "labels": []}
+			]`)
 			return
 		}
 		w.WriteHeader(404)
@@ -5860,14 +5854,11 @@ func TestWatchPoll_MilestoneNotFound(t *testing.T) {
 
 func TestWatchPoll_SkipsClosedIssues(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
-			_, _ = fmt.Fprint(w, `{
-				"total_count": 2, "incomplete_results": false,
-				"items": [
-					{"number": 40, "title": "Open", "body": "b", "state": "open", "labels": []},
-					{"number": 41, "title": "Closed", "body": "b", "state": "closed", "labels": []}
-				]
-			}`)
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/issues") {
+			_, _ = fmt.Fprint(w, `[
+				{"number": 40, "title": "Open", "body": "b", "state": "open", "labels": []},
+				{"number": 41, "title": "Closed", "body": "b", "state": "closed", "labels": []}
+			]`)
 			return
 		}
 		w.WriteHeader(404)
@@ -5891,11 +5882,8 @@ func TestWatchPoll_SkipsClosedIssues(t *testing.T) {
 func TestWatchPoll_FetchesBodyWhenEmpty(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues"):
-			_, _ = fmt.Fprint(w, `{
-				"total_count": 1, "incomplete_results": false,
-				"items": [{"number": 50, "title": "No body", "body": "", "state": "open", "labels": []}]
-			}`)
+		case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/issues") && !strings.HasSuffix(r.URL.Path, "/50"):
+			_, _ = fmt.Fprint(w, `[{"number": 50, "title": "No body", "body": "", "state": "open", "labels": []}]`)
 		// FetchItem tries PR first, then falls back to issue.
 		case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/pulls/50"):
 			w.WriteHeader(404)
@@ -5924,11 +5912,8 @@ func TestWatchPoll_FetchesBodyWhenEmpty(t *testing.T) {
 
 func TestWatchPoll_EmitsDiscoveredEvent(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/search/issues") {
-			_, _ = fmt.Fprint(w, `{
-				"total_count": 1, "incomplete_results": false,
-				"items": [{"number": 60, "title": "New issue", "body": "body", "state": "open", "labels": []}]
-			}`)
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/issues") {
+			_, _ = fmt.Fprint(w, `[{"number": 60, "title": "New issue", "body": "body", "state": "open", "labels": []}]`)
 			return
 		}
 		w.WriteHeader(404)

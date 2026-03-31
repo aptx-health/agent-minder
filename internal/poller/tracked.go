@@ -82,6 +82,16 @@ func (p *Poller) SearchIssuesByMilestone(ctx context.Context, owner, repo string
 	return gh.ListIssuesByMilestone(ctx, owner, repo, milestoneNumber)
 }
 
+// SearchIssuesByLabel searches for issues using a label via the Issues API.
+func (p *Poller) SearchIssuesByLabel(ctx context.Context, owner, repo, label string) (*ghpkg.SearchResult, error) {
+	token := config.GetIntegrationToken("github")
+	if token == "" {
+		return nil, fmt.Errorf("no GitHub token configured")
+	}
+	gh := ghpkg.NewClient(token)
+	return gh.ListIssuesByLabel(ctx, owner, repo, label)
+}
+
 // BulkAddTrackedItems converts ItemStatus results to TrackedItems and bulk-inserts them.
 // Returns the number of items actually added.
 func (p *Poller) BulkAddTrackedItems(ctx context.Context, items []ghpkg.ItemStatus, owner, repo string) (int, error) {
