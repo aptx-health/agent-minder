@@ -414,13 +414,13 @@ func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *o
 		}
 	}
 
-	// Auto-merge if configured and low-risk.
+	// Auto-merge if configured and low-risk — uses GitHub auto-merge (waits for CI).
 	if sc.Deploy.AutoMerge && risk == "low-risk" && job.PRNumber.Valid {
 		ghClient := sc.NewGHClient()
-		if err := ghClient.MergePR(ctx, sc.Owner, sc.Repo, int(job.PRNumber.Int64), "merge", ""); err == nil {
-			_ = sc.Store.CompleteJob(job.ID, db.StatusDone)
-			ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
-			sc.EmitEvent("completed", fmt.Sprintf("Auto-merged PR #%d for #%d", job.PRNumber.Int64, job.IssueNumber))
+		if err := ghClient.EnableAutoMerge(ctx, sc.Owner, sc.Repo, int(job.PRNumber.Int64), "merge"); err == nil {
+			sc.EmitEvent("info", fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", job.PRNumber.Int64))
+		} else {
+			sc.EmitEvent("warning", fmt.Sprintf("Auto-merge failed for PR #%d: %v", job.PRNumber.Int64, err))
 		}
 	}
 }
