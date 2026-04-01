@@ -96,10 +96,13 @@ func RemoveHeartbeat(deployID string) {
 }
 
 // StartHeartbeat starts a goroutine that writes heartbeat every 30s.
-// Returns a stop function.
+// Returns a stop function that blocks until the goroutine has fully exited,
+// guaranteeing no further writes after it returns.
 func StartHeartbeat(deployID string) func() {
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	go func() {
+		defer close(exited)
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		_ = WriteHeartbeat(deployID)
@@ -112,7 +115,10 @@ func StartHeartbeat(deployID string) func() {
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		<-exited
+	}
 }
 
 // WasCrashShutdown checks if the previous daemon crashed (stale heartbeat).
