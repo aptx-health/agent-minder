@@ -97,8 +97,8 @@ func FormatForPrompt(lessons []*db.Lesson) string {
 	return b.String()
 }
 
-// RecordInjection tracks which lessons were injected into a task.
-func RecordInjection(store *db.Store, taskID int64, lessons []*db.Lesson) error {
+// RecordInjection tracks which lessons were injected into a job.
+func RecordInjection(store *db.Store, jobID int64, lessons []*db.Lesson) error {
 	if len(lessons) == 0 {
 		return nil
 	}
@@ -111,13 +111,13 @@ func RecordInjection(store *db.Store, taskID int64, lessons []*db.Lesson) error 
 	if err := store.IncrementLessonInjected(ids); err != nil {
 		return err
 	}
-	return store.RecordTaskLessons(taskID, ids)
+	return store.RecordJobLessons(jobID, ids)
 }
 
-// RecordOutcome updates lesson effectiveness based on task outcome.
-// Call after a task reaches a terminal state (done = helpful, bailed = unhelpful).
-func RecordOutcome(store *db.Store, taskID int64, success bool) error {
-	return store.UpdateLessonOutcome(taskID, success)
+// RecordOutcome updates lesson effectiveness based on job outcome.
+// Call after a job reaches a terminal state (done = helpful, bailed = unhelpful).
+func RecordOutcome(store *db.Store, jobID int64, success bool) error {
+	return store.UpdateLessonOutcome(jobID, success)
 }
 
 // CaptureFromReview extracts lessons from a review agent's findings.

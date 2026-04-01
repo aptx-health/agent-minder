@@ -39,7 +39,7 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 
 	// Fetch issue details from GitHub and create tasks.
 	ghClient := newGHClientForToken(ghToken)
-	var tasks []*db.Task
+	var jobs []*db.Job
 	for _, num := range issues {
 		item, err := ghClient.FetchItem(ctx, deploy.Owner, deploy.Repo, num)
 		if err != nil {
@@ -52,26 +52,27 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 			body = content.Body
 		}
 
-		t := &db.Task{
+		j := &db.Job{
 			DeploymentID: deploy.ID,
+			Agent:        "autopilot",
+			Name:         fmt.Sprintf("issue-%d", num),
 			IssueNumber:  num,
 			Owner:        deploy.Owner,
 			Repo:         deploy.Repo,
 			Status:       db.StatusQueued,
 		}
-		t.IssueTitle.String = item.Title
-		t.IssueTitle.Valid = true
-		t.IssueBody.String = body
-		t.IssueBody.Valid = body != ""
+		j.IssueTitle.String = item.Title
+		j.IssueTitle.Valid = true
+		j.IssueBody.String = body
+		j.IssueBody.Valid = body != ""
 
-		tasks = append(tasks, t)
+		jobs = append(jobs, j)
 	}
 
-	if err := store.BulkCreateTasks(tasks); err != nil {
-		return nil, fmt.Errorf("create tasks: %w", err)
+	if err := store.BulkCreateJobs(jobs); err != nil {
+		return nil, fmt.Errorf("create jobs: %w", err)
 	}
 
-	// Detect agent definition.
 	agentDef := AgentDefBuiltIn
 	if deploy.RepoDir != "" {
 		if src, err := ensureAgentDef(deploy.RepoDir); err == nil {
@@ -79,22 +80,20 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 		}
 	}
 
-	// If only one task, no dep graph needed.
-	if len(tasks) == 1 {
+	if len(jobs) == 1 {
 		return &PrepareResult{
 			Total:    1,
 			AgentDef: agentDef,
 		}, nil
 	}
 
-	// Build dep graph via LLM.
-	options, err := buildDepOptions(ctx, completer, deploy, tasks)
+	options, err := buildDepOptions(ctx, completer, deploy, jobs)
 	if err != nil {
 		return nil, fmt.Errorf("build dep graph: %w", err)
 	}
 
 	return &PrepareResult{
-		Total:    len(tasks),
+		Total:    len(jobs),
 		Options:  options,
 		AgentDef: agentDef,
 	}, nil
@@ -102,30 +101,28 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 
 // ApplyDepOption applies a selected dependency graph option to the tasks.
 func ApplyDepOption(store *db.Store, deploy *db.Deployment, opt DepOption) error {
-	tasks, err := store.GetTasks(deploy.ID)
+	jobs, err := store.GetJobs(deploy.ID)
 	if err != nil {
 		return err
 	}
 
-	for _, task := range tasks {
-		key := strconv.Itoa(task.IssueNumber)
+	for _, j := range jobs {
+		key := strconv.Itoa(j.IssueNumber)
 		raw, exists := opt.Graph[key]
 		if !exists {
 			continue
 		}
 
-		// Check for "skip" sentinel.
 		var skip string
 		if json.Unmarshal(raw, &skip) == nil && skip == "skip" {
-			_ = store.UpdateTaskStatus(task.ID, "skipped")
+			_ = store.UpdateJobStatus(j.ID, "skipped")
 			continue
 		}
 
-		// Parse deps array.
 		var deps []int
 		if err := json.Unmarshal(raw, &deps); err == nil && len(deps) > 0 {
-			_ = store.UpdateTaskDeps(task.ID, deps)
-			_ = store.UpdateTaskStatus(task.ID, db.StatusBlocked)
+			_ = store.UpdateJobDeps(j.ID, deps)
+			_ = store.UpdateJobStatus(j.ID, db.StatusBlocked)
 		}
 	}
 
@@ -136,15 +133,13 @@ func ApplyDepOption(store *db.Store, deploy *db.Deployment, opt DepOption) error
 
 // buildDepOptions calls the LLM to generate ranked dependency graph options.
 func buildDepOptions(ctx context.Context, completer claudecli.Completer,
-	deploy *db.Deployment, tasks []*db.Task) ([]DepOption, error) {
+	deploy *db.Deployment, jobs []*db.Job) ([]DepOption, error) {
 
-	// Build task summaries for the LLM.
 	var summaries []string
-	for _, t := range tasks {
-		summary := fmt.Sprintf("- #%d: %s", t.IssueNumber, t.IssueTitle.String)
-		if t.IssueBody.Valid && t.IssueBody.String != "" {
-			// Truncate body to first 200 chars.
-			body := t.IssueBody.String
+	for _, j := range jobs {
+		summary := fmt.Sprintf("- #%d: %s", j.IssueNumber, j.IssueTitle.String)
+		if j.IssueBody.Valid && j.IssueBody.String != "" {
+			body := j.IssueBody.String
 			if len(body) > 200 {
 				body = body[:200] + "..."
 			}
@@ -154,9 +149,9 @@ func buildDepOptions(ctx context.Context, completer claudecli.Completer,
 	}
 
 	issueList := strings.Join(summaries, "\n")
-	issueNums := make([]string, len(tasks))
-	for i, t := range tasks {
-		issueNums[i] = strconv.Itoa(t.IssueNumber)
+	issueNums := make([]string, len(jobs))
+	for i, j := range jobs {
+		issueNums[i] = strconv.Itoa(j.IssueNumber)
 	}
 
 	prompt := fmt.Sprintf(`Analyze these GitHub issues and produce 2-3 ranked dependency graph options.
@@ -258,11 +253,11 @@ func countUnblocked(graph map[string]json.RawMessage) int {
 func BuildDepOptionsFromStore(ctx context.Context, completer claudecli.Completer,
 	store *db.Store, deploy *db.Deployment) ([]DepOption, error) {
 
-	tasks, err := store.GetTasks(deploy.ID)
+	jobs, err := store.GetJobs(deploy.ID)
 	if err != nil {
 		return nil, err
 	}
-	return buildDepOptions(ctx, completer, deploy, tasks)
+	return buildDepOptions(ctx, completer, deploy, jobs)
 }
 
 // newGHClientForToken creates a GitHub client from a token.

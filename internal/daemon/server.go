@@ -48,9 +48,12 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	s.mux.HandleFunc("GET /status", s.handleStatus)
-	s.mux.HandleFunc("GET /tasks", s.handleTasks)
-	s.mux.HandleFunc("GET /tasks/{id}", s.handleTask)
-	s.mux.HandleFunc("GET /tasks/{id}/log", s.handleTaskLog)
+	s.mux.HandleFunc("GET /jobs", s.handleJobs)
+	s.mux.HandleFunc("GET /jobs/{id}", s.handleJob)
+	s.mux.HandleFunc("GET /jobs/{id}/log", s.handleJobLog)
+	// Backward compat aliases.
+	s.mux.HandleFunc("GET /tasks", s.handleJobs)
+	s.mux.HandleFunc("GET /tasks/{id}", s.handleJob)
 	s.mux.HandleFunc("GET /dep-graph", s.handleDepGraph)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /lessons", s.handleLessons)
@@ -142,55 +145,54 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *Server) handleTasks(w http.ResponseWriter, _ *http.Request) {
-	tasks, err := s.store.GetTasks(s.deployID)
+func (s *Server) handleJobs(w http.ResponseWriter, _ *http.Request) {
+	jobs, err := s.store.GetJobs(s.deployID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	var resp []TaskResponse
-	for _, t := range tasks {
-		resp = append(resp, taskToResponse(t))
+	var resp []JobResponse
+	for _, j := range jobs {
+		resp = append(resp, jobToResponse(j))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) handleTask(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid task id"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid job id"})
 		return
 	}
 
-	task, err := s.store.GetTask(id)
+	job, err := s.store.GetJob(id)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, taskToResponse(task))
+	writeJSON(w, http.StatusOK, jobToResponse(job))
 }
 
-func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid task id"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid job id"})
 		return
 	}
 
-	task, err := s.store.GetTask(id)
+	job, err := s.store.GetJob(id)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task_not_found"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job_not_found"})
 		return
 	}
-	if !task.AgentLog.Valid {
+	if !job.AgentLog.Valid {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "log_not_found"})
 		return
 	}
 
-	// Stream the log file.
-	f, err := os.Open(task.AgentLog.String)
+	f, err := os.Open(job.AgentLog.String)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "log_not_found"})
 		return
@@ -208,7 +210,6 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("\n"))
 	}
 
-	// Flush if possible.
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
@@ -230,18 +231,18 @@ func (s *Server) handleDepGraph(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
-	tasks, _ := s.store.GetTasks(s.deployID)
+	jobs, _ := s.store.GetJobs(s.deployID)
 	spent, _ := s.store.TotalSpend(s.deployID)
 
 	var totalCost float64
 	statusCounts := make(map[string]int)
-	for _, t := range tasks {
-		statusCounts[t.Status]++
-		totalCost += t.CostUSD
+	for _, j := range jobs {
+		statusCounts[j.Status]++
+		totalCost += j.CostUSD
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total_tasks":   len(tasks),
+		"total_jobs":    len(jobs),
 		"total_cost":    totalCost,
 		"total_spend":   spent,
 		"status_counts": statusCounts,
@@ -319,22 +320,25 @@ type DeployConfig struct {
 	BaseBranch string  `json:"base_branch"`
 }
 
-// TaskResponse is the JSON shape for task endpoints.
-type TaskResponse struct {
-	ID          int64   `json:"id"`
-	IssueNumber int     `json:"issue_number"`
-	IssueTitle  string  `json:"issue_title"`
-	Owner       string  `json:"owner"`
-	Repo        string  `json:"repo"`
-	Status      string  `json:"status"`
-	PRNumber    int     `json:"pr_number,omitempty"`
-	CostUSD     float64 `json:"cost_usd"`
-	Branch      string  `json:"branch,omitempty"`
-	StartedAt   string  `json:"started_at,omitempty"`
-	CompletedAt string  `json:"completed_at,omitempty"`
-	FailReason  string  `json:"failure_reason,omitempty"`
-	FailDetail  string  `json:"failure_detail,omitempty"`
-	ReviewRisk  string  `json:"review_risk,omitempty"`
+// JobResponse is the JSON shape for job endpoints.
+type JobResponse struct {
+	ID           int64   `json:"id"`
+	Agent        string  `json:"agent"`
+	Name         string  `json:"name"`
+	IssueNumber  int     `json:"issue_number,omitempty"`
+	IssueTitle   string  `json:"issue_title,omitempty"`
+	Owner        string  `json:"owner"`
+	Repo         string  `json:"repo"`
+	Status       string  `json:"status"`
+	CurrentStage string  `json:"current_stage,omitempty"`
+	PRNumber     int     `json:"pr_number,omitempty"`
+	CostUSD      float64 `json:"cost_usd"`
+	Branch       string  `json:"branch,omitempty"`
+	StartedAt    string  `json:"started_at,omitempty"`
+	CompletedAt  string  `json:"completed_at,omitempty"`
+	FailReason   string  `json:"failure_reason,omitempty"`
+	FailDetail   string  `json:"failure_detail,omitempty"`
+	ReviewRisk   string  `json:"review_risk,omitempty"`
 }
 
 // DepGraphResponse is the JSON shape for GET /dep-graph.
@@ -360,28 +364,31 @@ type LessonResponse struct {
 
 // --- Helpers ---
 
-func taskToResponse(t *db.Task) TaskResponse {
-	resp := TaskResponse{
-		ID:          t.ID,
-		IssueNumber: t.IssueNumber,
-		IssueTitle:  t.IssueTitle.String,
-		Owner:       t.Owner,
-		Repo:        t.Repo,
-		Status:      t.Status,
-		CostUSD:     t.CostUSD,
-		Branch:      t.Branch.String,
-		FailReason:  t.FailureReason.String,
-		FailDetail:  t.FailureDetail.String,
-		ReviewRisk:  t.ReviewRisk.String,
+func jobToResponse(j *db.Job) JobResponse {
+	resp := JobResponse{
+		ID:           j.ID,
+		Agent:        j.Agent,
+		Name:         j.Name,
+		IssueNumber:  j.IssueNumber,
+		IssueTitle:   j.IssueTitle.String,
+		Owner:        j.Owner,
+		Repo:         j.Repo,
+		Status:       j.Status,
+		CurrentStage: j.CurrentStage.String,
+		CostUSD:      j.CostUSD,
+		Branch:       j.Branch.String,
+		FailReason:   j.FailureReason.String,
+		FailDetail:   j.FailureDetail.String,
+		ReviewRisk:   j.ReviewRisk.String,
 	}
-	if t.PRNumber.Valid {
-		resp.PRNumber = int(t.PRNumber.Int64)
+	if j.PRNumber.Valid {
+		resp.PRNumber = int(j.PRNumber.Int64)
 	}
-	if t.StartedAt.Valid {
-		resp.StartedAt = t.StartedAt.Time.Format(time.RFC3339)
+	if j.StartedAt.Valid {
+		resp.StartedAt = j.StartedAt.Time.Format(time.RFC3339)
 	}
-	if t.CompletedAt.Valid {
-		resp.CompletedAt = t.CompletedAt.Time.Format(time.RFC3339)
+	if j.CompletedAt.Valid {
+		resp.CompletedAt = j.CompletedAt.Time.Format(time.RFC3339)
 	}
 	return resp
 }

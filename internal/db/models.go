@@ -34,54 +34,78 @@ type Deployment struct {
 	StartedAt       time.Time       `db:"started_at"`
 }
 
-// Task represents a single issue being worked on by an agent.
-type Task struct {
-	ID                int64           `db:"id"`
-	DeploymentID      string          `db:"deployment_id"`
-	IssueNumber       int             `db:"issue_number"`
-	IssueTitle        sql.NullString  `db:"issue_title"`
-	IssueBody         sql.NullString  `db:"issue_body"`
-	Owner             string          `db:"owner"`
-	Repo              string          `db:"repo"`
-	Status            string          `db:"status"`
-	Dependencies      sql.NullString  `db:"dependencies"`
-	WorktreePath      sql.NullString  `db:"worktree_path"`
-	Branch            sql.NullString  `db:"branch"`
-	PRNumber          sql.NullInt64   `db:"pr_number"`
-	CostUSD           float64         `db:"cost_usd"`
-	FailureReason     sql.NullString  `db:"failure_reason"`
-	FailureDetail     sql.NullString  `db:"failure_detail"`
-	ReviewRisk        sql.NullString  `db:"review_risk"`
-	ReviewCommentID   sql.NullInt64   `db:"review_comment_id"`
-	MaxTurnsOverride  sql.NullInt64   `db:"max_turns_override"`
-	MaxBudgetOverride sql.NullFloat64 `db:"max_budget_override"`
-	AgentLog          sql.NullString  `db:"agent_log"`
-	StartedAt         sql.NullTime    `db:"started_at"`
-	CompletedAt       sql.NullTime    `db:"completed_at"`
+// Job represents a unit of work assigned to an agent.
+type Job struct {
+	ID           int64  `db:"id"`
+	DeploymentID string `db:"deployment_id"`
+
+	// What to run.
+	Agent string `db:"agent"` // e.g., "autopilot", "reviewer", "dependency-updater"
+	Name  string `db:"name"`  // e.g., "issue-42", "weekly-deps-2026-04-01"
+
+	// Context (nullable for proactive agents).
+	IssueNumber int            `db:"issue_number"`
+	IssueTitle  sql.NullString `db:"issue_title"`
+	IssueBody   sql.NullString `db:"issue_body"`
+	Owner       string         `db:"owner"`
+	Repo        string         `db:"repo"`
+
+	// Lifecycle.
+	Status       string         `db:"status"`
+	CurrentStage sql.NullString `db:"current_stage"`
+	StagesJSON   sql.NullString `db:"stages_json"`
+	ResultJSON   sql.NullString `db:"result_json"`
+
+	// Execution.
+	WorktreePath sql.NullString `db:"worktree_path"`
+	Branch       sql.NullString `db:"branch"`
+	PRNumber     sql.NullInt64  `db:"pr_number"`
+	CostUSD      float64        `db:"cost_usd"`
+	AgentLog     sql.NullString `db:"agent_log"`
+
+	// Failure.
+	FailureReason sql.NullString `db:"failure_reason"`
+	FailureDetail sql.NullString `db:"failure_detail"`
+
+	// Review.
+	ReviewRisk      sql.NullString `db:"review_risk"`
+	ReviewCommentID sql.NullInt64  `db:"review_comment_id"`
+
+	// Dependencies.
+	Dependencies sql.NullString `db:"dependencies"`
+
+	// Budget overrides (per-job, nullable — falls back to deployment defaults).
+	MaxTurns    sql.NullInt64   `db:"max_turns"`
+	MaxBudgetOv sql.NullFloat64 `db:"max_budget_usd"`
+
+	// Timestamps.
+	QueuedAt    time.Time    `db:"queued_at"`
+	StartedAt   sql.NullTime `db:"started_at"`
+	CompletedAt sql.NullTime `db:"completed_at"`
 }
 
-// EffectiveMaxTurns returns the per-task override or the deployment default.
-func (t *Task) EffectiveMaxTurns(deploy *Deployment) int {
-	if t.MaxTurnsOverride.Valid {
-		return int(t.MaxTurnsOverride.Int64)
+// EffectiveMaxTurns returns the per-job override or the deployment default.
+func (j *Job) EffectiveMaxTurns(deploy *Deployment) int {
+	if j.MaxTurns.Valid {
+		return int(j.MaxTurns.Int64)
 	}
 	return deploy.MaxTurns
 }
 
-// EffectiveMaxBudget returns the per-task override or the deployment default.
-func (t *Task) EffectiveMaxBudget(deploy *Deployment) float64 {
-	if t.MaxBudgetOverride.Valid {
-		return t.MaxBudgetOverride.Float64
+// EffectiveMaxBudget returns the per-job override or the deployment default.
+func (j *Job) EffectiveMaxBudget(deploy *Deployment) float64 {
+	if j.MaxBudgetOv.Valid {
+		return j.MaxBudgetOv.Float64
 	}
 	return deploy.MaxBudgetUSD
 }
 
-// HasOverrides returns true if the task has per-task overrides.
-func (t *Task) HasOverrides() bool {
-	return t.MaxTurnsOverride.Valid || t.MaxBudgetOverride.Valid
+// HasOverrides returns true if the job has per-job overrides.
+func (j *Job) HasOverrides() bool {
+	return j.MaxTurns.Valid || j.MaxBudgetOv.Valid
 }
 
-// Task status constants.
+// Job status constants.
 const (
 	StatusQueued    = "queued"
 	StatusBlocked   = "blocked"

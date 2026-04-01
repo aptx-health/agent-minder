@@ -138,9 +138,9 @@ func CleanStalePID(deployID string) {
 	RemoveHeartbeat(deployID)
 }
 
-// RecoverDaemonState resets running tasks to queued after a crash.
+// RecoverDaemonState resets running jobs to queued after a crash.
 func RecoverDaemonState(store *db.Store, deployID string) (int64, error) {
-	return store.TransitionStaleRunningTasks(deployID)
+	return store.TransitionStaleRunningJobs(deployID)
 }
 
 // Daemonize re-executes the current process as a background daemon.

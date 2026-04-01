@@ -70,31 +70,33 @@ func (s *Store) UpdateDeploymentCarriedCost(id string, cost float64) error {
 	return err
 }
 
-// --- Task CRUD ---
+// --- Job CRUD ---
 
-// CreateTask inserts a new task.
-func (s *Store) CreateTask(t *Task) error {
-	res, err := s.db.Exec(`INSERT INTO tasks
-		(deployment_id, issue_number, issue_title, issue_body, owner, repo, status, dependencies)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.DeploymentID, t.IssueNumber, t.IssueTitle, t.IssueBody,
-		t.Owner, t.Repo, t.Status, t.Dependencies)
+// CreateJob inserts a new job.
+func (s *Store) CreateJob(j *Job) error {
+	res, err := s.db.Exec(`INSERT INTO jobs
+		(deployment_id, agent, name, issue_number, issue_title, issue_body,
+		 owner, repo, status, dependencies, stages_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.DeploymentID, j.Agent, j.Name, j.IssueNumber, j.IssueTitle, j.IssueBody,
+		j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON)
 	if err != nil {
 		return err
 	}
 	id, _ := res.LastInsertId()
-	t.ID = id
+	j.ID = id
 	return nil
 }
 
-// BulkCreateTasks inserts multiple tasks, ignoring duplicates.
-func (s *Store) BulkCreateTasks(tasks []*Task) error {
-	for _, t := range tasks {
-		_, err := s.db.Exec(`INSERT OR IGNORE INTO tasks
-			(deployment_id, issue_number, issue_title, issue_body, owner, repo, status, dependencies)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			t.DeploymentID, t.IssueNumber, t.IssueTitle, t.IssueBody,
-			t.Owner, t.Repo, t.Status, t.Dependencies)
+// BulkCreateJobs inserts multiple jobs, ignoring duplicates.
+func (s *Store) BulkCreateJobs(jobs []*Job) error {
+	for _, j := range jobs {
+		_, err := s.db.Exec(`INSERT OR IGNORE INTO jobs
+			(deployment_id, agent, name, issue_number, issue_title, issue_body,
+			 owner, repo, status, dependencies, stages_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			j.DeploymentID, j.Agent, j.Name, j.IssueNumber, j.IssueTitle, j.IssueBody,
+			j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON)
 		if err != nil {
 			return err
 		}
@@ -102,109 +104,123 @@ func (s *Store) BulkCreateTasks(tasks []*Task) error {
 	return nil
 }
 
-// GetTasks returns all tasks for a deployment.
-func (s *Store) GetTasks(deploymentID string) ([]*Task, error) {
-	var tasks []*Task
-	err := s.db.Select(&tasks, "SELECT * FROM tasks WHERE deployment_id = ? ORDER BY id", deploymentID)
-	return tasks, err
+// GetJobs returns all jobs for a deployment.
+func (s *Store) GetJobs(deploymentID string) ([]*Job, error) {
+	var jobs []*Job
+	err := s.db.Select(&jobs, "SELECT * FROM jobs WHERE deployment_id = ? ORDER BY id", deploymentID)
+	return jobs, err
 }
 
-// GetTask returns a single task by ID.
-func (s *Store) GetTask(id int64) (*Task, error) {
-	var t Task
-	err := s.db.Get(&t, "SELECT * FROM tasks WHERE id = ?", id)
+// GetJob returns a single job by ID.
+func (s *Store) GetJob(id int64) (*Job, error) {
+	var j Job
+	err := s.db.Get(&j, "SELECT * FROM jobs WHERE id = ?", id)
 	if err != nil {
 		return nil, err
 	}
-	return &t, nil
+	return &j, nil
 }
 
-// UpdateTaskStatus updates the status of a task.
-func (s *Store) UpdateTaskStatus(id int64, status string) error {
-	_, err := s.db.Exec("UPDATE tasks SET status = ? WHERE id = ?", status, id)
+// UpdateJobStatus updates the status of a job.
+func (s *Store) UpdateJobStatus(id int64, status string) error {
+	_, err := s.db.Exec("UPDATE jobs SET status = ? WHERE id = ?", status, id)
 	return err
 }
 
-// UpdateTaskRunning marks a task as running with a start time.
-func (s *Store) UpdateTaskRunning(id int64) error {
-	_, err := s.db.Exec("UPDATE tasks SET status = 'running', started_at = ? WHERE id = ?",
+// UpdateJobRunning marks a job as running with a start time.
+func (s *Store) UpdateJobRunning(id int64) error {
+	_, err := s.db.Exec("UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
 		time.Now().UTC(), id)
 	return err
 }
 
-// UpdateTaskWorktree sets the worktree path and branch for a task.
-func (s *Store) UpdateTaskWorktree(id int64, path, branch string) error {
-	_, err := s.db.Exec("UPDATE tasks SET worktree_path = ?, branch = ? WHERE id = ?",
+// UpdateJobStage updates the current stage and stages JSON for a job.
+func (s *Store) UpdateJobStage(id int64, stage string, stagesJSON string) error {
+	_, err := s.db.Exec("UPDATE jobs SET current_stage = ?, stages_json = ? WHERE id = ?",
+		stage, stagesJSON, id)
+	return err
+}
+
+// UpdateJobResult sets the result JSON for a completed job.
+func (s *Store) UpdateJobResult(id int64, resultJSON string) error {
+	_, err := s.db.Exec("UPDATE jobs SET result_json = ? WHERE id = ?", resultJSON, id)
+	return err
+}
+
+// UpdateJobWorktree sets the worktree path and branch for a job.
+func (s *Store) UpdateJobWorktree(id int64, path, branch string) error {
+	_, err := s.db.Exec("UPDATE jobs SET worktree_path = ?, branch = ? WHERE id = ?",
 		path, branch, id)
 	return err
 }
 
-// UpdateTaskPR sets the PR number for a task.
-func (s *Store) UpdateTaskPR(id int64, prNumber int) error {
-	_, err := s.db.Exec("UPDATE tasks SET pr_number = ? WHERE id = ?", prNumber, id)
+// UpdateJobPR sets the PR number for a job.
+func (s *Store) UpdateJobPR(id int64, prNumber int) error {
+	_, err := s.db.Exec("UPDATE jobs SET pr_number = ? WHERE id = ?", prNumber, id)
 	return err
 }
 
-// UpdateTaskCost updates the cost for a task.
-func (s *Store) UpdateTaskCost(id int64, cost float64) error {
-	_, err := s.db.Exec("UPDATE tasks SET cost_usd = ? WHERE id = ?", cost, id)
+// UpdateJobCost updates the cost for a job.
+func (s *Store) UpdateJobCost(id int64, cost float64) error {
+	_, err := s.db.Exec("UPDATE jobs SET cost_usd = ? WHERE id = ?", cost, id)
 	return err
 }
 
-// UpdateTaskFailure sets failure info and marks the task as bailed.
-func (s *Store) UpdateTaskFailure(id int64, reason, detail string) error {
-	_, err := s.db.Exec(`UPDATE tasks SET status = 'bailed', failure_reason = ?,
+// UpdateJobFailure sets failure info and marks the job as bailed.
+func (s *Store) UpdateJobFailure(id int64, reason, detail string) error {
+	_, err := s.db.Exec(`UPDATE jobs SET status = 'bailed', failure_reason = ?,
 		failure_detail = ?, completed_at = ? WHERE id = ?`,
 		reason, detail, time.Now().UTC(), id)
 	return err
 }
 
-// UpdateTaskDeps updates the dependencies JSON for a task.
-func (s *Store) UpdateTaskDeps(id int64, deps []int) error {
+// UpdateJobDeps updates the dependencies JSON for a job.
+func (s *Store) UpdateJobDeps(id int64, deps []int) error {
 	data, _ := json.Marshal(deps)
-	_, err := s.db.Exec("UPDATE tasks SET dependencies = ? WHERE id = ?", string(data), id)
+	_, err := s.db.Exec("UPDATE jobs SET dependencies = ? WHERE id = ?", string(data), id)
 	return err
 }
 
-// UpdateTaskReview sets review-related fields.
-func (s *Store) UpdateTaskReview(id int64, risk string, commentID int64) error {
-	_, err := s.db.Exec("UPDATE tasks SET review_risk = ?, review_comment_id = ? WHERE id = ?",
+// UpdateJobReview sets review-related fields.
+func (s *Store) UpdateJobReview(id int64, risk string, commentID int64) error {
+	_, err := s.db.Exec("UPDATE jobs SET review_risk = ?, review_comment_id = ? WHERE id = ?",
 		risk, commentID, id)
 	return err
 }
 
-// UpdateTaskOverrides sets per-task turn/budget overrides.
-func (s *Store) UpdateTaskOverrides(id int64, turns *int, budget *float64) error {
-	_, err := s.db.Exec("UPDATE tasks SET max_turns_override = ?, max_budget_override = ? WHERE id = ?",
+// UpdateJobOverrides sets per-job turn/budget overrides.
+func (s *Store) UpdateJobOverrides(id int64, turns *int, budget *float64) error {
+	_, err := s.db.Exec("UPDATE jobs SET max_turns = ?, max_budget_usd = ? WHERE id = ?",
 		turns, budget, id)
 	return err
 }
 
-// CompleteTask marks a task as done with a completion time.
-func (s *Store) CompleteTask(id int64, status string) error {
-	_, err := s.db.Exec("UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+// CompleteJob marks a job as done with a completion time.
+func (s *Store) CompleteJob(id int64, status string) error {
+	_, err := s.db.Exec("UPDATE jobs SET status = ?, completed_at = ? WHERE id = ?",
 		status, time.Now().UTC(), id)
 	return err
 }
 
-// ResetTask resets a task to queued, clearing runtime state.
-func (s *Store) ResetTask(id int64) error {
-	_, err := s.db.Exec(`UPDATE tasks SET status = 'queued', worktree_path = NULL,
+// ResetJob resets a job to queued, clearing runtime state.
+func (s *Store) ResetJob(id int64) error {
+	_, err := s.db.Exec(`UPDATE jobs SET status = 'queued', worktree_path = NULL,
 		branch = NULL, pr_number = NULL, cost_usd = 0, failure_reason = NULL,
 		failure_detail = NULL, review_risk = NULL, review_comment_id = NULL,
+		current_stage = NULL, result_json = NULL,
 		agent_log = NULL, started_at = NULL, completed_at = NULL WHERE id = ?`, id)
 	return err
 }
 
-// ClearTaskWorktree clears the worktree path for a task.
-func (s *Store) ClearTaskWorktree(id int64) error {
-	_, err := s.db.Exec("UPDATE tasks SET worktree_path = NULL WHERE id = ?", id)
+// ClearJobWorktree clears the worktree path for a job.
+func (s *Store) ClearJobWorktree(id int64) error {
+	_, err := s.db.Exec("UPDATE jobs SET worktree_path = NULL WHERE id = ?", id)
 	return err
 }
 
-// TransitionStaleRunningTasks moves running tasks back to queued (for crash recovery).
-func (s *Store) TransitionStaleRunningTasks(deploymentID string) (int64, error) {
-	res, err := s.db.Exec(`UPDATE tasks SET status = 'queued', started_at = NULL
+// TransitionStaleRunningJobs moves running jobs back to queued (for crash recovery).
+func (s *Store) TransitionStaleRunningJobs(deploymentID string) (int64, error) {
+	res, err := s.db.Exec(`UPDATE jobs SET status = 'queued', started_at = NULL
 		WHERE deployment_id = ? AND status = 'running'`, deploymentID)
 	if err != nil {
 		return 0, err
@@ -212,35 +228,37 @@ func (s *Store) TransitionStaleRunningTasks(deploymentID string) (int64, error) 
 	return res.RowsAffected()
 }
 
-// QueuedUnblockedTasks returns queued tasks whose dependencies are all satisfied.
-func (s *Store) QueuedUnblockedTasks(deploymentID string) ([]*Task, error) {
-	tasks, err := s.GetTasks(deploymentID)
+// QueuedUnblockedJobs returns queued jobs whose dependencies are all satisfied.
+func (s *Store) QueuedUnblockedJobs(deploymentID string) ([]*Job, error) {
+	jobs, err := s.GetJobs(deploymentID)
 	if err != nil {
 		return nil, err
 	}
 
 	// Build status map: issue_number → status.
 	statusMap := make(map[int]string)
-	for _, t := range tasks {
-		statusMap[t.IssueNumber] = t.Status
+	for _, j := range jobs {
+		if j.IssueNumber > 0 {
+			statusMap[j.IssueNumber] = j.Status
+		}
 	}
 
-	var result []*Task
-	for _, t := range tasks {
-		if t.Status != StatusQueued {
+	var result []*Job
+	for _, j := range jobs {
+		if j.Status != StatusQueued {
 			continue
 		}
 
 		// Parse dependencies.
-		if !t.Dependencies.Valid || t.Dependencies.String == "" || t.Dependencies.String == "null" {
-			result = append(result, t)
+		if !j.Dependencies.Valid || j.Dependencies.String == "" || j.Dependencies.String == "null" {
+			result = append(result, j)
 			continue
 		}
 
 		var deps []int
-		if err := json.Unmarshal([]byte(t.Dependencies.String), &deps); err != nil {
+		if err := json.Unmarshal([]byte(j.Dependencies.String), &deps); err != nil {
 			// Malformed deps — treat as unblocked.
-			result = append(result, t)
+			result = append(result, j)
 			continue
 		}
 
@@ -258,17 +276,17 @@ func (s *Store) QueuedUnblockedTasks(deploymentID string) ([]*Task, error) {
 			}
 		}
 		if !blocked {
-			result = append(result, t)
+			result = append(result, j)
 		}
 	}
 
 	return result, nil
 }
 
-// TotalSpend returns the sum of cost_usd for all tasks in a deployment plus carried cost.
+// TotalSpend returns the sum of cost_usd for all jobs in a deployment plus carried cost.
 func (s *Store) TotalSpend(deploymentID string) (float64, error) {
-	var taskCost sql.NullFloat64
-	err := s.db.Get(&taskCost, "SELECT SUM(cost_usd) FROM tasks WHERE deployment_id = ?", deploymentID)
+	var jobCost sql.NullFloat64
+	err := s.db.Get(&jobCost, "SELECT SUM(cost_usd) FROM jobs WHERE deployment_id = ?", deploymentID)
 	if err != nil {
 		return 0, err
 	}
@@ -277,8 +295,8 @@ func (s *Store) TotalSpend(deploymentID string) (float64, error) {
 	_ = s.db.Get(&carried, "SELECT carried_cost_usd FROM deployments WHERE id = ?", deploymentID)
 
 	cost := carried
-	if taskCost.Valid {
-		cost += taskCost.Float64
+	if jobCost.Valid {
+		cost += jobCost.Float64
 	}
 	return cost, nil
 }
@@ -433,11 +451,11 @@ func (s *Store) IncrementLessonInjected(ids []int64) error {
 	return err
 }
 
-// RecordTaskLessons records which lessons were injected into a task.
-func (s *Store) RecordTaskLessons(taskID int64, lessonIDs []int64) error {
+// RecordJobLessons records which lessons were injected into a job.
+func (s *Store) RecordJobLessons(jobID int64, lessonIDs []int64) error {
 	for _, lid := range lessonIDs {
-		_, err := s.db.Exec("INSERT OR IGNORE INTO task_lessons (task_id, lesson_id) VALUES (?, ?)",
-			taskID, lid)
+		_, err := s.db.Exec("INSERT OR IGNORE INTO job_lessons (job_id, lesson_id) VALUES (?, ?)",
+			jobID, lid)
 		if err != nil {
 			return err
 		}
@@ -445,15 +463,15 @@ func (s *Store) RecordTaskLessons(taskID int64, lessonIDs []int64) error {
 	return nil
 }
 
-// UpdateLessonOutcome increments helpful or unhelpful counts for lessons injected into a task.
-func (s *Store) UpdateLessonOutcome(taskID int64, helpful bool) error {
+// UpdateLessonOutcome increments helpful or unhelpful counts for lessons injected into a job.
+func (s *Store) UpdateLessonOutcome(jobID int64, helpful bool) error {
 	col := "times_helpful"
 	if !helpful {
 		col = "times_unhelpful"
 	}
 	query := fmt.Sprintf(`UPDATE lessons SET %s = %s + 1 WHERE id IN
-		(SELECT lesson_id FROM task_lessons WHERE task_id = ?)`, col, col)
-	_, err := s.db.Exec(query, taskID)
+		(SELECT lesson_id FROM job_lessons WHERE job_id = ?)`, col, col)
+	_, err := s.db.Exec(query, jobID)
 	return err
 }
 

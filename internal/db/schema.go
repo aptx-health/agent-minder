@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -36,30 +36,55 @@ CREATE TABLE IF NOT EXISTS deployments (
 	started_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL REFERENCES deployments(id),
-	issue_number INTEGER NOT NULL,
+
+	-- What to run
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL,
+
+	-- Context (nullable for proactive agents)
+	issue_number INTEGER,
 	issue_title TEXT,
 	issue_body TEXT,
 	owner TEXT NOT NULL,
 	repo TEXT NOT NULL,
+
+	-- Lifecycle
 	status TEXT NOT NULL DEFAULT 'queued',
-	dependencies TEXT,
+	current_stage TEXT,
+	stages_json TEXT,
+	result_json TEXT,
+
+	-- Execution
 	worktree_path TEXT,
 	branch TEXT,
 	pr_number INTEGER,
 	cost_usd REAL DEFAULT 0.0,
+	agent_log TEXT,
+
+	-- Failure
 	failure_reason TEXT,
 	failure_detail TEXT,
+
+	-- Review
 	review_risk TEXT,
 	review_comment_id INTEGER,
-	max_turns_override INTEGER,
-	max_budget_override REAL,
-	agent_log TEXT,
+
+	-- Dependencies
+	dependencies TEXT,
+
+	-- Budget overrides
+	max_turns INTEGER,
+	max_budget_usd REAL,
+
+	-- Timestamps
+	queued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	started_at DATETIME,
 	completed_at DATETIME,
-	UNIQUE(deployment_id, issue_number)
+
+	UNIQUE(deployment_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS dep_graphs (
@@ -87,10 +112,10 @@ CREATE TABLE IF NOT EXISTS lessons (
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS task_lessons (
-	task_id INTEGER NOT NULL REFERENCES tasks(id),
+CREATE TABLE IF NOT EXISTS job_lessons (
+	job_id INTEGER NOT NULL REFERENCES jobs(id),
 	lesson_id INTEGER NOT NULL REFERENCES lessons(id),
-	PRIMARY KEY (task_id, lesson_id)
+	PRIMARY KEY (job_id, lesson_id)
 );
 
 CREATE TABLE IF NOT EXISTS repo_onboarding (
@@ -102,6 +127,36 @@ CREATE TABLE IF NOT EXISTS repo_onboarding (
 	validation_failures TEXT,
 	scanned_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+`
+
+// migrateV1toV2 migrates a v1 database (tasks table) to v2 (jobs table).
+const migrateV1toV2 = `
+-- Rename tasks → jobs and add new columns.
+ALTER TABLE tasks RENAME TO jobs;
+ALTER TABLE jobs ADD COLUMN agent TEXT NOT NULL DEFAULT 'autopilot';
+ALTER TABLE jobs ADD COLUMN name TEXT NOT NULL DEFAULT '';
+ALTER TABLE jobs ADD COLUMN current_stage TEXT;
+ALTER TABLE jobs ADD COLUMN stages_json TEXT;
+ALTER TABLE jobs ADD COLUMN result_json TEXT;
+ALTER TABLE jobs ADD COLUMN queued_at DATETIME;
+
+-- Rename max_turns_override → max_turns, max_budget_override → max_budget_usd (on jobs).
+-- SQLite doesn't support RENAME COLUMN on older versions, but modernc/sqlite does.
+ALTER TABLE jobs RENAME COLUMN max_turns_override TO max_turns;
+ALTER TABLE jobs RENAME COLUMN max_budget_override TO max_budget_usd;
+
+-- Backfill name from issue_number for existing rows.
+UPDATE jobs SET name = 'issue-' || issue_number WHERE name = '';
+
+-- Backfill queued_at from started_at or current time.
+UPDATE jobs SET queued_at = COALESCE(started_at, CURRENT_TIMESTAMP) WHERE queued_at IS NULL;
+
+-- Rename task_lessons → job_lessons.
+ALTER TABLE task_lessons RENAME TO job_lessons;
+ALTER TABLE job_lessons RENAME COLUMN task_id TO job_id;
+
+-- Update schema version.
+UPDATE schema_version SET version = 2;
 `
 
 // DefaultDBPath returns the default database path for v2.
@@ -120,15 +175,25 @@ func Open(dsn string) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	// Apply schema.
-	if _, err := db.Exec(schema); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("applying schema: %w", err)
+	// Check if this is an existing v1 database that needs migration.
+	var version int
+	hasVersion := false
+	if err := db.Get(&version, "SELECT version FROM schema_version LIMIT 1"); err == nil {
+		hasVersion = true
 	}
 
-	// Set or verify schema version.
-	var count int
-	if err := db.Get(&count, "SELECT COUNT(*) FROM schema_version"); err == nil && count == 0 {
+	if hasVersion && version == 1 {
+		// Migrate v1 → v2.
+		if _, err := db.Exec(migrateV1toV2); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrating v1→v2: %w", err)
+		}
+	} else if !hasVersion {
+		// Fresh database — apply schema from scratch.
+		if _, err := db.Exec(schema); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("applying schema: %w", err)
+		}
 		_, _ = db.Exec("INSERT INTO schema_version (version) VALUES (?)", schemaVersion)
 	}
 

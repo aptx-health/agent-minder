@@ -29,8 +29,8 @@ if [ -z "$STATUS" ] || ! echo "$STATUS" | jq -e '.deploy_id' >/dev/null 2>&1; th
   exit 0
 fi
 
-# Fetch tasks.
-TASKS=$(curl $CURL_OPTS "http://$ADDR/tasks" 2>/dev/null)
+# Fetch jobs.
+TASKS=$(curl $CURL_OPTS "http://$ADDR/jobs" 2>/dev/null)
 if [ -z "$TASKS" ] || ! echo "$TASKS" | jq -e 'type == "array"' >/dev/null 2>&1; then
   TASKS="[]"
 fi

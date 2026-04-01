@@ -39,9 +39,9 @@ type streamBlock struct {
 }
 
 // scanStream reads stream-json lines from r, writes each line to logFile,
-// and updates the live status for the given slot on the supervisor.
+// and updates the live status for the given job on the supervisor.
 // It exits when r reaches EOF (agent process exits).
-func scanStream(r io.Reader, logFile *os.File, slotIdx int, s *Supervisor) {
+func scanStream(r io.Reader, logFile *os.File, jobID int64, s *Supervisor) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024) // 1MB max line
 
@@ -59,23 +59,20 @@ func scanStream(r io.Reader, logFile *os.File, slotIdx int, s *Supervisor) {
 		}
 
 		s.mu.Lock()
-		slot := s.slots[slotIdx]
-		if slot != nil {
+		rs, ok := s.running[jobID]
+		if ok {
 			switch evt.Type {
 			case "assistant":
 				if evt.Message != nil {
-					// Each assistant message = one step.
-					slot.liveStatus.StepCount++
+					rs.liveStatus.StepCount++
 
-					// Find the last tool_use block for display.
 					for _, block := range evt.Message.Content {
 						if block.Type == "tool_use" {
-							slot.liveStatus.CurrentTool = block.Name
-							slot.liveStatus.ToolInput = extractToolInput(block.Input, 80)
+							rs.liveStatus.CurrentTool = block.Name
+							rs.liveStatus.ToolInput = extractToolInput(block.Input, 80)
 						}
 					}
 
-					// If no tool_use, it's a text-only response — clear tool display.
 					hasToolUse := false
 					for _, block := range evt.Message.Content {
 						if block.Type == "tool_use" {
@@ -84,14 +81,14 @@ func scanStream(r io.Reader, logFile *os.File, slotIdx int, s *Supervisor) {
 						}
 					}
 					if !hasToolUse {
-						slot.liveStatus.CurrentTool = ""
-						slot.liveStatus.ToolInput = ""
+						rs.liveStatus.CurrentTool = ""
+						rs.liveStatus.ToolInput = ""
 					}
 				}
 
 			case "result":
-				slot.liveStatus.CurrentTool = ""
-				slot.liveStatus.ToolInput = ""
+				rs.liveStatus.CurrentTool = ""
+				rs.liveStatus.ToolInput = ""
 			}
 		}
 		s.mu.Unlock()
@@ -113,7 +110,6 @@ func extractToolInput(raw json.RawMessage, maxLen int) string {
 		return s
 	}
 
-	// Try common field names in priority order.
 	for _, key := range []string{"command", "file_path", "pattern", "prompt", "query", "description"} {
 		if val, ok := obj[key].(string); ok && val != "" {
 			if len(val) > maxLen {
@@ -123,7 +119,6 @@ func extractToolInput(raw json.RawMessage, maxLen int) string {
 		}
 	}
 
-	// Fallback: raw JSON truncated.
 	s := string(raw)
 	if len(s) > maxLen {
 		return s[:maxLen-3] + "..."
