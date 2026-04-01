@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
+- **Replace custom lastIndex with strings.LastIndex**: Removed custom `lastIndex()` in review.go that reimplemented `strings.LastIndex()` and had a potential panic on short strings (#383)
 - **Daemon heartbeat cleanup on graceful stop**: `StartHeartbeat` stop function now blocks until the heartbeat goroutine fully exits, preventing a race where the heartbeat file could be rewritten after removal during shutdown. Fixes false-positive crash detection on next startup. (#378)
 - **Review session uses reviewer agent def and PR context**: The `r` (review session) command now launches Claude with `--agent reviewer` and includes PR body and comments in the initial prompt, matching the automated review path. Previously the session used no agent definition and omitted PR comments. (#348)
 - **Max turns fallback detection**: When an agent's stream-json result event is missing (nil result), the supervisor now counts assistant events from the log file to detect turn limit exhaustion. Previously these agents were misclassified as "bailed" instead of "failed" with reason "max_turns". (#340)
