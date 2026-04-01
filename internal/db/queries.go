@@ -245,7 +245,7 @@ func (s *Store) QueuedUnblockedJobs(deploymentID string) ([]*Job, error) {
 
 	var result []*Job
 	for _, j := range jobs {
-		if j.Status != StatusQueued {
+		if j.Status != StatusQueued && j.Status != StatusBlocked {
 			continue
 		}
 
