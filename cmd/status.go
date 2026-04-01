@@ -2,152 +2,146 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
-	"time"
 
-	"github.com/dustinlange/agent-minder/internal/db"
-	gitpkg "github.com/dustinlange/agent-minder/internal/git"
-	"github.com/dustinlange/agent-minder/internal/msgbus"
+	"github.com/aptx-health/agent-minder/internal/daemon"
+	"github.com/aptx-health/agent-minder/internal/db"
 	"github.com/spf13/cobra"
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status <project>",
-	Short: "Show catch-up summary for the human (no AI call)",
-	Long: `Display a quick catch-up summary for a project without making any LLM
-calls. Shows the project goal, enrolled repos with recent commits,
-message bus traffic, tracked GitHub items, active concerns, and the
-last LLM analysis.
-
-Useful for checking project state before launching the full TUI.`,
-	Example: `  # Show status for a project
-  agent-minder status my-project`,
-	Args: cobra.ExactArgs(1),
-	RunE: runStatus,
+	Use:   "status [deploy-id]",
+	Short: "Show deployment status",
+	Args:  cobra.MaximumNArgs(1),
+	RunE:  runStatus,
 }
+
+var (
+	flagRemote    string
+	flagStatusKey string
+)
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
+	statusCmd.Flags().StringVar(&flagRemote, "remote", "", "Remote daemon address (host:port)")
+	statusCmd.Flags().StringVar(&flagStatusKey, "api-key", "", "API key for remote access")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	projectName := args[0]
+	// Remote mode.
+	if flagRemote != "" {
+		client := daemon.NewClient("http://"+flagRemote, flagStatusKey)
+		status, err := client.GetStatus()
+		if err != nil {
+			return fmt.Errorf("fetch status: %w", err)
+		}
+		fmt.Printf("Deploy: %s (PID %d, up %ds)\n", status.DeployID, status.PID, status.UptimeSec)
+		fmt.Printf("Budget: $%.2f / $%.2f", status.TotalSpent, status.TotalBudget)
+		if status.BudgetPaused {
+			fmt.Print(" [PAUSED]")
+		}
+		fmt.Println()
+
+		tasks, err := client.GetTasks()
+		if err != nil {
+			return fmt.Errorf("fetch tasks: %w", err)
+		}
+		printTasks(tasks)
+		return nil
+	}
+
+	// Local mode — read from DB.
+	if len(args) == 0 {
+		return listAllDeployments()
+	}
+
+	deployID := args[0]
+	alive, pid := daemon.IsRunning(deployID)
 
 	conn, err := db.Open(db.DefaultDBPath())
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		return err
 	}
-	defer func() { _ = conn.Close() }()
 	store := db.NewStore(conn)
+	defer func() { _ = store.Close() }()
 
-	project, err := store.GetProject(projectName)
+	deploy, err := store.GetDeployment(deployID)
 	if err != nil {
-		return fmt.Errorf("project %q not found — run 'agent-minder list' to see available projects", projectName)
+		return fmt.Errorf("deployment %s not found", deployID)
 	}
 
-	repos, _ := store.GetRepos(project.ID)
-	concerns, _ := store.ActiveConcerns(project.ID)
-	lastPoll, _ := store.LastPoll(project.ID)
-
-	// Header.
-	fmt.Printf("Minder: %s\n", project.Name)
-	fmt.Printf("Goal: %s — %s\n", project.GoalType, project.GoalDescription)
-	if lastPoll != nil {
-		fmt.Printf("Last poll: %s\n", lastPoll.PolledAt)
+	fmt.Printf("Deploy: %s (%s/%s, %s mode)\n", deployID, deploy.Owner, deploy.Repo, deploy.Mode)
+	if alive {
+		fmt.Printf("Status: running (PID %d)\n", pid)
 	} else {
-		fmt.Printf("Last poll: (never)\n")
+		fmt.Println("Status: stopped")
 	}
-	fmt.Println()
 
-	// Repos.
-	fmt.Println("Repos:")
-	yesterday := time.Now().Add(-24 * time.Hour)
-	for _, repo := range repos {
-		branch, _ := gitpkg.CurrentBranch(repo.Path)
-		entries, _ := gitpkg.LogSince(repo.Path, yesterday)
+	spent, _ := store.TotalSpend(deployID)
+	fmt.Printf("Budget: $%.2f / $%.2f\n", spent, deploy.TotalBudgetUSD)
 
-		wts, _ := store.GetWorktrees(repo.ID)
-		wtNote := ""
-		if len(wts) > 1 {
-			wtNote = fmt.Sprintf(" + %d worktrees", len(wts)-1)
+	tasks, _ := store.GetTasks(deployID)
+	fmt.Printf("Tasks: %d\n\n", len(tasks))
+	for _, t := range tasks {
+		pr := ""
+		if t.PRNumber.Valid {
+			pr = fmt.Sprintf(" PR#%d", t.PRNumber.Int64)
 		}
-
-		fmt.Printf("  %s (%s%s)\n", repo.ShortName, branch, wtNote)
-		if len(entries) > 0 {
-			var subjects []string
-			limit := 3
-			if len(entries) < limit {
-				limit = len(entries)
-			}
-			for _, e := range entries[:limit] {
-				subjects = append(subjects, e.Subject)
-			}
-			fmt.Printf("    %d new commits since yesterday (%s)\n", len(entries), strings.Join(subjects, ", "))
-		} else {
-			fmt.Printf("    no new commits since yesterday\n")
+		cost := ""
+		if t.CostUSD > 0 {
+			cost = fmt.Sprintf(" $%.2f", t.CostUSD)
 		}
-	}
-	fmt.Println()
-
-	// Messages.
-	dbPath := msgbus.DefaultDBPath()
-	client, err := msgbus.Open(dbPath)
-	if err == nil {
-		defer func() { _ = client.Close() }()
-		ttl := time.Duration(project.MessageTTLSec) * time.Second
-		msgs, _ := client.RecentMessages(ttl, project.Name)
-		if len(msgs) > 0 {
-			fmt.Printf("Messages (%d):\n", len(msgs))
-			limit := 5
-			if len(msgs) < limit {
-				limit = len(msgs)
-			}
-			for _, m := range msgs[:limit] {
-				fmt.Printf("  [%s] %s: %s\n", m.Topic, m.Sender, truncate(m.Message, 80))
-			}
-			fmt.Println()
-		}
-	}
-
-	// Tracked items.
-	trackedItems, err := store.GetTrackedItems(project.ID)
-	if err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: loading tracked items: %v\n", err)
-	}
-	if len(trackedItems) > 0 {
-		fmt.Printf("Tracked Items (%d):\n", len(trackedItems))
-		for _, item := range trackedItems {
-			fmt.Printf("  [%s] %s — %s\n", item.LastStatus, item.DisplayRef(), item.Title)
-		}
-		fmt.Println()
-	}
-
-	// Concerns.
-	if len(concerns) > 0 {
-		fmt.Println("Active Concerns:")
-		for _, c := range concerns {
-			prefix := "INFO"
-			if c.Severity == "warning" {
-				prefix = "WARN"
-			}
-			fmt.Printf("  [%s] %s\n", prefix, c.Message)
-		}
-		fmt.Println()
-	}
-
-	// Last LLM response.
-	if lastPoll != nil && lastPoll.LLMResponse() != "" {
-		fmt.Println("Last Analysis:")
-		fmt.Printf("  %s\n", lastPoll.LLMResponse())
-		fmt.Println()
+		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", t.IssueNumber, t.IssueTitle.String, t.Status, pr, cost)
 	}
 
 	return nil
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
+func listAllDeployments() error {
+	conn, err := db.Open(db.DefaultDBPath())
+	if err != nil {
+		return err
 	}
-	return s[:max-3] + "..."
+	store := db.NewStore(conn)
+	defer func() { _ = store.Close() }()
+
+	deploys, err := store.ListDeployments()
+	if err != nil {
+		return err
+	}
+
+	if len(deploys) == 0 {
+		fmt.Println("No deployments found.")
+		return nil
+	}
+
+	for _, d := range deploys {
+		alive, _ := daemon.IsRunning(d.ID)
+		status := "stopped"
+		if alive {
+			status = "running"
+		}
+		tasks, _ := store.GetTasks(d.ID)
+		fmt.Printf("%-10s %s/%s  %-8s  %d tasks  %s\n",
+			d.ID, d.Owner, d.Repo, status, len(tasks), d.StartedAt.Format("2006-01-02 15:04"))
+	}
+	return nil
+}
+
+func printTasks(tasks []daemon.TaskResponse) {
+	if len(tasks) == 0 {
+		fmt.Println("No tasks.")
+		return
+	}
+	fmt.Println()
+	for _, t := range tasks {
+		pr := ""
+		if t.PRNumber > 0 {
+			pr = fmt.Sprintf(" PR#%d", t.PRNumber)
+		}
+		cost := ""
+		if t.CostUSD > 0 {
+			cost = fmt.Sprintf(" $%.2f", t.CostUSD)
+		}
+		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", t.IssueNumber, t.IssueTitle, t.Status, pr, cost)
+	}
 }

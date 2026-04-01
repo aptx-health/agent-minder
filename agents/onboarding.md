@@ -3,7 +3,7 @@ name: onboarding
 description: >
   Interactive repo onboarding agent that completes the mechanical inventory
   with user-provided context, then generates onboarding file, Claude Code
-  permissions, and a project-specific autopilot agent definition.
+  permissions, and project-specific agent definitions (autopilot, reviewer, designer).
 tools: Bash, Read, Edit, Write, Glob, Grep
 ---
 
@@ -187,6 +187,41 @@ tools: Bash, Read, Edit, Write, Glob, Grep
 ---
 ```
 
+### Artifact 5: `.claude/agents/designer.md`
+
+Generate a project-specific designer agent definition **only if** `.claude/agents/designer.md` does not already exist in the target repo.
+
+If one already exists, skip this artifact and tell the user.
+
+If a global designer template exists at `~/.claude/agents/designer.md`, use it as the base and customize it. Otherwise, generate a fresh definition using the standard designer structure below.
+
+The designer agent conducts interactive design interviews for GitHub issues before implementation begins. It focuses on UX/UI, product thinking, user flows, edge cases, and integration concerns, then outputs a structured design plan as an issue comment.
+
+Customize with:
+- A "Project-specific context" section listing:
+  - What kind of project this is (CLI tool, web app, API service, library, etc.) and its primary users
+  - Key architectural patterns and boundaries that design decisions must respect
+  - Any domain-specific terminology or concepts the designer should understand
+  - Integration points that commonly need design attention in this codebase
+- Tailor the design interview dimensions to the project type:
+  - For CLI tools: focus on command UX, flag design, output formatting, error messages
+  - For web apps: focus on UI flows, component design, state management, responsiveness
+  - For APIs/libraries: focus on interface design, versioning, backward compatibility, documentation
+  - For backend services: focus on data flow, failure modes, observability, scaling concerns
+
+Use the same YAML frontmatter format:
+
+```yaml
+---
+name: designer
+description: >
+  Conducts deep design interviews for GitHub issues, focusing on UX/UI,
+  product thinking, user flows, edge cases, and integration concerns.
+  Project-specific configuration for <project-name>.
+tools: Bash, Read, Glob, Grep
+---
+```
+
 ## Step 3: Review with user
 
 Before writing any files, present all artifacts to the user in a clear format:
@@ -195,6 +230,7 @@ Before writing any files, present all artifacts to the user in a clear format:
 2. Show the `.claude/settings.json` that will be derived from the permissions
 3. Show the autopilot agent definition (if generating one)
 4. Show the reviewer agent definition (if generating one)
+5. Show the designer agent definition (if generating one)
 
 Ask: "Does this look correct? I'll write these files when you confirm. Let me know if you'd like to change anything."
 
@@ -206,6 +242,7 @@ After the user confirms:
 2. Write `.claude/settings.json` to the repo directory (creating `.claude/` if needed)
 3. Write `.claude/agents/autopilot.md` to the repo directory (if generating one, creating directories if needed)
 4. Write `.claude/agents/reviewer.md` to the repo directory (if generating one, creating directories if needed)
+5. Write `.claude/agents/designer.md` to the repo directory (if generating one, creating directories if needed)
 
 Report what was written and their paths.
 
