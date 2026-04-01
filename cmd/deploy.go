@@ -300,9 +300,10 @@ func runDaemon(deployID string) error {
 	if err := daemon.WritePID(deployID); err != nil {
 		return fmt.Errorf("write PID: %w", err)
 	}
+	stopHB := daemon.StartHeartbeat(deployID)
+	// Cleanup order (defers run LIFO): stop heartbeat → remove heartbeat → remove PID.
 	defer daemon.RemovePID(deployID)
 	defer daemon.RemoveHeartbeat(deployID)
-	stopHB := daemon.StartHeartbeat(deployID)
 	defer stopHB()
 
 	conn, err := db.Open(db.DefaultDBPath())
