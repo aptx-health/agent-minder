@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Refactor DeriveProjectName to use StringOrDefault**: Added `internal/util` package with `StringOrDefault` helper and refactored `discovery.DeriveProjectName()` to use it for the fallback case (#188)
+
 ### Added
 - **Deployment guide + service units**: Complete deployment documentation for running agent-minder watch mode on Ubuntu VPS (systemd) and macOS (LaunchAgent). Includes service units, install scripts, environment templates, logrotate config, firewall/Tailscale guidance, and troubleshooting. New `--foreground` flag on `deploy` and `deploy watch` for process-manager-friendly execution (#287)
 - **Remote TUI client**: `agent-minder deploy tui --remote host:port` launches a k9s-like live dashboard for monitoring remote deploy daemons. Features: live-updating task table with color-coded statuses, dependency graph visualization, analysis results viewer, agent log streaming with auto-tail, and action keys for refresh/poll/stop. Configurable poll intervals via `--task-poll` and `--analysis-poll` flags. Auth via `--api-key` flag or `MINDER_API_KEY` env var. New `internal/remotetui` package with bubbletea v2 model. (#282)

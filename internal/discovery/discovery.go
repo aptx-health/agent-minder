@@ -7,6 +7,7 @@ import (
 
 	gitpkg "github.com/dustinlange/agent-minder/internal/git"
 	"github.com/dustinlange/agent-minder/internal/onboarding"
+	"github.com/dustinlange/agent-minder/internal/util"
 )
 
 // LegacyWorktree is kept for backward compat with v1 callers.
@@ -98,10 +99,10 @@ func DeriveProjectName(repos []*RepoInfo) string {
 	// We want to snap back to "agent".
 	prefix = trimToWordBoundary(prefix, names)
 
-	if prefix == "" || len(prefix) < 2 {
-		return repos[0].ShortName
+	if len(prefix) < 2 {
+		prefix = ""
 	}
-	return prefix
+	return util.StringOrDefault(prefix, repos[0].ShortName)
 }
 
 // SuggestTopics generates topic names for a set of repos plus a coord topic.
