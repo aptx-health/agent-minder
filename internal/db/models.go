@@ -79,7 +79,7 @@ type Job struct {
 	MaxBudgetOv sql.NullFloat64 `db:"max_budget_usd"`
 
 	// Timestamps.
-	QueuedAt    time.Time    `db:"queued_at"`
+	QueuedAt    sql.NullTime `db:"queued_at"`
 	StartedAt   sql.NullTime `db:"started_at"`
 	CompletedAt sql.NullTime `db:"completed_at"`
 }

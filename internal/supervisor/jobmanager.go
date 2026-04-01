@@ -322,6 +322,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	prNum := sc.DetectPR(ctx)
 	if prNum > 0 {
 		_ = sc.Store.UpdateJobPR(job.ID, prNum)
+		job.PRNumber = sql.NullInt64{Int64: int64(prNum), Valid: true}
 		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
 		_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
 		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReview)
