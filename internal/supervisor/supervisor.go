@@ -495,11 +495,8 @@ func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Task,
 	}
 	_ = os.MkdirAll(filepath.Join(home, ".agent-minder", "agents"), 0755)
 
-	// Get base branch.
-	baseBranch := s.deploy.BaseBranch
-	if baseBranch == "" {
-		baseBranch, _ = gitpkg.DefaultBranch(s.repoDir)
-	}
+	// Get base branch (onboarding.yaml > deploy flag > git default).
+	baseBranch := resolveBaseBranch(s.repoDir, s.deploy)
 
 	if !isResume {
 		// Serialize git worktree operations.

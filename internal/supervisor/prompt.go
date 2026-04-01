@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/aptx-health/agent-minder/internal/db"
+	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	"github.com/aptx-health/agent-minder/internal/onboarding"
 )
 
@@ -162,6 +163,24 @@ func ensureAgentDefByName(worktreePath string, name AgentName) (AgentDefSource, 
 		return "", fmt.Errorf("write agent def: %w", err)
 	}
 	return AgentDefBuiltIn, nil
+}
+
+// resolveBaseBranch determines the base branch from onboarding.yaml, deploy config, or git default.
+func resolveBaseBranch(repoDir string, deploy *db.Deployment) string {
+	// 1. Onboarding config takes priority (repo-specific knowledge).
+	f, err := onboarding.Parse(onboarding.FilePath(repoDir))
+	if err == nil && f.Context.BaseBranch != "" {
+		return f.Context.BaseBranch
+	}
+	// 2. Deploy flag / config.
+	if deploy.BaseBranch != "" {
+		return deploy.BaseBranch
+	}
+	// 3. Git default branch detection.
+	if branch, err := gitpkg.DefaultBranch(repoDir); err == nil && branch != "" {
+		return branch
+	}
+	return "main"
 }
 
 // resolveAllowedTools reads tools from onboarding.yaml or returns defaults.

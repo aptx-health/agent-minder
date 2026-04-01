@@ -102,10 +102,11 @@ Your goals:
 1. Ask about the test command (verify it works by running it)
 2. Ask about the build command
 3. Ask about any lint commands
-4. Ask about special instructions for agents working in this repo
-5. Determine which tools agents need (start with defaults, add as needed)
-6. Update the onboarding file with the gathered information
-7. Run validation to ensure the config is correct
+4. Ask about the base branch for PRs (main, dev, develop, etc.) — check git branch output
+5. Ask about special instructions for agents working in this repo
+6. Determine which tools agents need (start with defaults, add as needed)
+7. Update the onboarding file with the gathered information (including base_branch in the context section)
+8. Run validation to ensure the config is correct
 
 Be concise and efficient. Most repos need minimal configuration.`, filePath, info.Path, info.Inventory.Languages)
 }
