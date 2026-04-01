@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
+- **Daemon client HTTP status range check**: Accept all 2xx status codes (not just 200) in `getJSON()` and `post()` methods, so 201/204 responses are no longer treated as errors (#386)
 - **Watch filter value validation**: `ParseWatchFilter()` now rejects values containing invalid characters (e.g., semicolons, newlines, slashes). Added comprehensive test coverage for all parse paths. (#387)
 - **Distinct error codes in task log endpoint**: `handleTaskLog` now returns `"task_not_found"` when the task ID doesn't exist vs `"log_not_found"` when the task exists but has no log file, instead of a single ambiguous 404 (#388)
 - **Daemon heartbeat cleanup on graceful stop**: `StartHeartbeat` stop function now blocks until the heartbeat goroutine fully exits, preventing a race where the heartbeat file could be rewritten after removal during shutdown. Fixes false-positive crash detection on next startup. (#378)
