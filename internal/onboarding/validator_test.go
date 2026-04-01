@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dustinlange/agent-minder/internal/agentutil"
+	"github.com/aptx-health/agent-minder/internal/agentutil"
 )
 
 // --- Mock runner ---

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dustinlange/agent-minder/internal/agentutil"
+	"github.com/aptx-health/agent-minder/internal/agentutil"
 )
 
 const (

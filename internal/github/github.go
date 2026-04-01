@@ -549,3 +549,44 @@ func hasLabel(labels []string, name string) bool {
 	}
 	return false
 }
+
+// ListPRsForBranch returns PR numbers for open PRs from the given branch.
+func (c *Client) ListPRsForBranch(ctx context.Context, owner, repo, branch string) ([]int, error) {
+	prs, _, err := c.gh.PullRequests.List(ctx, owner, repo, &github.PullRequestListOptions{
+		Head:  owner + ":" + branch,
+		State: "open",
+	})
+	if err != nil {
+		return nil, err
+	}
+	var nums []int
+	for _, pr := range prs {
+		nums = append(nums, pr.GetNumber())
+	}
+	return nums, nil
+}
+
+// IsPRMerged returns whether a PR has been merged.
+func (c *Client) IsPRMerged(ctx context.Context, owner, repo string, number int) (bool, error) {
+	merged, _, err := c.gh.PullRequests.IsMerged(ctx, owner, repo, number)
+	if err != nil {
+		return false, err
+	}
+	return merged, nil
+}
+
+// FindMilestoneNumber looks up a milestone by name and returns its number.
+func (c *Client) FindMilestoneNumber(ctx context.Context, owner, repo, name string) (int, error) {
+	milestones, _, err := c.gh.Issues.ListMilestones(ctx, owner, repo, &github.MilestoneListOptions{
+		State: "open",
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, ms := range milestones {
+		if ms.GetTitle() == name {
+			return ms.GetNumber(), nil
+		}
+	}
+	return 0, fmt.Errorf("milestone %q not found", name)
+}

@@ -2,315 +2,143 @@ package db
 
 import (
 	"database/sql"
-	"fmt"
 	"time"
 )
 
-// Project represents a monitored project.
-type Project struct {
-	ID                          int64    `db:"id"`
-	Name                        string   `db:"name"`
-	GoalType                    string   `db:"goal_type"`
-	GoalDescription             string   `db:"goal_description"`
-	RefreshIntervalSec          int      `db:"refresh_interval_sec"`
-	MessageTTLSec               int      `db:"message_ttl_sec"`
-	AutoEnrollWorktrees         bool     `db:"auto_enroll_worktrees"`
-	MinderIdentity              string   `db:"minder_identity"`
-	LLMProvider                 string   `db:"llm_provider"`
-	LLMModel                    string   `db:"llm_model"`
-	LLMSummarizerModel          string   `db:"llm_summarizer_model"`
-	LLMAnalyzerModel            string   `db:"llm_analyzer_model"`
-	LLMSummarizerProvider       string   `db:"llm_summarizer_provider"`
-	LLMAnalyzerProvider         string   `db:"llm_analyzer_provider"`
-	StatusIntervalSec           int      `db:"status_interval_sec"`
-	AnalysisIntervalSec         int      `db:"analysis_interval_sec"`
-	IdlePauseSec                int      `db:"idle_pause_sec"`
-	AnalyzerFocus               string   `db:"analyzer_focus"`
-	AutopilotFilterType         string   `db:"autopilot_filter_type"`  // "milestone" or "label" for watch mode
-	AutopilotFilterValue        string   `db:"autopilot_filter_value"` // filter value for watch mode
-	AutopilotMaxAgents          int      `db:"autopilot_max_agents"`
-	AutopilotMaxTurns           int      `db:"autopilot_max_turns"`
-	AutopilotMaxBudgetUSD       float64  `db:"autopilot_max_budget_usd"`
-	AutopilotSkipLabel          string   `db:"autopilot_skip_label"`
-	AutopilotBaseBranch         string   `db:"autopilot_base_branch"`
-	IsDeploy                    bool     `db:"is_deploy"`
-	AnalyzerSessionID           string   `db:"analyzer_session_id"`
-	AutopilotAutoMerge          bool     `db:"autopilot_auto_merge"`
-	AutopilotReviewMaxTurns     *int     `db:"autopilot_review_max_turns"`
-	AutopilotReviewMaxBudgetUSD *float64 `db:"autopilot_review_max_budget_usd"`
-	AutopilotReviewMaxRetries   *int     `db:"autopilot_review_max_retries"`
-	WebhookURL                  string   `db:"webhook_url"`
-	WebhookFormat               string   `db:"webhook_format"`
-	WebhookEvents               string   `db:"webhook_events"`       // comma-separated event types, empty = all
-	TotalBudgetUSD              float64  `db:"total_budget_usd"`     // total spend ceiling; 0 = no limit
-	BudgetPauseRunning          bool     `db:"budget_pause_running"` // true = also stop running agents when ceiling hit
-	CarriedCostUSD              float64  `db:"carried_cost_usd"`     // accumulated cost from cleared task batches
-	CreatedAt                   string   `db:"created_at"`
+// Default limits for agent execution.
+const (
+	DefaultMaxTurns     = 50
+	DefaultMaxBudgetUSD = 5.0
+)
+
+// Deployment represents a single deploy run configuration.
+type Deployment struct {
+	ID              string          `db:"id"`
+	RepoDir         string          `db:"repo_dir"`
+	Owner           string          `db:"owner"`
+	Repo            string          `db:"repo"`
+	Mode            string          `db:"mode"`
+	WatchFilter     sql.NullString  `db:"watch_filter"`
+	MaxAgents       int             `db:"max_agents"`
+	MaxTurns        int             `db:"max_turns"`
+	MaxBudgetUSD    float64         `db:"max_budget_usd"`
+	AnalyzerModel   string          `db:"analyzer_model"`
+	SkipLabel       string          `db:"skip_label"`
+	AutoMerge       bool            `db:"auto_merge"`
+	ReviewEnabled   bool            `db:"review_enabled"`
+	ReviewMaxTurns  sql.NullInt64   `db:"review_max_turns"`
+	ReviewMaxBudget sql.NullFloat64 `db:"review_max_budget"`
+	TotalBudgetUSD  float64         `db:"total_budget_usd"`
+	CarriedCostUSD  float64         `db:"carried_cost_usd"`
+	BaseBranch      string          `db:"base_branch"`
+	StartedAt       time.Time       `db:"started_at"`
 }
 
-// RefreshInterval returns the refresh interval as a time.Duration.
-func (p *Project) RefreshInterval() time.Duration {
-	return time.Duration(p.RefreshIntervalSec) * time.Second
+// Task represents a single issue being worked on by an agent.
+type Task struct {
+	ID                int64           `db:"id"`
+	DeploymentID      string          `db:"deployment_id"`
+	IssueNumber       int             `db:"issue_number"`
+	IssueTitle        sql.NullString  `db:"issue_title"`
+	IssueBody         sql.NullString  `db:"issue_body"`
+	Owner             string          `db:"owner"`
+	Repo              string          `db:"repo"`
+	Status            string          `db:"status"`
+	Dependencies      sql.NullString  `db:"dependencies"`
+	WorktreePath      sql.NullString  `db:"worktree_path"`
+	Branch            sql.NullString  `db:"branch"`
+	PRNumber          sql.NullInt64   `db:"pr_number"`
+	CostUSD           float64         `db:"cost_usd"`
+	FailureReason     sql.NullString  `db:"failure_reason"`
+	FailureDetail     sql.NullString  `db:"failure_detail"`
+	ReviewRisk        sql.NullString  `db:"review_risk"`
+	ReviewCommentID   sql.NullInt64   `db:"review_comment_id"`
+	MaxTurnsOverride  sql.NullInt64   `db:"max_turns_override"`
+	MaxBudgetOverride sql.NullFloat64 `db:"max_budget_override"`
+	AgentLog          sql.NullString  `db:"agent_log"`
+	StartedAt         sql.NullTime    `db:"started_at"`
+	CompletedAt       sql.NullTime    `db:"completed_at"`
 }
 
-// MessageTTL returns the message TTL as a time.Duration.
-func (p *Project) MessageTTL() time.Duration {
-	return time.Duration(p.MessageTTLSec) * time.Second
-}
-
-// StatusInterval returns the status poll interval as a time.Duration.
-// Defaults to 5 minutes if not set.
-func (p *Project) StatusInterval() time.Duration {
-	if p.StatusIntervalSec <= 0 {
-		return 5 * time.Minute
+// EffectiveMaxTurns returns the per-task override or the deployment default.
+func (t *Task) EffectiveMaxTurns(deploy *Deployment) int {
+	if t.MaxTurnsOverride.Valid {
+		return int(t.MaxTurnsOverride.Int64)
 	}
-	return time.Duration(p.StatusIntervalSec) * time.Second
+	return deploy.MaxTurns
 }
 
-// AnalysisInterval returns the analysis poll interval as a time.Duration.
-// Defaults to 30 minutes if not set.
-func (p *Project) AnalysisInterval() time.Duration {
-	if p.AnalysisIntervalSec <= 0 {
-		return 30 * time.Minute
+// EffectiveMaxBudget returns the per-task override or the deployment default.
+func (t *Task) EffectiveMaxBudget(deploy *Deployment) float64 {
+	if t.MaxBudgetOverride.Valid {
+		return t.MaxBudgetOverride.Float64
 	}
-	return time.Duration(p.AnalysisIntervalSec) * time.Second
+	return deploy.MaxBudgetUSD
 }
 
-// IdlePauseDuration returns the idle pause threshold as a time.Duration.
-// Returns 0 if idle auto-pause is disabled.
-func (p *Project) IdlePauseDuration() time.Duration {
-	return time.Duration(p.IdlePauseSec) * time.Second
+// HasOverrides returns true if the task has per-task overrides.
+func (t *Task) HasOverrides() bool {
+	return t.MaxTurnsOverride.Valid || t.MaxBudgetOverride.Valid
 }
 
-// EffectiveAutopilotMaxTurns returns the project's configured max turns,
-// falling back to DefaultMaxTurns if unset (zero).
-func (p *Project) EffectiveAutopilotMaxTurns() int {
-	if p.AutopilotMaxTurns < 1 {
-		return DefaultMaxTurns
-	}
-	return p.AutopilotMaxTurns
-}
+// Task status constants.
+const (
+	StatusQueued    = "queued"
+	StatusBlocked   = "blocked"
+	StatusRunning   = "running"
+	StatusReview    = "review"
+	StatusReviewing = "reviewing"
+	StatusReviewed  = "reviewed"
+	StatusDone      = "done"
+	StatusBailed    = "bailed"
+	StatusManual    = "manual"
+	StatusStopped   = "stopped"
+)
 
-// EffectiveAutopilotMaxBudget returns the project's configured max budget,
-// falling back to DefaultMaxBudgetUSD if unset (zero).
-func (p *Project) EffectiveAutopilotMaxBudget() float64 {
-	if p.AutopilotMaxBudgetUSD <= 0 {
-		return DefaultMaxBudgetUSD
-	}
-	return p.AutopilotMaxBudgetUSD
-}
-
-// Repo represents a monitored git repository.
-type Repo struct {
-	ID        int64  `db:"id"`
-	ProjectID int64  `db:"project_id"`
-	Path      string `db:"path"`
-	ShortName string `db:"short_name"`
-	Summary   string `db:"summary"`
-}
-
-// Worktree represents a git worktree within a repo.
-type Worktree struct {
-	ID     int64  `db:"id"`
-	RepoID int64  `db:"repo_id"`
-	Path   string `db:"path"`
-	Branch string `db:"branch"`
-}
-
-// WorktreeWithRepo joins a worktree with its parent repo's short name,
-// avoiding N+1 queries when displaying worktrees for a project.
-type WorktreeWithRepo struct {
-	Worktree
-	RepoShortName string `db:"repo_short_name"`
-}
-
-// Topic represents a message bus topic.
-type Topic struct {
-	ID        int64  `db:"id"`
-	ProjectID int64  `db:"project_id"`
-	Name      string `db:"name"`
-}
-
-// Concern represents an active or resolved concern the minder is tracking.
-type Concern struct {
-	ID         int64          `db:"id"`
-	ProjectID  int64          `db:"project_id"`
-	Severity   string         `db:"severity"`
-	Message    string         `db:"message"`
-	Resolved   bool           `db:"resolved"`
-	CreatedAt  string         `db:"created_at"`
-	ResolvedAt sql.NullString `db:"resolved_at"`
-}
-
-// Poll represents a single poll cycle's results.
-type Poll struct {
-	ID             int64  `db:"id"`
-	ProjectID      int64  `db:"project_id"`
-	NewCommits     int    `db:"new_commits"`
-	NewMessages    int    `db:"new_messages"`
-	ConcernsRaised int    `db:"concerns_raised"`
-	LLMResponseRaw string `db:"llm_response"`
-	Tier1Response  string `db:"tier1_response"`
-	Tier2Response  string `db:"tier2_response"`
-	BusMessageSent string `db:"bus_message_sent"`
-	PolledAt       string `db:"polled_at"`
-}
-
-// TrackedItem represents a GitHub issue or PR being tracked for a project.
-type TrackedItem struct {
-	ID               int64  `db:"id"`
-	ProjectID        int64  `db:"project_id"`
-	Source           string `db:"source"`       // "github"
-	Owner            string `db:"owner"`        // repo owner
-	Repo             string `db:"repo"`         // repo name
-	Number           int    `db:"number"`       // issue/PR number
-	ItemType         string `db:"item_type"`    // "issue" or "pull_request"
-	Title            string `db:"title"`        // latest title
-	State            string `db:"state"`        // "open", "closed", "merged"
-	Labels           string `db:"labels"`       // comma-separated
-	IsDraft          bool   `db:"is_draft"`     // PR only: true if draft
-	ReviewState      string `db:"review_state"` // PR only: "approved", "changes_requested", "pending", ""
-	LastStatus       string `db:"last_status"`  // compact status for TUI: "Open", "InProg", "Closd", "Mrgd", "Blckd", "Draft", "Appvd", "ChReq"
-	LastCheckedAt    string `db:"last_checked_at"`
-	ContentHash      string `db:"content_hash"`      // SHA-256 of body+comments+state+labels
-	ObjectiveSummary string `db:"objective_summary"` // Haiku-generated objective summary
-	ProgressSummary  string `db:"progress_summary"`  // Haiku-generated progress summary
-	CreatedAt        string `db:"created_at"`
-}
-
-// DisplayRef returns a compact reference like "owner/repo#123".
-func (t *TrackedItem) DisplayRef() string {
-	return fmt.Sprintf("%s/%s#%d", t.Owner, t.Repo, t.Number)
-}
-
-// CompletedItem represents a tracked item that reached terminal state and was archived
-// before being pruned. Only items with a progress summary are archived.
-type CompletedItem struct {
-	ID          int64  `db:"id"`
-	ProjectID   int64  `db:"project_id"`
-	Source      string `db:"source"`
-	Owner       string `db:"owner"`
-	Repo        string `db:"repo"`
-	Number      int    `db:"number"`
-	ItemType    string `db:"item_type"`
-	Title       string `db:"title"`
-	FinalStatus string `db:"final_status"` // "Closd", "Mrgd", "NotPl"
-	Summary     string `db:"summary"`      // snapshot of objective + progress
-	CompletedAt string `db:"completed_at"`
-}
-
-// DisplayRef returns a compact reference like "owner/repo#123".
-func (c *CompletedItem) DisplayRef() string {
-	return fmt.Sprintf("%s/%s#%d", c.Owner, c.Repo, c.Number)
-}
-
-// AutopilotTask represents an issue being worked on by an autopilot agent.
-type AutopilotTask struct {
-	ID            int64  `db:"id"`
-	ProjectID     int64  `db:"project_id"`
-	Owner         string `db:"owner"`
-	Repo          string `db:"repo"`
-	IssueNumber   int    `db:"issue_number"`
-	IssueTitle    string `db:"issue_title"`
-	IssueBody     string `db:"issue_body"`
-	Dependencies  string `db:"dependencies"` // JSON array of issue numbers
-	Status        string `db:"status"`       // queued, running, done, bailed, stopped, blocked
-	WorktreePath  string `db:"worktree_path"`
-	Branch        string `db:"branch"`
-	PRNumber      int    `db:"pr_number"`
-	AgentLog      string `db:"agent_log"`
-	StartedAt     string `db:"started_at"`
-	CompletedAt   string `db:"completed_at"`
-	FailureReason string `db:"failure_reason"` // permissions, max_turns, max_budget, error
-	FailureDetail string `db:"failure_detail"` // JSON or text with specifics
-
-	CostUSD float64 `db:"cost_usd"` // total cost in USD from agent result
-
-	MaxTurnsOverride  *int     `db:"max_turns_override"`  // per-task turns override (nil = use project default)
-	MaxBudgetOverride *float64 `db:"max_budget_override"` // per-task budget override (nil = use project default)
-
-	ReviewRisk      *string `db:"review_risk"`       // risk assessment: "low-risk", "needs-testing", "suspect"
-	ReviewCommentID *int64  `db:"review_comment_id"` // GitHub PR comment ID for updating review comment
-}
-
-// DefaultMaxTurns is the fallback when no project or task override is set.
-const DefaultMaxTurns = 150
-
-// DefaultMaxBudgetUSD is the fallback when no project or task override is set.
-const DefaultMaxBudgetUSD = 10.00
-
-// EffectiveMaxTurns returns the per-task max turns override if set,
-// otherwise the project default. Falls back to DefaultMaxTurns if both are zero.
-func (t *AutopilotTask) EffectiveMaxTurns(projectDefault int) int {
-	if t.MaxTurnsOverride != nil {
-		return *t.MaxTurnsOverride
-	}
-	if projectDefault < 1 {
-		return DefaultMaxTurns
-	}
-	return projectDefault
-}
-
-// EffectiveMaxBudget returns the per-task budget override if set,
-// otherwise the project default. Falls back to DefaultMaxBudgetUSD if both are zero.
-func (t *AutopilotTask) EffectiveMaxBudget(projectDefault float64) float64 {
-	if t.MaxBudgetOverride != nil {
-		return *t.MaxBudgetOverride
-	}
-	if projectDefault <= 0 {
-		return DefaultMaxBudgetUSD
-	}
-	return projectDefault
-}
-
-// HasOverrides returns true if the task has any per-task resource overrides set.
-func (t *AutopilotTask) HasOverrides() bool {
-	return t.MaxTurnsOverride != nil || t.MaxBudgetOverride != nil
-}
-
-// CostSummary holds aggregated cost data for a time period.
-type CostSummary struct {
-	TotalCost float64 `db:"total_cost"` // sum of cost_usd
-	TaskCount int     `db:"task_count"` // number of completed tasks
-}
-
-// TaskCostDetail holds per-task cost info for detailed breakdowns.
-type TaskCostDetail struct {
-	IssueNumber int     `db:"issue_number"`
-	IssueTitle  string  `db:"issue_title"`
-	Status      string  `db:"status"`
-	CostUSD     float64 `db:"cost_usd"`
-	CompletedAt string  `db:"completed_at"`
-}
-
-// RepoOnboarding represents a cached onboarding file for a repo.
-type RepoOnboarding struct {
-	ID               int64  `db:"id"`
-	RepoID           int64  `db:"repo_id"`
-	OnboardingYAML   string `db:"onboarding_yaml"`
-	OnboardedAt      string `db:"onboarded_at"`
-	ValidatedAt      string `db:"validated_at"`
-	ValidationStatus string `db:"validation_status"` // "pass", "fail", "untested"
-}
-
-// DepGraph represents a stored dependency graph for an autopilot session.
+// DepGraph stores the dependency graph for a deployment.
 type DepGraph struct {
-	ID         int64   `db:"id"`
-	ProjectID  int64   `db:"project_id"`
-	GraphJSON  string  `db:"graph_json"`
-	OptionName string  `db:"option_name"`
-	Reasoning  string  `db:"reasoning"`
-	Confidence float64 `db:"confidence"`
-	CreatedAt  string  `db:"created_at"`
+	DeploymentID string         `db:"deployment_id"`
+	GraphJSON    string         `db:"graph_json"`
+	OptionName   sql.NullString `db:"option_name"`
+	Reasoning    sql.NullString `db:"reasoning"`
+	Confidence   sql.NullString `db:"confidence"`
+	CreatedAt    time.Time      `db:"created_at"`
 }
 
-// LLMResponse returns the best available response: tier 2 if present, else tier 1, else raw.
-func (p *Poll) LLMResponse() string {
-	if p.Tier2Response != "" {
-		return p.Tier2Response
+// Lesson stores a persistent piece of feedback or knowledge.
+type Lesson struct {
+	ID             int64          `db:"id"`
+	RepoScope      sql.NullString `db:"repo_scope"`
+	Content        string         `db:"content"`
+	Source         string         `db:"source"`
+	Active         bool           `db:"active"`
+	Pinned         bool           `db:"pinned"`
+	TimesInjected  int            `db:"times_injected"`
+	TimesHelpful   int            `db:"times_helpful"`
+	TimesUnhelpful int            `db:"times_unhelpful"`
+	SupersededBy   sql.NullInt64  `db:"superseded_by"`
+	LastInjectedAt sql.NullTime   `db:"last_injected_at"`
+	CreatedAt      time.Time      `db:"created_at"`
+	UpdatedAt      time.Time      `db:"updated_at"`
+}
+
+// EffectivenessRatio returns the ratio of helpful to total outcomes.
+// Returns 0.5 if no outcomes recorded (neutral).
+func (l *Lesson) EffectivenessRatio() float64 {
+	total := l.TimesHelpful + l.TimesUnhelpful
+	if total == 0 {
+		return 0.5
 	}
-	if p.Tier1Response != "" {
-		return p.Tier1Response
-	}
-	return p.LLMResponseRaw
+	return float64(l.TimesHelpful) / float64(total)
+}
+
+// RepoOnboarding stores cached onboarding YAML for a repository.
+type RepoOnboarding struct {
+	RepoDir            string         `db:"repo_dir"`
+	Owner              string         `db:"owner"`
+	Repo               string         `db:"repo"`
+	YAMLContent        string         `db:"yaml_content"`
+	ValidationStatus   string         `db:"validation_status"`
+	ValidationFailures sql.NullString `db:"validation_failures"`
+	ScannedAt          time.Time      `db:"scanned_at"`
 }

@@ -56,6 +56,7 @@ type Context struct {
 	BuildCommand        string   `yaml:"build_command"`
 	TestCommand         string   `yaml:"test_command"`
 	LintCommand         string   `yaml:"lint_command"`
+	BaseBranch          string   `yaml:"base_branch"`
 	SpecialInstructions string   `yaml:"special_instructions"`
 	ToolsNeeded         []string `yaml:"tools_needed"`
 }
