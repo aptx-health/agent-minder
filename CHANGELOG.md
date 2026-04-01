@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 - **Replace custom lastIndex with strings.LastIndex**: Removed custom `lastIndex()` in review.go that reimplemented `strings.LastIndex()` and had a potential panic on short strings (#383)
+- **Daemon client HTTP status range check**: Accept all 2xx status codes (not just 200) in `getJSON()` and `post()` methods, so 201/204 responses are no longer treated as errors (#386)
+- **Watch filter value validation**: `ParseWatchFilter()` now rejects values containing invalid characters (e.g., semicolons, newlines, slashes). Added comprehensive test coverage for all parse paths. (#387)
+- **Distinct error codes in task log endpoint**: `handleTaskLog` now returns `"task_not_found"` when the task ID doesn't exist vs `"log_not_found"` when the task exists but has no log file, instead of a single ambiguous 404 (#388)
 - **Daemon heartbeat cleanup on graceful stop**: `StartHeartbeat` stop function now blocks until the heartbeat goroutine fully exits, preventing a race where the heartbeat file could be rewritten after removal during shutdown. Fixes false-positive crash detection on next startup. (#378)
 - **Review session uses reviewer agent def and PR context**: The `r` (review session) command now launches Claude with `--agent reviewer` and includes PR body and comments in the initial prompt, matching the automated review path. Previously the session used no agent definition and omitted PR comments. (#348)
 - **Max turns fallback detection**: When an agent's stream-json result event is missing (nil result), the supervisor now counts assistant events from the log file to detect turn limit exhaustion. Previously these agents were misclassified as "bailed" instead of "failed" with reason "max_turns". (#340)

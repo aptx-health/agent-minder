@@ -3,8 +3,10 @@ package daemon
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -239,6 +241,88 @@ func TestHandleLessons(t *testing.T) {
 	}
 	if lessons[0].Source != "review" {
 		t.Errorf("source = %q, want %q", lessons[0].Source, "review")
+	}
+}
+
+func TestHandleTaskLog(t *testing.T) {
+	srv, store := testServer(t)
+
+	// Invalid ID → 400.
+	rr := doRequest(t, srv, "GET", "/tasks/abc/log")
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid id, got %d", rr.Code)
+	}
+
+	// Non-existent task → 404 with task_not_found.
+	rr = doRequest(t, srv, "GET", "/tasks/9999/log")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing task, got %d", rr.Code)
+	}
+	var errResp map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if errResp["error"] != "task_not_found" {
+		t.Errorf("error = %q, want %q", errResp["error"], "task_not_found")
+	}
+
+	// Task exists but has no log → 404 with log_not_found.
+	task := &db.Task{
+		DeploymentID: "test-deploy",
+		IssueNumber:  50,
+		Owner:        "acme",
+		Repo:         "widgets",
+		Status:       db.StatusQueued,
+	}
+	if err := store.CreateTask(task); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	rr = doRequest(t, srv, "GET", fmt.Sprintf("/tasks/%d/log", task.ID))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing log, got %d", rr.Code)
+	}
+	errResp = nil
+	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if errResp["error"] != "log_not_found" {
+		t.Errorf("error = %q, want %q", errResp["error"], "log_not_found")
+	}
+
+	// Task with a valid log file → 200.
+	logFile := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(logFile, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := store.DB().Exec("UPDATE tasks SET agent_log = ? WHERE id = ?", logFile, task.ID); err != nil {
+		t.Fatalf("set agent_log: %v", err)
+	}
+
+	rr = doRequest(t, srv, "GET", fmt.Sprintf("/tasks/%d/log", task.ID))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if body != "line1\nline2\n" {
+		t.Errorf("body = %q, want %q", body, "line1\nline2\n")
+	}
+
+	// Task with log path set but file missing → 404 with log_not_found.
+	if _, err := store.DB().Exec("UPDATE tasks SET agent_log = ? WHERE id = ?", "/nonexistent/agent.log", task.ID); err != nil {
+		t.Fatalf("set agent_log: %v", err)
+	}
+
+	rr = doRequest(t, srv, "GET", fmt.Sprintf("/tasks/%d/log", task.ID))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing log file, got %d", rr.Code)
+	}
+	errResp = nil
+	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if errResp["error"] != "log_not_found" {
+		t.Errorf("error = %q, want %q", errResp["error"], "log_not_found")
 	}
 }
 
