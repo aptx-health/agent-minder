@@ -180,15 +180,19 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task, err := s.store.GetTask(id)
-	if err != nil || !task.AgentLog.Valid {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task or log not found"})
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task_not_found"})
+		return
+	}
+	if !task.AgentLog.Valid {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "log_not_found"})
 		return
 	}
 
 	// Stream the log file.
 	f, err := os.Open(task.AgentLog.String)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "log file not found"})
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "log_not_found"})
 		return
 	}
 	defer func() { _ = f.Close() }()

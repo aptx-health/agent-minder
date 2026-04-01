@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/claudecli"
@@ -219,7 +220,7 @@ func (s *Supervisor) extractReviewAssessment(ctx context.Context, task *db.Task,
 
 	content := string(data)
 	// Trim to just the review section if the marker exists.
-	if idx := lastIndex(content, "--- REVIEW AGENT ---"); idx >= 0 {
+	if idx := strings.LastIndex(content, "--- REVIEW AGENT ---"); idx >= 0 {
 		content = content[idx:]
 	}
 	// Truncate to last 8000 chars to stay within token limits.
@@ -297,15 +298,6 @@ func (s *Supervisor) captureLessonsFromAssessment(assessment ReviewAssessment) [
 	}
 
 	return created
-}
-
-func lastIndex(s, substr string) int {
-	for i := len(s) - len(substr); i >= 0; i-- {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
 
 // enhancedCheckReviewTasks extends checkReviewTasks to also spawn review agents.

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/aptx-health/agent-minder/internal/db"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
@@ -26,7 +27,11 @@ func ParseWatchFilter(filter string) (*WatchFilter, error) {
 	if typ != "label" && typ != "milestone" {
 		return nil, fmt.Errorf("unsupported filter type %q (expected label or milestone)", typ)
 	}
-	return &WatchFilter{Type: typ, Value: parts[1]}, nil
+	value := parts[1]
+	if !isValidFilterValue(value) {
+		return nil, fmt.Errorf("invalid watch filter value %q (must contain only alphanumeric, hyphen, underscore, dot, or space characters)", value)
+	}
+	return &WatchFilter{Type: typ, Value: value}, nil
 }
 
 // watchPoll queries GitHub for issues matching the watch filter and creates tasks for new ones.
@@ -111,6 +116,17 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	}
 
 	return discovered
+}
+
+// isValidFilterValue checks that a filter value contains only safe characters:
+// alphanumeric, hyphens, underscores, dots, and spaces.
+func isValidFilterValue(value string) bool {
+	for _, r := range value {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_' && r != '.' && r != ' ' {
+			return false
+		}
+	}
+	return true
 }
 
 // hasLabel checks if a label list contains a specific label (case-insensitive).
