@@ -137,7 +137,7 @@ func CaptureFromReview(store *db.Store, owner, repo, reviewResult string) ([]*db
 		if err != nil {
 			continue
 		}
-		if isDuplicate(pattern, existing) {
+		if IsDuplicate(pattern, existing) {
 			continue
 		}
 
@@ -191,8 +191,8 @@ func extractPatterns(reviewResult string) []string {
 	return patterns
 }
 
-// isDuplicate checks if a pattern is semantically similar to existing lessons.
-func isDuplicate(pattern string, existing []*db.Lesson) bool {
+// IsDuplicate checks if a pattern is semantically similar to existing lessons.
+func IsDuplicate(pattern string, existing []*db.Lesson) bool {
 	patternLower := strings.ToLower(pattern)
 	patternWords := strings.Fields(patternLower)
 

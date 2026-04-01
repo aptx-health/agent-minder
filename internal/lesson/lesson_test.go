@@ -97,12 +97,12 @@ func TestIsDuplicate(t *testing.T) {
 	}
 
 	// Similar enough to be a duplicate.
-	if !isDuplicate("Run go vet before committing", existing) {
+	if !IsDuplicate("Run go vet before committing", existing) {
 		t.Error("expected duplicate detection")
 	}
 
 	// Different enough to not be a duplicate.
-	if isDuplicate("Use the v3 API client library", existing) {
+	if IsDuplicate("Use the v3 API client library", existing) {
 		t.Error("expected no duplicate for unrelated lesson")
 	}
 }

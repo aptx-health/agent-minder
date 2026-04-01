@@ -2,16 +2,52 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/aptx-health/agent-minder/internal/claudecli"
 	"github.com/aptx-health/agent-minder/internal/db"
 	"github.com/aptx-health/agent-minder/internal/lesson"
 )
+
+// ReviewAssessment is the structured JSON output from the review extraction call.
+type ReviewAssessment struct {
+	Risk    string   `json:"risk"`    // "low-risk", "needs-testing", or "suspect"
+	Summary string   `json:"summary"` // One-line summary of the review
+	Lessons []string `json:"lessons"` // Actionable lessons for future agents
+	Issues  []string `json:"issues"`  // Specific issues found (empty if clean)
+}
+
+var reviewAssessmentSchema = `{
+	"type": "object",
+	"properties": {
+		"risk": {
+			"type": "string",
+			"enum": ["low-risk", "needs-testing", "suspect"],
+			"description": "Overall risk assessment of the PR"
+		},
+		"summary": {
+			"type": "string",
+			"description": "One-line summary of the review findings"
+		},
+		"lessons": {
+			"type": "array",
+			"items": {"type": "string"},
+			"description": "Actionable lessons that future agents should follow to avoid the issues found. Each lesson should be a clear, imperative statement. Empty array if no lessons."
+		},
+		"issues": {
+			"type": "array",
+			"items": {"type": "string"},
+			"description": "Specific issues found in the PR. Empty array if the PR is clean."
+		}
+	},
+	"required": ["risk", "summary", "lessons", "issues"]
+}`
 
 // spawnReviewAgent launches a review agent for a task that has a PR.
 // It runs in the task's existing worktree and produces a risk assessment.
@@ -137,25 +173,25 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.T
 	_ = cmd.Wait()
 	<-scanDone
 
-	// Parse review outcome.
-	reviewResult := parseReviewFromLog(logPath)
+	// Extract structured review assessment via a cheap LLM call.
+	assessment := s.extractReviewAssessment(ctx, task, logPath)
 
-	// Determine risk level.
-	risk := "needs-testing" // default
-	if strings.Contains(strings.ToLower(reviewResult), "low-risk") {
-		risk = "low-risk"
-	} else if strings.Contains(strings.ToLower(reviewResult), "suspect") {
-		risk = "suspect"
+	risk := assessment.Risk
+	if risk == "" {
+		risk = "needs-testing"
 	}
 
 	_ = s.store.UpdateTaskReview(task.ID, risk, 0)
 	_ = s.store.UpdateTaskStatus(task.ID, db.StatusReviewed)
 
 	s.emitEvent("completed", fmt.Sprintf("Review of #%d complete (risk: %s)", task.IssueNumber, risk), task.ID)
+	if assessment.Summary != "" {
+		s.emitEvent("info", fmt.Sprintf("Review: %s", assessment.Summary), task.ID)
+	}
 
-	// Auto-capture lessons from review findings.
-	if reviewResult != "" {
-		captured, _ := lesson.CaptureFromReview(s.store, s.owner, s.repo, reviewResult)
+	// Auto-capture lessons from structured findings.
+	if len(assessment.Lessons) > 0 {
+		captured := s.captureLessonsFromAssessment(assessment)
 		if len(captured) > 0 {
 			s.emitEvent("info", fmt.Sprintf("Captured %d lessons from review of #%d", len(captured), task.IssueNumber), task.ID)
 		}
@@ -172,36 +208,104 @@ func (s *Supervisor) runReviewAgent(ctx context.Context, slotIdx int, task *db.T
 	}
 }
 
-// parseReviewFromLog extracts the review agent's output from the log.
-func parseReviewFromLog(logPath string) string {
+// extractReviewAssessment runs a cheap structured LLM call to produce a JSON assessment
+// from the review agent's log output.
+func (s *Supervisor) extractReviewAssessment(ctx context.Context, task *db.Task, logPath string) ReviewAssessment {
+	// Read the review portion of the log.
 	data, err := os.ReadFile(logPath)
 	if err != nil {
-		return ""
+		return ReviewAssessment{Risk: "needs-testing"}
 	}
 
 	content := string(data)
-	// Find the review agent section.
-	idx := strings.LastIndex(content, "--- REVIEW AGENT ---")
-	if idx >= 0 {
+	// Trim to just the review section if the marker exists.
+	if idx := lastIndex(content, "--- REVIEW AGENT ---"); idx >= 0 {
 		content = content[idx:]
 	}
+	// Truncate to last 8000 chars to stay within token limits.
+	if len(content) > 8000 {
+		content = content[len(content)-8000:]
+	}
 
-	// Extract the last substantial text block (the review summary).
-	lines := strings.Split(content, "\n")
-	var result []string
-	for _, line := range lines {
-		// Skip JSON stream events.
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "{") {
+	prompt := fmt.Sprintf(`Analyze this review agent log for PR #%d (issue #%d) and produce a structured assessment.
+
+The review agent examined the PR, possibly ran tests, and may have made fixes.
+Extract the risk level, a one-line summary, any actionable lessons for future agents,
+and specific issues found.
+
+Review agent log:
+---
+%s
+---
+
+Produce your assessment as JSON.`, task.PRNumber.Int64, task.IssueNumber, content)
+
+	completer := claudecli.NewCLICompleter()
+	resp, err := completer.Complete(ctx, &claudecli.Request{
+		SystemPrompt: "You extract structured review assessments from agent logs. Be concise and actionable.",
+		Prompt:       prompt,
+		Model:        "haiku",
+		JSONSchema:   reviewAssessmentSchema,
+		DisableTools: true,
+	})
+	if err != nil {
+		debugLog("review assessment extraction failed", "issue", task.IssueNumber, "error", err.Error())
+		return ReviewAssessment{Risk: "needs-testing"}
+	}
+
+	var assessment ReviewAssessment
+	if err := json.Unmarshal([]byte(resp.Content()), &assessment); err != nil {
+		debugLog("review assessment parse failed", "issue", task.IssueNumber, "error", err.Error())
+		return ReviewAssessment{Risk: "needs-testing"}
+	}
+
+	debugLog("review assessment extracted",
+		"issue", task.IssueNumber,
+		"risk", assessment.Risk,
+		"lessons", len(assessment.Lessons),
+		"issues", len(assessment.Issues),
+	)
+	return assessment
+}
+
+// captureLessonsFromAssessment creates lesson records from the structured review assessment.
+func (s *Supervisor) captureLessonsFromAssessment(assessment ReviewAssessment) []*db.Lesson {
+	var created []*db.Lesson
+
+	scope := s.owner + "/" + s.repo
+	existing, _ := s.store.GetActiveLessons(scope)
+
+	for _, content := range assessment.Lessons {
+		if len(content) < 10 || len(content) > 500 {
 			continue
 		}
-		result = append(result, line)
+		if lesson.IsDuplicate(content, existing) {
+			continue
+		}
+
+		l := &db.Lesson{
+			RepoScope: sql.NullString{String: scope, Valid: true},
+			Content:   content,
+			Source:    "review",
+			Active:    true,
+		}
+		if err := s.store.CreateLesson(l); err == nil {
+			created = append(created, l)
+			// Add to existing so subsequent checks in this batch see it.
+			existing = append(existing, l)
+		}
 	}
 
-	if len(result) > 50 {
-		result = result[len(result)-50:]
+	return created
+}
+
+func lastIndex(s, substr string) int {
+	for i := len(s) - len(substr); i >= 0; i-- {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
 	}
-	return strings.Join(result, "\n")
+	return -1
 }
 
 // enhancedCheckReviewTasks extends checkReviewTasks to also spawn review agents.

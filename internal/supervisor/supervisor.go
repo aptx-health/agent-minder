@@ -89,21 +89,22 @@ type Supervisor struct {
 	repo    string
 	ghToken string
 
-	mu              sync.Mutex
-	gitSetupMu      sync.Mutex
-	slots           []*slotState
-	active          bool
-	daemonMode      bool
-	watchMode       bool
-	paused          bool
-	budgetPaused    bool
-	budgetWarned    bool
-	events          chan Event
-	parentCtx       context.Context
-	cancel          context.CancelFunc
-	done            chan struct{}
-	reviewRetries   map[int64]int
-	ghClientFactory func(token string) *ghpkg.Client
+	mu                 sync.Mutex
+	gitSetupMu         sync.Mutex
+	slots              []*slotState
+	active             bool
+	daemonMode         bool
+	watchMode          bool
+	paused             bool
+	budgetPaused       bool
+	budgetWarned       bool
+	waitingHintEmitted bool
+	events             chan Event
+	parentCtx          context.Context
+	cancel             context.CancelFunc
+	done               chan struct{}
+	reviewRetries      map[int64]int
+	ghClientFactory    func(token string) *ghpkg.Client
 }
 
 // New creates a new Supervisor.
@@ -348,14 +349,32 @@ func (s *Supervisor) hasWork() bool {
 	}
 
 	tasks, _ := s.store.GetTasks(s.deploy.ID)
+	waitingOnMerge := false
 	for _, t := range tasks {
 		switch t.Status {
-		case db.StatusQueued, db.StatusBlocked, db.StatusReview,
-			db.StatusReviewing, db.StatusReviewed, db.StatusManual:
+		case db.StatusQueued, db.StatusBlocked, db.StatusReviewing, db.StatusManual:
 			return true
+		case db.StatusReview, db.StatusReviewed:
+			waitingOnMerge = true
 		}
 	}
+	if waitingOnMerge {
+		s.emitWaitingForMerge()
+		return true
+	}
 	return isPaused
+}
+
+// emitWaitingForMerge emits a one-time hint that the supervisor is waiting for PRs to be merged.
+func (s *Supervisor) emitWaitingForMerge() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.waitingHintEmitted {
+		return
+	}
+	s.waitingHintEmitted = true
+	// Emit outside lock via goroutine to avoid deadlock with channel.
+	go s.emitEvent("info", "Waiting for PR(s) to be merged (checking every 30s, ctrl+c to exit)", 0)
 }
 
 func (s *Supervisor) fillSlots(ctx context.Context) {
