@@ -7,9 +7,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Version is the current version of agent-minder.
+const Version = "0.2.1-dev"
+
 var rootCmd = &cobra.Command{
-	Use:   "minder",
-	Short: "Self-hosted agent deploy daemon with dependency-aware dispatch",
+	Use:     "minder",
+	Version: Version,
+	Short:   "Self-hosted agent deploy daemon with dependency-aware dispatch",
 	Long: `Agent-minder orchestrates Claude Code agents on GitHub issues.
 It builds dependency graphs, dispatches agents in parallel worktrees,
 learns from review feedback, and provides a real-time dashboard.`,
