@@ -225,3 +225,78 @@ func ResolveContract(repoDir string, agentName string) (*AgentContract, error) {
 		return DefaultContract(agentName), nil
 	}
 }
+
+// AgentInfo describes a discovered agent definition.
+type AgentInfo struct {
+	Name     string
+	Source   string // "repo", "user", or "built-in"
+	Path     string // file path (empty for built-in)
+	Contract *AgentContract
+}
+
+// DiscoverAgents finds all available agent definitions across the 3-tier fallback.
+// Returns a deduplicated list where repo overrides user overrides built-in.
+func DiscoverAgents(repoDir string) []AgentInfo {
+	seen := map[string]bool{}
+	var agents []AgentInfo
+
+	// 1. Repo-level agents.
+	repoAgentsDir := filepath.Join(repoDir, ".claude", "agents")
+	if entries, err := os.ReadDir(repoAgentsDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			name := strings.TrimSuffix(e.Name(), ".md")
+			path := filepath.Join(repoAgentsDir, e.Name())
+			contract, err := ParseContract(path)
+			if err != nil {
+				continue
+			}
+			agents = append(agents, AgentInfo{Name: name, Source: "repo", Path: path, Contract: contract})
+			seen[name] = true
+		}
+	}
+
+	// 2. User-level agents.
+	home, _ := os.UserHomeDir()
+	userAgentsDir := filepath.Join(home, ".claude", "agents")
+	if entries, err := os.ReadDir(userAgentsDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			name := strings.TrimSuffix(e.Name(), ".md")
+			if seen[name] {
+				continue
+			}
+			path := filepath.Join(userAgentsDir, e.Name())
+			contract, err := ParseContract(path)
+			if err != nil {
+				continue
+			}
+			agents = append(agents, AgentInfo{Name: name, Source: "user", Path: path, Contract: contract})
+			seen[name] = true
+		}
+	}
+
+	// 3. Built-in agents.
+	for _, def := range []struct {
+		name string
+		raw  string
+	}{
+		{"autopilot", defaultAgentDef},
+		{"reviewer", defaultReviewerDef},
+	} {
+		if seen[def.name] {
+			continue
+		}
+		contract, err := ParseContractFromBytes([]byte(def.raw))
+		if err != nil {
+			continue
+		}
+		agents = append(agents, AgentInfo{Name: def.name, Source: "built-in", Contract: contract})
+	}
+
+	return agents
+}
