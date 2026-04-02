@@ -69,10 +69,21 @@ Your task context is provided in the user prompt.
 3. Read the full issue with comments and any linked issues
 4. Explore the codebase to understand the relevant code
 
-## Pre-check: assess complexity
-After exploring but BEFORE making changes, assess the task.
-If the change requires modifying more than 8 files or significant architectural decisions,
-bail with a detailed implementation plan as a comment.
+## Pre-check: assess whether you can complete this
+After exploring but BEFORE making changes, decide if you can complete the work confidently.
+
+**Proceed if:**
+- You have a clear mental model of what needs to change and why
+- The changes are mechanical or follow clear patterns (even across many files)
+- You can write automated tests to verify correctness
+
+**Bail if:**
+- You don't understand the architecture well enough to be confident in your changes
+- The issue needs design decisions that aren't specified (ambiguous requirements)
+- Implementation requires extensive manual or interactive testing (UI, hardware, running services)
+- The change has unclear blast radius across the codebase
+
+File count alone is NOT a reason to bail — a 20-file rename is simpler than a 3-file architecture change.
 
 ## If you can complete the work
 - Implement the changes
@@ -81,10 +92,30 @@ bail with a detailed implementation plan as a comment.
 - Rebase onto the base branch before pushing
 - Open a draft PR
 
-## If you cannot proceed
-- Post a comment explaining what you learned and what blocks you
-- Add the "blocked" label
-- Remove the "in-progress" label
+## If you cannot proceed — structured bail
+When you decide to bail, do the following in order:
+
+1. Write your bail report to a file, then post it as an issue comment:
+   - Write the report to /tmp/bail-report.md using the Write tool
+   - Post with: gh issue comment <number> --body-file /tmp/bail-report.md
+   - This avoids shell escaping issues with inline --body
+2. Update labels: gh issue edit <number> --add-label blocked --remove-label in-progress
+3. Commit any partial work you've done (even without a PR) so future attempts have context
+4. As your FINAL message, output a JSON block wrapped in <bail-report> tags (this MUST be
+   in your last text response — the orchestrator parses it from your output):
+
+<bail-report>
+{
+  "reason": "Why you're bailing — be specific about what's blocking you",
+  "files_examined": ["list", "of", "files", "you", "explored"],
+  "plan": "Step-by-step implementation plan for the next agent or human",
+  "sub_issues": ["Optional: if the issue should be decomposed, suggest 2-4 sub-issues with clear scope"],
+  "complexity": "small | medium | large | epic"
+}
+</bail-report>
+
+IMPORTANT: The <bail-report> tags must NOT be inside a code fence or any other wrapper.
+Output them as raw text so the orchestrator can parse them.
 
 ## Constraints
 - Only modify files within your worktree

@@ -76,11 +76,16 @@ func (sc *SlotContext) NewGHClient() *ghpkg.Client {
 }
 
 // SetupWorktree creates a git worktree for this job.
+// Cleans up any stale worktree/branch from a previous run first.
 // Safe to call concurrently — uses the supervisor's gitSetupMu.
 func (sc *SlotContext) SetupWorktree() error {
 	_ = os.MkdirAll(filepath.Dir(sc.WorktreePath), 0755)
 
 	sc.sup.gitSetupMu.Lock()
+	// Remove any worktree using this branch — it may be under a different
+	// deploy ID from a previous run.
+	_ = gitpkg.WorktreeRemoveByBranch(sc.RepoDir, sc.Branch)
+	_ = gitpkg.WorktreePrune(sc.RepoDir)
 	_ = gitpkg.DeleteBranch(sc.RepoDir, sc.Branch)
 	err := gitpkg.WorktreeAdd(sc.RepoDir, sc.WorktreePath, sc.Branch, "origin/"+sc.BaseBranch)
 	sc.sup.gitSetupMu.Unlock()
@@ -383,7 +388,18 @@ func (m *DefaultJobManager) handlePROutcome(ctx context.Context, logFile *os.Fil
 	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s (exit %d)", sc.JobLabel(), exitCode))
 	sc.RecordLessonOutcome(false)
 
-	return runErr
+	// Extract and handle structured bail report from agent output.
+	// Try result text first; handleBailReport falls back to scanning the log.
+	resultText := ""
+	if result != nil {
+		resultText = result.Result
+	}
+	m.handleBailReport(ctx, resultText)
+
+	if runErr != nil {
+		return runErr
+	}
+	return nil
 }
 
 // hasReviewStage returns true if the contract includes a review stage.

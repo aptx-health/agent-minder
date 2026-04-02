@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -182,13 +183,25 @@ func (s *Supervisor) Resume() {
 	s.mu.Unlock()
 }
 
+// sortedRunningKeys returns the keys of s.running sorted by job ID.
+// Must be called with s.mu held.
+func (s *Supervisor) sortedRunningKeys() []int64 {
+	keys := make([]int64, 0, len(s.running))
+	for id := range s.running {
+		keys = append(keys, id)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
 // RunningJobs returns info about all currently running jobs.
 func (s *Supervisor) RunningJobs() []RunInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var infos []RunInfo
-	for _, rs := range s.running {
+	for _, id := range s.sortedRunningKeys() {
+		rs := s.running[id]
 		infos = append(infos, RunInfo{
 			JobID:       rs.job.ID,
 			Agent:       rs.job.Agent,
@@ -212,8 +225,9 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 	defer s.mu.Unlock()
 
 	var infos []SlotInfo
-	i := 0
-	for _, rs := range s.running {
+	keys := s.sortedRunningKeys()
+	for i, id := range keys {
+		rs := s.running[id]
 		infos = append(infos, SlotInfo{
 			SlotNum:     i,
 			IssueNumber: rs.job.IssueNumber,
@@ -226,12 +240,10 @@ func (s *Supervisor) SlotStatus() []SlotInfo {
 			ToolInput:   rs.liveStatus.ToolInput,
 			StepCount:   rs.liveStatus.StepCount,
 		})
-		i++
 	}
 	// Pad with idle slots up to maxAgents.
-	for i < s.maxAgents {
+	for i := len(keys); i < s.maxAgents; i++ {
 		infos = append(infos, SlotInfo{SlotNum: i, Status: "idle", Paused: s.paused || s.budgetPaused})
-		i++
 	}
 	return infos
 }
@@ -269,16 +281,14 @@ func (s *Supervisor) StopJob(jobID int64) {
 func (s *Supervisor) StopAgent(slotIdx int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	i := 0
-	for _, rs := range s.running {
-		if i == slotIdx {
-			rs.stoppedByUser = true
-			if rs.cancelFunc != nil {
-				rs.cancelFunc()
-			}
-			return
-		}
-		i++
+	keys := s.sortedRunningKeys()
+	if slotIdx < 0 || slotIdx >= len(keys) {
+		return
+	}
+	rs := s.running[keys[slotIdx]]
+	rs.stoppedByUser = true
+	if rs.cancelFunc != nil {
+		rs.cancelFunc()
 	}
 }
 
