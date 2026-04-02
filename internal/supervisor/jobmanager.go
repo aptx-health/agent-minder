@@ -432,8 +432,12 @@ func extractReviewAssessmentFromLog(ctx context.Context, logPath string, job *db
 
 // captureLessonsFromAssessment is a package-level version of lesson capture.
 func captureLessonsFromAssessment(store *db.Store, owner, repo string, assessment ReviewAssessment) []*db.Lesson {
-	var created []*db.Lesson
 	scope := owner + "/" + repo
+	if lesson.ScopeAtCap(store, scope) {
+		return nil // at cap, skip auto-capture
+	}
+
+	var created []*db.Lesson
 	existing, _ := store.GetActiveLessons(scope)
 
 	for _, content := range assessment.Lessons {

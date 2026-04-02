@@ -21,6 +21,28 @@ const MaxPromptTokens = 2000
 // ApproxTokensPerChar is a rough estimate for token counting.
 const ApproxTokensPerChar = 4
 
+// MaxLessonsPerScope is the cap on active lessons per scope (repo or global).
+// Beyond this, auto-capture is skipped and grooming is recommended.
+const MaxLessonsPerScope = 30
+
+// ScopeAtCap returns true if the given scope has reached the lesson cap.
+func ScopeAtCap(store *db.Store, scope string) bool {
+	lessons, err := store.GetActiveLessons(scope)
+	if err != nil {
+		return false
+	}
+	// Count only lessons matching this exact scope (not global fallback).
+	count := 0
+	for _, l := range lessons {
+		if scope == "" && !l.RepoScope.Valid {
+			count++
+		} else if l.RepoScope.Valid && l.RepoScope.String == scope {
+			count++
+		}
+	}
+	return count >= MaxLessonsPerScope
+}
+
 // SelectLessons returns relevant lessons for a task, respecting the token budget.
 // Selection tiers: pinned first, then repo-scoped, then global.
 // Within each tier, sorted by effectiveness ratio descending.
@@ -123,8 +145,11 @@ func RecordOutcome(store *db.Store, jobID int64, success bool) error {
 // CaptureFromReview extracts lessons from a review agent's findings.
 // reviewResult is the structured output from the review agent.
 func CaptureFromReview(store *db.Store, owner, repo, reviewResult string) ([]*db.Lesson, error) {
-	// Look for patterns in the review that indicate learnable issues.
-	// The review agent produces risk assessments and findings — extract actionable patterns.
+	scope := owner + "/" + repo
+	if ScopeAtCap(store, scope) {
+		return nil, nil // at cap, skip auto-capture
+	}
+
 	patterns := extractPatterns(reviewResult)
 	if len(patterns) == 0 {
 		return nil, nil
