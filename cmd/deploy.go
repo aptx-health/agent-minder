@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/aptx-health/agent-minder/internal/claudecli"
 	"github.com/aptx-health/agent-minder/internal/daemon"
@@ -47,6 +48,7 @@ var (
 	flagAutoMerge   bool
 	flagBaseBranch  string
 	flagSkipLabel   string
+	flagAgent       string
 	flagDaemon      bool
 	flagDeployID    string
 )
@@ -67,6 +69,7 @@ func init() {
 	deployCmd.Flags().BoolVar(&flagAutoMerge, "auto-merge", false, "Auto-merge low-risk reviewed PRs")
 	deployCmd.Flags().StringVar(&flagBaseBranch, "base-branch", "", "Base branch (default: auto-detect)")
 	deployCmd.Flags().StringVar(&flagSkipLabel, "skip-label", "no-agent", "Label to skip issues")
+	deployCmd.Flags().StringVar(&flagAgent, "agent", "autopilot", "Agent type to use")
 
 	// Hidden flags for daemon re-exec.
 	deployCmd.Flags().BoolVar(&flagDaemon, "daemon", false, "")
@@ -171,12 +174,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Agents: %d, Turns: %d, Budget: $%.2f/task, Total: $%.2f\n",
 		flagMaxAgents, flagMaxTurns, flagBudget, flagTotalBudget)
 
-	// Prepare: fetch issues, create jobs, build dep graph (needed for both paths).
+	// Prepare: fetch issues, create jobs, build dep graph.
 	if len(issues) > 0 {
 		ghToken := os.Getenv("GITHUB_TOKEN")
 		completer := claudecli.NewCLICompleter()
 		fmt.Println("Preparing...")
-		result, err := supervisor.Prepare(context.Background(), store, completer, deploy, issues, ghToken)
+		result, err := supervisor.Prepare(context.Background(), store, completer, deploy, issues, flagAgent, ghToken)
 		if err != nil {
 			_ = store.Close()
 			return fmt.Errorf("prepare: %w", err)
@@ -192,6 +195,23 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("apply dep graph: %w", err)
 			}
 		}
+	} else if flagAgent != "autopilot" && len(issues) == 0 {
+		// Proactive deploy — create a single job with no issue.
+		now := time.Now().UTC()
+		jobName := fmt.Sprintf("%s-%s", flagAgent, now.Format("20060102-1504"))
+		j := &db.Job{
+			DeploymentID: deploy.ID,
+			Agent:        flagAgent,
+			Name:         jobName,
+			Owner:        owner,
+			Repo:         repo,
+			Status:       db.StatusQueued,
+		}
+		if err := store.CreateJob(j); err != nil {
+			_ = store.Close()
+			return fmt.Errorf("create job: %w", err)
+		}
+		fmt.Printf("  Proactive job: %s (agent: %s)\n", jobName, flagAgent)
 	}
 
 	if flagForeground || flagServe == "" {
@@ -216,6 +236,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	daemonArgs = append(daemonArgs, "--budget", fmt.Sprintf("%.2f", flagBudget))
 	daemonArgs = append(daemonArgs, "--total-budget", fmt.Sprintf("%.2f", flagTotalBudget))
 	daemonArgs = append(daemonArgs, "--model", flagModel)
+	daemonArgs = append(daemonArgs, "--agent", flagAgent)
 	daemonArgs = append(daemonArgs, "--base-branch", baseBranch)
 	if flagAutoMerge {
 		daemonArgs = append(daemonArgs, "--auto-merge")

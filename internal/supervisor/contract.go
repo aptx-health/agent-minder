@@ -21,8 +21,12 @@ type AgentContract struct {
 	Mode         string   `yaml:"mode"`          // "reactive" (needs issue#) or "proactive" (scans)
 	Output       string   `yaml:"output"`        // "pr", "issue", "comment", "report", "none"
 	BranchPrefix string   `yaml:"branch_prefix"` // worktree branch naming (default: "agent/issue")
-	Dedup        []string `yaml:"dedup"`         // dedup strategies: "branch_exists", "open_pr_with_label:<label>", "recent_run:<hours>"
+	Dedup        []string `yaml:"dedup"`         // dedup strategies
 	Timeout      string   `yaml:"timeout"`       // overall job timeout (e.g., "2h", "30m")
+
+	// Context providers — what context to assemble for this agent's prompt.
+	// Available: issue, repo_info, recent_commits:<days>, file_list, lessons, sibling_jobs, dep_graph
+	Context []string `yaml:"context"`
 
 	// Pipeline stages (optional — default is single-stage: just run the agent).
 	Stages []StageContract `yaml:"stages"`
@@ -69,6 +73,22 @@ func DefaultAutopilotContract() *AgentContract {
 // IsReactive returns true if the agent needs an issue number.
 func (c *AgentContract) IsReactive() bool {
 	return c.Mode != "proactive"
+}
+
+// NeedsWorktree returns true if the agent needs an isolated worktree (output is pr).
+func (c *AgentContract) NeedsWorktree() bool {
+	return c.Output == "pr"
+}
+
+// ValidContextProviders lists all recognized context provider names.
+var ValidContextProviders = map[string]bool{
+	"issue":        true,
+	"repo_info":    true,
+	"file_list":    true,
+	"lessons":      true,
+	"sibling_jobs": true,
+	"dep_graph":    true,
+	// Parameterized: "recent_commits:<days>" validated separately.
 }
 
 // TimeoutDuration parses the timeout string into a time.Duration.
@@ -155,6 +175,15 @@ func applyContractDefaults(c *AgentContract) {
 	}
 	if c.Timeout == "" {
 		c.Timeout = "2h"
+	}
+
+	// Default context providers based on mode.
+	if len(c.Context) == 0 {
+		if c.IsReactive() {
+			c.Context = []string{"issue", "repo_info", "lessons", "sibling_jobs", "dep_graph"}
+		} else {
+			c.Context = []string{"repo_info", "file_list", "recent_commits:7", "lessons"}
+		}
 	}
 
 	// Normalize stage defaults.

@@ -170,23 +170,6 @@ func (sc *SlotContext) DetectPR(ctx context.Context) int {
 	return 0
 }
 
-// LoadRelatedWork fetches dep graph and sibling job context.
-func (sc *SlotContext) LoadRelatedWork() *relatedWork {
-	var rw *relatedWork
-	dg, dgErr := sc.Store.GetDepGraph(sc.Deploy.ID)
-	siblings, sibErr := sc.Store.GetJobs(sc.Deploy.ID)
-	if dgErr == nil || sibErr == nil {
-		rw = &relatedWork{}
-		if dgErr == nil && dg != nil {
-			rw.depGraph = dg.GraphJSON
-		}
-		if sibErr == nil {
-			rw.siblingJobs = siblings
-		}
-	}
-	return rw
-}
-
 // FetchIssueComments fetches issue comments from GitHub.
 func (sc *SlotContext) FetchIssueComments(ctx context.Context) string {
 	ghClient := sc.NewGHClient()
@@ -232,10 +215,20 @@ func (sc *SlotContext) ParseCost() float64 {
 func (s *Supervisor) newSlotContext(jobID int64, job *db.Job) *SlotContext {
 	home, _ := os.UserHomeDir()
 	worktreeBase := filepath.Join(home, ".agent-minder", "worktrees", s.deploy.ID)
-	worktreePath := filepath.Join(worktreeBase, fmt.Sprintf("issue-%d", job.IssueNumber))
-	branch := fmt.Sprintf("agent/issue-%d", job.IssueNumber)
 	logDir := filepath.Join(home, ".agent-minder", "agents")
-	logPath := filepath.Join(logDir, fmt.Sprintf("%s-issue-%d.log", s.deploy.ID, job.IssueNumber))
+
+	// Branch and worktree naming depends on whether we have an issue.
+	var worktreePath, branch, logPath string
+	if job.IssueNumber > 0 {
+		worktreePath = filepath.Join(worktreeBase, fmt.Sprintf("issue-%d", job.IssueNumber))
+		branch = fmt.Sprintf("agent/issue-%d", job.IssueNumber)
+		logPath = filepath.Join(logDir, fmt.Sprintf("%s-issue-%d.log", s.deploy.ID, job.IssueNumber))
+	} else {
+		// Proactive job — use job name for paths.
+		worktreePath = filepath.Join(worktreeBase, job.Name)
+		branch = fmt.Sprintf("agent/%s", job.Name)
+		logPath = filepath.Join(logDir, fmt.Sprintf("%s-%s.log", s.deploy.ID, job.Name))
+	}
 
 	return &SlotContext{
 		Store:        s.store,
@@ -272,28 +265,35 @@ func NewDefaultJobManager(sc *SlotContext, contract *AgentContract) *DefaultJobM
 func (m *DefaultJobManager) Run(ctx context.Context) error {
 	sc := m.sc
 	job := sc.Job
+	contract := m.contract
 
-	// Stage 1: Code.
 	sc.EmitEvent("started", fmt.Sprintf("Agent started on %s: %s", sc.JobLabel(), job.IssueTitle.String))
 	_ = sc.Store.UpdateJobStage(job.ID, "code", "")
 
-	if err := sc.SetupWorktree(); err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
-		_ = sc.Store.UpdateJobFailure(job.ID, "worktree", err.Error())
-		return err
+	// Setup worktree for write agents, or use repo dir for read-only.
+	if contract.NeedsWorktree() {
+		if err := sc.SetupWorktree(); err != nil {
+			sc.EmitEvent("error", fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
+			_ = sc.Store.UpdateJobFailure(job.ID, "worktree", err.Error())
+			return err
+		}
 	}
 
-	agentDefSrc, err := sc.EnsureAgentDef(AgentAutopilot)
+	// Resolve agent def.
+	agentName := AgentName(job.Agent)
+	agentDefSrc, err := sc.EnsureAgentDef(agentName)
 	if err != nil {
 		sc.EmitEvent("error", fmt.Sprintf("Agent def error for %s: %v", sc.JobLabel(), err))
 		_ = sc.Store.UpdateJobFailure(job.ID, "agent_def", err.Error())
 		return err
 	}
-	debugLog("agent def resolved", "issue", job.IssueNumber, "source", string(agentDefSrc))
+	debugLog("agent def resolved", "agent", job.Agent, "source", string(agentDefSrc))
 
-	// Label in-progress.
+	// Label in-progress for reactive jobs.
 	ghClient := sc.NewGHClient()
-	_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	if job.IssueNumber > 0 {
+		_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	}
 
 	// Open log.
 	logFile, err := sc.OpenLogFile(false)
@@ -304,13 +304,14 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	}
 	defer func() { _ = logFile.Close() }()
 
-	// Build prompt and run agent.
-	rw := sc.LoadRelatedWork()
-	issueComments := sc.FetchIssueComments(ctx)
+	// Assemble prompt from context providers.
+	prompt := AssembleContext(ctx, sc, contract.Context)
 	lessonsPrompt := sc.SelectAndRecordLessons()
-	args := buildClaudeArgs(job, sc.Deploy, sc.BaseBranch, sc.TestCommand, sc.AllowedTools, rw, issueComments, lessonsPrompt)
 
-	debugLog("claude command", "issue", job.IssueNumber, "args", strings.Join(args[:len(args)-1], " "))
+	// Build claude CLI args.
+	args := buildAgentArgs(job, sc.Deploy, job.Agent, sc.AllowedTools, prompt, lessonsPrompt)
+
+	debugLog("claude command", "agent", job.Agent, "label", sc.JobLabel())
 
 	exitCode, runErr := sc.RunClaudeAgent(ctx, args, logFile)
 
@@ -326,18 +327,39 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		_ = sc.Store.UpdateJobCost(job.ID, cost)
 	}
 
-	// Detect PR.
+	// Handle outcome based on output type.
+	switch contract.Output {
+	case "pr":
+		return m.handlePROutcome(ctx, logFile, exitCode, runErr)
+	default:
+		// issue, report, comment, none — job is done when agent finishes.
+		_ = sc.Store.CompleteJob(job.ID, db.StatusDone)
+		sc.EmitEvent("completed", fmt.Sprintf("Agent completed %s", sc.JobLabel()))
+		sc.RecordLessonOutcome(true)
+		return runErr
+	}
+}
+
+// handlePROutcome handles the outcome for PR-producing agents.
+func (m *DefaultJobManager) handlePROutcome(ctx context.Context, logFile *os.File, exitCode int, runErr error) error {
+	sc := m.sc
+	job := sc.Job
+	ghClient := sc.NewGHClient()
+
 	prNum := sc.DetectPR(ctx)
 	if prNum > 0 {
 		_ = sc.Store.UpdateJobPR(job.ID, prNum)
 		job.PRNumber = sql.NullInt64{Int64: int64(prNum), Valid: true}
-		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
-		_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
+
+		if job.IssueNumber > 0 {
+			ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+			_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
+		}
 		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReview)
 		sc.EmitEvent("completed", fmt.Sprintf("Agent completed %s — PR #%d opened", sc.JobLabel(), prNum))
 		sc.RecordLessonOutcome(true)
 
-		// Stage 2: Review (if enabled and contract has review stage).
+		// Stage 2: Review.
 		if sc.Deploy.ReviewEnabled && m.hasReviewStage() {
 			_ = sc.Store.UpdateJobStage(job.ID, "review", "")
 			m.runReviewStage(ctx, logFile)
@@ -346,7 +368,9 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	}
 
 	// No PR — classify failure.
-	ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	if job.IssueNumber > 0 {
+		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	}
 	result, _ := parseAgentLog(sc.LogPath)
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
@@ -356,10 +380,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s (exit %d)", sc.JobLabel(), exitCode))
 	sc.RecordLessonOutcome(false)
 
-	if runErr != nil {
-		return runErr
-	}
-	return nil
+	return runErr
 }
 
 // hasReviewStage returns true if the contract includes a review stage.
@@ -388,13 +409,11 @@ func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *o
 	sc.EmitEvent("started", fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64))
 	_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewing)
 
-	// Write separator in log.
 	_, _ = fmt.Fprintf(parentLogFile, "\n\n--- REVIEW AGENT ---\n\n")
 
-	// Build review args.
-	rw := sc.LoadRelatedWork()
-	issueComments := sc.FetchIssueComments(ctx)
-	args := buildReviewClaudeArgs(job, sc.Deploy, sc.BaseBranch, sc.TestCommand, sc.AllowedTools, rw, issueComments)
+	// Build review context and args.
+	prompt := renderReviewContext(ctx, sc)
+	args := buildAgentArgs(job, sc.Deploy, "reviewer", sc.AllowedTools, prompt, "")
 
 	_, _ = sc.RunClaudeAgent(ctx, args, parentLogFile)
 
