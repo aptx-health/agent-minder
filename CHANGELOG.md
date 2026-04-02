@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - **Version flag**: `minder --version` now prints the current version (0.2.1-dev) (#422)
+- **Stage executor pipeline**: Generic stage pipeline execution from contract YAML with conditional routing (`on_success`/`on_failure`), context passing between stages, and built-in pipeline templates. Smart review retries only trigger on fixable issues (not bail/exhaust), with review feedback injected as additional prompt context on retry. Per-stage retry tracking prevents infinite loops. (#374)
 - **Agent log parser tests**: Comprehensive unit tests for `agentutil.ParseAgentLog` covering valid result events, error results, missing result events, malformed JSON lines, empty files, large lines, and first-result-wins behavior (#389)
 - **Discovery ScanRepo unit tests**: Tests for language detection (including dedup for python/java), CI system detection, build file detection, empty repo edge case, and non-repo error handling (#390)
 - **Daemon PID and heartbeat lifecycle tests**: Comprehensive unit tests for WritePID/RemovePID, WriteHeartbeat/ReadHeartbeat round-trip, WasCrashShutdown with stale/recent/missing heartbeats, IsRunning with current/dead/invalid PIDs, CleanStalePID, and StartHeartbeat goroutine lifecycle (#391)

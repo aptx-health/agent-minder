@@ -191,7 +191,18 @@ func ensureAgentDefByName(worktreePath string, name AgentName) (AgentDefSource, 
 		return AgentDefUser, nil
 	}
 
-	// Install built-in to worktree.
+	// Install from template registry, falling back to built-in constants.
+	for _, tmpl := range AgentTemplates() {
+		if tmpl.Name == string(name) {
+			_, err := InstallAgentDef(worktreePath, tmpl)
+			if err != nil {
+				return "", err
+			}
+			return AgentDefBuiltIn, nil
+		}
+	}
+
+	// Legacy fallback for agents not in the template registry.
 	def := defaultAgentDef
 	if name == AgentReviewer {
 		def = defaultReviewerDef
