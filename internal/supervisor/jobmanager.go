@@ -32,6 +32,15 @@ type JobResult struct {
 	Summary string // one-line summary
 }
 
+// stageResult captures the outcome of running a single stage.
+type stageResult struct {
+	success    bool              // true if stage completed successfully
+	bailed     bool              // true if agent deliberately bailed
+	exhausted  bool              // true if turn/budget limit hit
+	prDetected int               // PR number if one was opened during this stage
+	assessment *ReviewAssessment // review assessment if this was a review stage
+}
+
 // SlotContext provides primitives that job managers use to interact
 // with the system (worktrees, agent execution, events, GitHub, lessons).
 type SlotContext struct {
@@ -258,27 +267,29 @@ func (s *Supervisor) newSlotContext(jobID int64, job *db.Job) *SlotContext {
 
 // --- DefaultJobManager ---
 
-// DefaultJobManager implements the standard autopilot→review flow.
+// DefaultJobManager executes jobs by iterating through declared pipeline stages.
 type DefaultJobManager struct {
 	sc       *SlotContext
 	contract *AgentContract
 }
 
-// NewDefaultJobManager creates a job manager for the standard code→review flow.
+// NewDefaultJobManager creates a job manager that executes the contract's stage pipeline.
 func NewDefaultJobManager(sc *SlotContext, contract *AgentContract) *DefaultJobManager {
 	return &DefaultJobManager{sc: sc, contract: contract}
 }
 
-// Run executes the code stage and optional review stage.
+// Run executes the job's stage pipeline.
+// Stages are iterated in order. Each stage runs its agent, and the outcome
+// determines whether to continue, retry, skip, or bail the pipeline.
 func (m *DefaultJobManager) Run(ctx context.Context) error {
 	sc := m.sc
 	job := sc.Job
 	contract := m.contract
 
 	sc.EmitEvent("started", fmt.Sprintf("Agent started on %s: %s", sc.JobLabel(), job.IssueTitle.String))
-	_ = sc.Store.UpdateJobStage(job.ID, "code", "")
 
-	// Setup worktree for write agents, or use repo dir for read-only.
+	// --- One-time setup ---
+
 	if contract.NeedsWorktree() {
 		if err := sc.SetupWorktree(); err != nil {
 			sc.EmitEvent("error", fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
@@ -287,15 +298,18 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		}
 	}
 
-	// Resolve agent def.
-	agentName := AgentName(job.Agent)
-	agentDefSrc, err := sc.EnsureAgentDef(agentName)
-	if err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Agent def error for %s: %v", sc.JobLabel(), err))
-		_ = sc.Store.UpdateJobFailure(job.ID, "agent_def", err.Error())
-		return err
+	// Ensure all agent defs referenced by stages exist.
+	for _, stage := range contract.Stages {
+		agentName := stage.Agent
+		if agentName == "" {
+			agentName = job.Agent
+		}
+		if _, err := sc.EnsureAgentDef(AgentName(agentName)); err != nil {
+			sc.EmitEvent("error", fmt.Sprintf("Agent def error for %s/%s: %v", sc.JobLabel(), stage.Name, err))
+			_ = sc.Store.UpdateJobFailure(job.ID, "agent_def", err.Error())
+			return err
+		}
 	}
-	debugLog("agent def resolved", "agent", job.Agent, "source", string(agentDefSrc))
 
 	// Label in-progress for reactive jobs.
 	ghClient := sc.NewGHClient()
@@ -303,7 +317,6 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
 	}
 
-	// Open log.
 	logFile, err := sc.OpenLogFile(false)
 	if err != nil {
 		sc.EmitEvent("error", fmt.Sprintf("Log file error for %s: %v", sc.JobLabel(), err))
@@ -312,129 +325,199 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	}
 	defer func() { _ = logFile.Close() }()
 
-	// Assemble prompt from context providers.
-	prompt := AssembleContext(ctx, sc, contract.Context)
-	lessonsPrompt := sc.SelectAndRecordLessons()
-
-	// Build claude CLI args.
-	args := buildAgentArgs(job, sc.Deploy, job.Agent, sc.AllowedTools, prompt, lessonsPrompt)
-
-	debugLog("claude command", "agent", job.Agent, "label", sc.JobLabel())
-
-	exitCode, runErr := sc.RunClaudeAgent(ctx, args, logFile)
-
-	// Check user-initiated stop.
-	if sc.WasStoppedByUser() {
-		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusStopped)
-		sc.EmitEvent("stopped", fmt.Sprintf("Agent stopped by user on %s", sc.JobLabel()))
-		return nil
+	// If no stages declared, use default pipeline.
+	// Code stage always runs; review stage added if review is enabled.
+	stages := contract.Stages
+	if len(stages) == 0 {
+		stages = []StageContract{{Name: "code", Agent: job.Agent, OnFailure: "bail"}}
+		if sc.Deploy.ReviewEnabled {
+			stages = append(stages, StageContract{
+				Name: "review", Agent: "reviewer", OnFailure: "skip", Retries: 1,
+			})
+		}
 	}
 
-	// Extract cost.
-	if cost := sc.ParseCost(); cost > 0 {
-		_ = sc.Store.UpdateJobCost(job.ID, cost)
+	// --- Stage loop ---
+
+	var lastReviewAssessment *ReviewAssessment
+	var lastReviewRisk string
+	retryCount := map[string]int{} // stage name → retries so far
+
+	for i := 0; i < len(stages); i++ {
+		stage := stages[i]
+		stageName := stage.Name
+		agentName := stage.Agent
+		if agentName == "" {
+			agentName = job.Agent
+		}
+
+		_ = sc.Store.UpdateJobStage(job.ID, stageName, "")
+		sc.EmitEvent("info", fmt.Sprintf("Stage %q started on %s (agent: %s)", stageName, sc.JobLabel(), agentName))
+
+		var result stageResult
+
+		switch stageName {
+		case "review":
+			result = m.executeReviewStage(ctx, stage, logFile)
+			if result.assessment != nil {
+				lastReviewAssessment = result.assessment
+				lastReviewRisk = result.assessment.Risk
+			}
+		default:
+			// Code stage or any generic stage.
+			var feedbackPrompt string
+			if lastReviewAssessment != nil && len(lastReviewAssessment.Issues) > 0 {
+				feedbackPrompt = formatReviewFeedback(lastReviewAssessment)
+				lastReviewAssessment = nil // consumed
+			}
+			result = m.executeCodeStage(ctx, stage, agentName, logFile, feedbackPrompt)
+		}
+
+		// Check for user stop.
+		if sc.WasStoppedByUser() {
+			_ = sc.Store.UpdateJobStatus(job.ID, db.StatusStopped)
+			sc.EmitEvent("stopped", fmt.Sprintf("Agent stopped by user on %s", sc.JobLabel()))
+			return nil
+		}
+
+		// Extract cost after each stage.
+		if cost := sc.ParseCost(); cost > 0 {
+			_ = sc.Store.UpdateJobCost(job.ID, cost)
+		}
+
+		if result.success {
+			continue // next stage
+		}
+
+		// Stage failed — handle on_failure.
+		onFailure := stage.OnFailure
+		if onFailure == "" {
+			onFailure = "bail"
+		}
+
+		switch onFailure {
+		case "skip":
+			sc.EmitEvent("info", fmt.Sprintf("Stage %q failed on %s, skipping", stageName, sc.JobLabel()))
+			continue
+
+		case "retry":
+			// Retry: re-run the review's *previous* stage (code) with feedback.
+			// Only if the failure is from a review finding issues (not bail/exhaust).
+			if result.bailed || result.exhausted {
+				sc.EmitEvent("info", fmt.Sprintf("Stage %q failed on %s (bail/exhaust), not retrying", stageName, sc.JobLabel()))
+				return m.finalizeBail(ctx)
+			}
+			maxRetries := stage.Retries
+			if maxRetries <= 0 {
+				maxRetries = 1
+			}
+			if retryCount[stageName] >= maxRetries {
+				sc.EmitEvent("info", fmt.Sprintf("Stage %q max retries (%d) reached on %s", stageName, maxRetries, sc.JobLabel()))
+				continue // move to next stage
+			}
+			retryCount[stageName]++
+
+			// Jump back to the previous stage (code) to apply review feedback.
+			if i > 0 && result.assessment != nil && len(result.assessment.Issues) > 0 {
+				sc.EmitEvent("info", fmt.Sprintf("Review found issues on %s, retrying code stage (attempt %d/%d)",
+					sc.JobLabel(), retryCount[stageName], maxRetries))
+				lastReviewAssessment = result.assessment
+				i -= 2 // will be incremented to i-1 by the loop
+				continue
+			}
+			// No actionable feedback — just continue.
+			continue
+
+		default: // "bail"
+			return m.finalizeBail(ctx)
+		}
 	}
 
-	// Handle outcome based on output type.
-	switch contract.Output {
-	case "pr":
-		return m.handlePROutcome(ctx, logFile, exitCode, runErr)
-	default:
-		// issue, report, comment, none — job is done when agent finishes.
-		_ = sc.Store.CompleteJob(job.ID, db.StatusDone)
-		sc.EmitEvent("completed", fmt.Sprintf("Agent completed %s", sc.JobLabel()))
-		sc.RecordLessonOutcome(true)
-		return runErr
-	}
+	// --- Pipeline complete ---
+	return m.finalizePipeline(ctx, lastReviewRisk)
 }
 
-// handlePROutcome handles the outcome for PR-producing agents.
-func (m *DefaultJobManager) handlePROutcome(ctx context.Context, logFile *os.File, exitCode int, runErr error) error {
+// executeCodeStage runs a code/generic agent and detects PR outcome.
+func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageContract, agentName string, logFile *os.File, feedbackPrompt string) stageResult {
 	sc := m.sc
 	job := sc.Job
-	ghClient := sc.NewGHClient()
 
-	prNum := sc.DetectPR(ctx)
-	if prNum > 0 {
-		_ = sc.Store.UpdateJobPR(job.ID, prNum)
-		job.PRNumber = sql.NullInt64{Int64: int64(prNum), Valid: true}
+	// Build prompt.
+	prompt := AssembleContext(ctx, sc, m.contract.Context)
+	if feedbackPrompt != "" {
+		prompt += "\n\n" + feedbackPrompt
+	}
+	lessonsPrompt := sc.SelectAndRecordLessons()
+	args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, lessonsPrompt)
 
-		if job.IssueNumber > 0 {
-			ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
-			_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
+	debugLog("stage execute", "stage", stage.Name, "agent", agentName, "label", sc.JobLabel())
+
+	exitCode, _ := sc.RunClaudeAgent(ctx, args, logFile)
+
+	// For PR-producing agents, detect the PR.
+	if m.contract.Output == "pr" {
+		prNum := sc.DetectPR(ctx)
+		if prNum > 0 {
+			_ = sc.Store.UpdateJobPR(job.ID, prNum)
+			job.PRNumber = sql.NullInt64{Int64: int64(prNum), Valid: true}
+			return stageResult{success: true, prDetected: prNum}
 		}
-		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReview)
-		sc.EmitEvent("completed", fmt.Sprintf("Agent completed %s — PR #%d opened", sc.JobLabel(), prNum))
-		sc.RecordLessonOutcome(true)
-
-		// Stage 2: Review.
-		if sc.Deploy.ReviewEnabled && m.hasReviewStage() {
-			_ = sc.Store.UpdateJobStage(job.ID, "review", "")
-			m.runReviewStage(ctx, logFile)
+	} else {
+		// Non-PR agents: if exit code is 0, consider it success.
+		if exitCode == 0 {
+			return stageResult{success: true}
 		}
-		return nil
 	}
 
-	// No PR — classify failure.
-	if job.IssueNumber > 0 {
-		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
-	}
+	// No PR / non-zero exit — classify.
 	result, _ := parseAgentLog(sc.LogPath)
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
-	_, reason, detail := classifyOutcome(result, maxTurns, maxBudget)
+	status, _, _ := classifyOutcome(result, maxTurns, maxBudget)
 
-	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
-	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s (exit %d)", sc.JobLabel(), exitCode))
-	sc.RecordLessonOutcome(false)
-
-	// Extract and handle structured bail report from agent output.
-	// Try result text first; handleBailReport falls back to scanning the log.
+	// Extract bail report if present.
 	resultText := ""
 	if result != nil {
 		resultText = result.Result
 	}
 	m.handleBailReport(ctx, resultText)
 
-	if runErr != nil {
-		return runErr
+	return stageResult{
+		success:   false,
+		bailed:    status == "failed" || (result != nil && extractBailReport(resultText) != nil),
+		exhausted: status == "failed" && result != nil && (result.NumTurns >= maxTurns || result.TotalCost >= maxBudget*0.95),
 	}
-	return nil
 }
 
-// hasReviewStage returns true if the contract includes a review stage.
-func (m *DefaultJobManager) hasReviewStage() bool {
-	for _, s := range m.contract.Stages {
-		if s.Name == "review" {
-			return true
-		}
-	}
-	// Also check deploy-level review setting even without explicit stage.
-	return m.sc.Deploy.ReviewEnabled
-}
-
-// runReviewStage runs the review agent as the second stage.
-func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *os.File) {
+// executeReviewStage runs the review agent and extracts the assessment.
+func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageContract, logFile *os.File) stageResult {
 	sc := m.sc
 	job := sc.Job
 
-	// Ensure reviewer agent def.
-	_, err := sc.EnsureAgentDef(AgentReviewer)
-	if err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Reviewer agent def error: %v", err))
-		return
+	if !job.PRNumber.Valid {
+		// No PR to review — skip.
+		return stageResult{success: true}
 	}
 
-	sc.EmitEvent("started", fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64))
+	// Ensure reviewer agent def.
+	agentName := stage.Agent
+	if agentName == "" {
+		agentName = "reviewer"
+	}
+	if _, err := sc.EnsureAgentDef(AgentName(agentName)); err != nil {
+		sc.EmitEvent("error", fmt.Sprintf("Reviewer agent def error: %v", err))
+		return stageResult{success: false}
+	}
+
+	sc.EmitEvent("info", fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64))
 	_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewing)
 
-	_, _ = fmt.Fprintf(parentLogFile, "\n\n--- REVIEW AGENT ---\n\n")
+	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
-	// Build review context and args.
 	prompt := renderReviewContext(ctx, sc)
-	args := buildAgentArgs(job, sc.Deploy, "reviewer", sc.AllowedTools, prompt, "")
+	args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, "")
 
-	_, _ = sc.RunClaudeAgent(ctx, args, parentLogFile)
+	_, _ = sc.RunClaudeAgent(ctx, args, logFile)
 
 	// Extract structured assessment.
 	assessment := extractReviewAssessmentFromLog(ctx, sc.LogPath, job, sc.sup)
@@ -445,9 +528,8 @@ func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *o
 	}
 
 	_ = sc.Store.UpdateJobReview(job.ID, risk, 0)
-	_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewed)
 
-	sc.EmitEvent("completed", fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk))
+	sc.EmitEvent("info", fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk))
 	if assessment.Summary != "" {
 		sc.EmitEvent("info", fmt.Sprintf("Review: %s", assessment.Summary))
 	}
@@ -460,15 +542,83 @@ func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *o
 		}
 	}
 
-	// Auto-merge if configured and low-risk — uses GitHub auto-merge (waits for CI).
-	if sc.Deploy.AutoMerge && risk == "low-risk" && job.PRNumber.Valid {
-		ghClient := sc.NewGHClient()
-		if err := ghClient.EnableAutoMerge(ctx, sc.Owner, sc.Repo, int(job.PRNumber.Int64), "merge"); err == nil {
-			sc.EmitEvent("info", fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", job.PRNumber.Int64))
-		} else {
-			sc.EmitEvent("warning", fmt.Sprintf("Auto-merge failed for PR #%d: %v", job.PRNumber.Int64, err))
-		}
+	// Determine success: low-risk or needs-testing = success, suspect = failure (retryable).
+	success := risk == "low-risk" || risk == "needs-testing"
+	return stageResult{
+		success:    success,
+		assessment: &assessment,
 	}
+}
+
+// finalizePipeline handles the successful end of the stage pipeline.
+func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk string) error {
+	sc := m.sc
+	job := sc.Job
+	ghClient := sc.NewGHClient()
+
+	if job.IssueNumber > 0 {
+		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	}
+
+	if job.PRNumber.Valid {
+		if job.IssueNumber > 0 {
+			_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
+		}
+		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewed)
+		sc.EmitEvent("completed", fmt.Sprintf("Pipeline complete for %s — PR #%d", sc.JobLabel(), job.PRNumber.Int64))
+
+		// Auto-merge if configured and low-risk.
+		if sc.Deploy.AutoMerge && reviewRisk == "low-risk" {
+			if err := ghClient.EnableAutoMerge(ctx, sc.Owner, sc.Repo, int(job.PRNumber.Int64), "merge"); err == nil {
+				sc.EmitEvent("info", fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", job.PRNumber.Int64))
+			} else {
+				sc.EmitEvent("warning", fmt.Sprintf("Auto-merge failed for PR #%d: %v", job.PRNumber.Int64, err))
+			}
+		}
+	} else {
+		_ = sc.Store.CompleteJob(job.ID, db.StatusDone)
+		sc.EmitEvent("completed", fmt.Sprintf("Agent completed %s", sc.JobLabel()))
+	}
+
+	sc.RecordLessonOutcome(true)
+	return nil
+}
+
+// finalizeBail handles a bailed pipeline.
+func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
+	sc := m.sc
+	job := sc.Job
+	ghClient := sc.NewGHClient()
+
+	if job.IssueNumber > 0 {
+		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	}
+
+	result, _ := parseAgentLog(sc.LogPath)
+	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
+	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
+	_, reason, detail := classifyOutcome(result, maxTurns, maxBudget)
+
+	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
+	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s", sc.JobLabel()))
+	sc.RecordLessonOutcome(false)
+
+	return nil
+}
+
+// formatReviewFeedback formats review issues as additional context for a retry.
+func formatReviewFeedback(assessment *ReviewAssessment) string {
+	var b strings.Builder
+	b.WriteString("## Review Feedback (from previous attempt)\n\n")
+	b.WriteString("The review agent found the following issues with your previous attempt. ")
+	b.WriteString("Please address these in your next iteration:\n\n")
+	for i, issue := range assessment.Issues {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, issue)
+	}
+	if assessment.Summary != "" {
+		fmt.Fprintf(&b, "\n**Summary:** %s\n", assessment.Summary)
+	}
+	return b.String()
 }
 
 // extractReviewAssessmentFromLog is a package-level version of the review assessment extraction.
