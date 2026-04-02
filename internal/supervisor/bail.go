@@ -17,31 +17,69 @@ type BailAssessment struct {
 	Complexity    string   `json:"complexity"`
 }
 
-// extractBailReport parses a <bail-report> JSON block from the agent's result text.
-// Returns nil if no report found.
+// extractBailReport parses a <bail-report> JSON block from text.
+// Finds the last matched open/close pair to avoid false matches from mentions
+// of the tag (e.g., backtick-quoted `<bail-report>` in summaries).
+// Returns nil if no valid report found.
 func extractBailReport(resultText string) *BailAssessment {
 	const openTag = "<bail-report>"
 	const closeTag = "</bail-report>"
 
-	start := strings.LastIndex(resultText, openTag)
-	if start < 0 {
-		return nil
-	}
-	start += len(openTag)
+	// Search backwards for a valid matched pair.
+	searchFrom := len(resultText)
+	for {
+		end := strings.LastIndex(resultText[:searchFrom], closeTag)
+		if end < 0 {
+			return nil
+		}
+		start := strings.LastIndex(resultText[:end], openTag)
+		if start < 0 {
+			return nil
+		}
 
-	end := strings.LastIndex(resultText, closeTag)
-	if end < 0 || end <= start {
-		return nil
-	}
+		jsonStr := strings.TrimSpace(resultText[start+len(openTag) : end])
 
-	jsonStr := strings.TrimSpace(resultText[start:end])
-	var report BailAssessment
-	if err := json.Unmarshal([]byte(jsonStr), &report); err != nil {
-		debugLog("bail report parse failed", "error", err.Error())
-		return nil
+		// Try parsing as-is, then try unescaping up to 3 levels deep.
+		// The bail-report may appear inside nested JSON strings in stream-json
+		// logs (e.g., tool input inside an assistant message).
+		if report := tryParseBailJSON(jsonStr); report != nil {
+			return report
+		}
+		searchFrom = end
 	}
+}
 
-	return &report
+// tryParseBailJSON attempts to parse a BailAssessment from a JSON string,
+// unescaping up to 3 levels of JSON string encoding.
+func tryParseBailJSON(s string) *BailAssessment {
+	current := s
+	for range 3 {
+		current = strings.TrimSpace(current)
+		var report BailAssessment
+		if err := json.Unmarshal([]byte(current), &report); err == nil {
+			return &report
+		}
+		// Try one level of JSON string unescaping.
+		unescaped := unescapeJSONString(current)
+		if unescaped == current {
+			return nil // no change, stop trying
+		}
+		current = unescaped
+	}
+	return nil
+}
+
+// unescapeJSONString handles bail-report content found inside JSON-encoded strings
+// in stream-json logs. The content may be escaped multiple levels deep (JSON within JSON).
+// We repeatedly apply JSON string unescaping until parsing succeeds or nothing changes.
+func unescapeJSONString(s string) string {
+	// Use json.Unmarshal on a quoted string to leverage Go's JSON unescaper.
+	quoted := `"` + s + `"`
+	var unescaped string
+	if err := json.Unmarshal([]byte(quoted), &unescaped); err == nil {
+		return unescaped
+	}
+	return s
 }
 
 // extractBailReportFromLog reads the agent log file and searches for a <bail-report> block.
@@ -55,10 +93,10 @@ func extractBailReportFromLog(logPath string) *BailAssessment {
 	if err != nil {
 		return nil
 	}
-	// Limit to last 50KB to avoid scanning huge logs.
+	// Limit to last 200KB to avoid scanning huge logs.
 	content := string(data)
-	if len(content) > 50000 {
-		content = content[len(content)-50000:]
+	if len(content) > 200000 {
+		content = content[len(content)-200000:]
 	}
 	return extractBailReport(content)
 }
