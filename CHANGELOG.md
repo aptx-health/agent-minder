@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Version flag**: `minder --version` now prints the current version (0.2.1-dev) (#422)
 - **Agent log parser tests**: Comprehensive unit tests for `agentutil.ParseAgentLog` covering valid result events, error results, missing result events, malformed JSON lines, empty files, large lines, and first-result-wins behavior (#389)
 - **Discovery ScanRepo unit tests**: Tests for language detection (including dedup for python/java), CI system detection, build file detection, empty repo edge case, and non-repo error handling (#390)
 - **Daemon PID and heartbeat lifecycle tests**: Comprehensive unit tests for WritePID/RemovePID, WriteHeartbeat/ReadHeartbeat round-trip, WasCrashShutdown with stale/recent/missing heartbeats, IsRunning with current/dead/invalid PIDs, CleanStalePID, and StartHeartbeat goroutine lifecycle (#391)
