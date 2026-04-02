@@ -115,13 +115,14 @@ func installAgentDefs(repoDir string) string {
 		existingNames[a.Name] = a.Source
 	}
 
-	var installed, skipped []string
+	var installed, skipped, optional []string
 	for _, tmpl := range supervisor.AgentTemplates() {
-		if !tmpl.Required {
+		if _, ok := existingNames[tmpl.Name]; ok {
+			skipped = append(skipped, fmt.Sprintf("%s (already exists at %s level)", tmpl.Name, existingNames[tmpl.Name]))
 			continue
 		}
-		if source, ok := existingNames[tmpl.Name]; ok {
-			skipped = append(skipped, fmt.Sprintf("%s (already exists at %s level)", tmpl.Name, source))
+		if !tmpl.Required {
+			optional = append(optional, tmpl.Name)
 			continue
 		}
 		path, err := supervisor.InstallAgentDef(repoDir, tmpl)
@@ -139,6 +140,9 @@ func installAgentDefs(repoDir string) string {
 	}
 	if len(skipped) > 0 {
 		fmt.Fprintf(&report, "Existing agent definitions: %s\n", strings.Join(skipped, "; "))
+	}
+	if len(optional) > 0 {
+		fmt.Fprintf(&report, "Optional agents available: %s\n", strings.Join(optional, ", "))
 	}
 	return report.String()
 }
@@ -187,7 +191,24 @@ CRITICAL RULES for agent definitions:
 Reference frontmatter for each agent type:
 %s
 
-### 3. Validate
+### 3. Offer optional agents
+After the basic setup, ask the user if they want to install optional agents.
+Present each one with a brief description and whether it makes sense for this repo:
+
+- **dependency-updater**: Scans for outdated deps, updates, tests, and PRs.
+  Relevant if the repo has package managers (go.mod, package.json, requirements.txt, Cargo.toml).
+- **security-scanner**: Runs security audit tools and reports findings as issues.
+  Relevant for any repo, especially those with dependencies.
+- **doc-updater**: Reviews recent changes and updates documentation.
+  Relevant if the repo has README.md, CHANGELOG.md, or API docs.
+
+For each agent the user wants, install it using the Write tool:
+- Write the file to .claude/agents/<name>.md
+- Use the exact frontmatter from the reference below (DO NOT MODIFY IT)
+- Customize ONLY the instruction body based on the repo's ecosystem
+  (e.g., for a Go project's dependency-updater, mention go.mod, go get -u, govulncheck)
+
+### 4. Validate
 - Run validation to ensure the onboarding config is correct
 - Check that all agent definitions in .claude/agents/ are parseable
 
