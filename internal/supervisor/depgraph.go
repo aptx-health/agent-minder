@@ -31,7 +31,7 @@ type PrepareResult struct {
 // Prepare fetches issue details, creates tasks, and builds a dependency graph.
 // Returns ranked dep graph options for the user to select.
 func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer,
-	deploy *db.Deployment, issues []int, ghToken string) (*PrepareResult, error) {
+	deploy *db.Deployment, issues []int, agentName, ghToken string) (*PrepareResult, error) {
 
 	if len(issues) == 0 {
 		return &PrepareResult{WatchMode: true}, nil
@@ -54,7 +54,7 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 
 		j := &db.Job{
 			DeploymentID: deploy.ID,
-			Agent:        "autopilot",
+			Agent:        agentName,
 			Name:         fmt.Sprintf("issue-%d", num),
 			IssueNumber:  num,
 			Owner:        deploy.Owner,
