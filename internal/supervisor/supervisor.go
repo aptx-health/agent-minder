@@ -510,10 +510,20 @@ func (s *Supervisor) runJobManager(ctx context.Context, job *db.Job) {
 	// Create SlotContext.
 	sc := s.newSlotContext(job.ID, job)
 
-	// Resolve contract.
+	// Resolve contract and check dedup.
 	contract, err := ResolveContract(s.repoDir, job.Agent)
 	if err != nil {
 		contract = DefaultContract(job.Agent)
+	}
+
+	// Check dedup strategies before running.
+	if len(contract.Dedup) > 0 {
+		result := EvaluateDedup(ctx, sc, contract.Dedup)
+		if result.Skip {
+			sc.EmitEvent("info", fmt.Sprintf("Skipped %s: %s", sc.JobLabel(), result.Reason))
+			_ = s.store.UpdateJobStatus(job.ID, "skipped")
+			return
+		}
 	}
 
 	// Create and run JobManager.
