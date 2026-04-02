@@ -85,8 +85,13 @@ File count alone is NOT a reason to bail — a 20-file rename is simpler than a 
 - Open a draft PR
 
 ## If you cannot proceed — structured bail
-When you decide to bail, you MUST produce a structured bail report as your final output.
-Output a JSON block wrapped in <bail-report> tags:
+When you decide to bail, do the following in order:
+
+1. Post a comment on the issue summarizing what you learned and the implementation plan
+2. Add the "blocked" label and remove the "in-progress" label
+3. Commit any partial work you've done (even without a PR) so future attempts have context
+4. As your FINAL message, output a JSON block wrapped in <bail-report> tags (this MUST be
+   in your last text response — the orchestrator parses it from your output):
 
 <bail-report>
 {
@@ -98,11 +103,8 @@ Output a JSON block wrapped in <bail-report> tags:
 }
 </bail-report>
 
-Also:
-- Post a comment on the issue summarizing what you learned and the implementation plan
-- Add the "blocked" label
-- Remove the "in-progress" label
-- Commit any partial work you've done (even without a PR) so future attempts have context
+IMPORTANT: The <bail-report> tags must NOT be inside a code fence or any other wrapper.
+Output them as raw text so the orchestrator can parse them.
 
 ## Constraints
 - Only modify files within your worktree

@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -184,5 +186,59 @@ func TestBailAssessment_JSONRoundTrip(t *testing.T) {
 	}
 	if len(decoded.FilesExamined) != 2 {
 		t.Errorf("files count mismatch")
+	}
+}
+
+func TestExtractBailReportFromLog(t *testing.T) {
+	// Simulate a log file where the bail-report appears in agent text output.
+	logContent := `{"type":"assistant","message":{"content":[{"type":"text","text":"I need to bail on this task."}]}}
+some other log line
+<bail-report>
+{"reason":"too complex","files_examined":["a.go"],"plan":"step 1","complexity":"large"}
+</bail-report>
+{"type":"result","subtype":"","is_error":false,"result":"Done, I bailed."}`
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "test.log")
+	if err := os.WriteFile(logPath, []byte(logContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := extractBailReportFromLog(logPath)
+	if report == nil {
+		t.Fatal("expected bail report from log fallback")
+	}
+	if report.Reason != "too complex" {
+		t.Errorf("reason = %q", report.Reason)
+	}
+	if report.Complexity != "large" {
+		t.Errorf("complexity = %q", report.Complexity)
+	}
+}
+
+func TestExtractBailReportFromLog_NoReport(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "test.log")
+	if err := os.WriteFile(logPath, []byte(`{"type":"result","result":"all done"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := extractBailReportFromLog(logPath)
+	if report != nil {
+		t.Error("expected nil when no bail-report in log")
+	}
+}
+
+func TestExtractBailReportFromLog_MissingFile(t *testing.T) {
+	report := extractBailReportFromLog("/nonexistent/path.log")
+	if report != nil {
+		t.Error("expected nil for missing file")
+	}
+}
+
+func TestExtractBailReportFromLog_EmptyPath(t *testing.T) {
+	report := extractBailReportFromLog("")
+	if report != nil {
+		t.Error("expected nil for empty path")
 	}
 }

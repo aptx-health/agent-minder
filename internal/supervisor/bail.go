@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -43,6 +44,25 @@ func extractBailReport(resultText string) *BailAssessment {
 	return &report
 }
 
+// extractBailReportFromLog reads the agent log file and searches for a <bail-report> block.
+// The agent may embed the report in a tool call (e.g., gh issue comment) rather than in its
+// final result text. We read the whole log as a string and search for the tags.
+func extractBailReportFromLog(logPath string) *BailAssessment {
+	if logPath == "" {
+		return nil
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return nil
+	}
+	// Limit to last 50KB to avoid scanning huge logs.
+	content := string(data)
+	if len(content) > 50000 {
+		content = content[len(content)-50000:]
+	}
+	return extractBailReport(content)
+}
+
 // formatBailComment renders a bail report as a markdown issue comment.
 func formatBailComment(report *BailAssessment) string {
 	var b strings.Builder
@@ -76,12 +96,18 @@ func formatBailComment(report *BailAssessment) string {
 	return b.String()
 }
 
-// handleBailReport extracts, stores, and posts a bail report if present in the agent result.
+// handleBailReport extracts, stores, and posts a bail report.
+// It checks the result text first, then falls back to scanning the raw log file
+// (the agent may have embedded the bail-report in a tool call like gh issue comment).
 func (m *DefaultJobManager) handleBailReport(ctx context.Context, resultText string) {
 	sc := m.sc
 	job := sc.Job
 
 	report := extractBailReport(resultText)
+	if report == nil {
+		// Fallback: scan the raw log file for bail-report tags.
+		report = extractBailReportFromLog(sc.LogPath)
+	}
 	if report == nil {
 		return
 	}
@@ -96,12 +122,8 @@ func (m *DefaultJobManager) handleBailReport(ctx context.Context, resultText str
 	// Update failure with structured reason.
 	_ = sc.Store.UpdateJobFailure(job.ID, "bailed", report.Reason)
 
-	// Post comment on reactive issues.
-	if job.IssueNumber > 0 {
-		ghClient := sc.NewGHClient()
-		comment := formatBailComment(report)
-		_, _ = ghClient.CreateComment(ctx, sc.Owner, sc.Repo, job.IssueNumber, comment)
-	}
+	// Note: we don't post a comment here because the agent is instructed to post
+	// its own bail comment on the issue. We only extract and store the structured data.
 
 	sc.EmitEvent("info", fmt.Sprintf("Bail report captured for %s: %s", sc.JobLabel(), report.Reason))
 
