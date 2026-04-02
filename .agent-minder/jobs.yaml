@@ -1,0 +1,19 @@
+# Example job schedules for agent-minder.
+# Uncomment and customize as needed.
+
+jobs:
+  # weekly-deps:
+  #   schedule: "0 9 * * 1"
+  #   agent: dependency-updater
+  #   description: "Check for outdated dependencies"
+  #   budget: 3.0
+
+  # nightly-security:
+  #   schedule: "0 6 * * *"
+  #   agent: security-scanner
+  #   description: "Scan for known vulnerabilities"
+
+  # bug-triage:
+  #   trigger: "label:agent-ready"
+  #   agent: autopilot
+  #   description: "Pick up and fix labeled bugs"

@@ -91,14 +91,19 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		issues = append(issues, num)
 	}
 
-	if len(issues) == 0 && flagWatch == "" {
-		return fmt.Errorf("provide issue numbers or --watch filter")
-	}
-
-	// Resolve repo.
+	// Resolve repo first — needed to check for jobs.yaml.
 	repoDir, err := resolveRepoDir(flagRepo)
 	if err != nil {
 		return err
+	}
+
+	// Check that we have something to do: issues, watch filter, or jobs.yaml.
+	hasSchedules := false
+	if _, err := scheduler.LoadConfig(scheduler.ConfigPath(repoDir)); err == nil {
+		hasSchedules = true
+	}
+	if len(issues) == 0 && flagWatch == "" && !hasSchedules {
+		return fmt.Errorf("provide issue numbers, --watch filter, or create .agent-minder/jobs.yaml")
 	}
 
 	owner, repo, err := resolveOwnerRepo(repoDir)
@@ -253,8 +258,23 @@ func runForeground(deployID string) error {
 
 	ghToken := os.Getenv("GITHUB_TOKEN")
 
-	// Create and launch supervisor.
+	// Create supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
+
+	// Load jobs.yaml scheduler if available.
+	var sched *scheduler.Scheduler
+	cfgPath := scheduler.ConfigPath(deploy.RepoDir)
+	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
+		sched = scheduler.New(store, deployID, deploy.Owner, deploy.Repo, cfg)
+		if err := sched.SyncSchedules(); err != nil {
+			fmt.Printf("Warning: sync schedules: %v\n", err)
+		} else {
+			fmt.Printf("  Loaded %d job schedules\n", len(cfg.Jobs))
+		}
+	}
+
+	// Stay alive if we have schedules or watch mode.
+	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil)
 
 	// Handle signals.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -282,6 +302,11 @@ func runForeground(deployID string) error {
 		fmt.Printf("  API: http://localhost%s\n", flagServe)
 	}
 
+	// Start scheduler if available.
+	if sched != nil {
+		go sched.Run(ctx)
+	}
+
 	// Print events in foreground mode.
 	go func() {
 		for evt := range sup.Events() {
@@ -289,10 +314,9 @@ func runForeground(deployID string) error {
 		}
 	}()
 
-	fmt.Println("Launching agents...")
+	fmt.Println("Launching...")
 	sup.Launch(ctx)
 
-	// Wait for completion.
 	<-sup.Done()
 	fmt.Println("Done.")
 	return nil
