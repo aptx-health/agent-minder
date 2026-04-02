@@ -9,12 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - **Daemon PID and heartbeat lifecycle tests**: Comprehensive unit tests for WritePID/RemovePID, WriteHeartbeat/ReadHeartbeat round-trip, WasCrashShutdown with stale/recent/missing heartbeats, IsRunning with current/dead/invalid PIDs, CleanStalePID, and StartHeartbeat goroutine lifecycle (#391)
+- **JSON output for status command**: `minder status <deploy-id> --json` outputs structured JSON for scripting and piping into `jq`. Works in both local and remote modes. (#377)
 - **Daemon API server tests**: httptest-based unit tests for all daemon HTTP API endpoints — status, tasks, dep-graph, lessons, stop, resume, and API key middleware (#379)
 - **Deployment guide + service units**: Complete deployment documentation for running agent-minder watch mode on Ubuntu VPS (systemd) and macOS (LaunchAgent). Includes service units, install scripts, environment templates, logrotate config, firewall/Tailscale guidance, and troubleshooting. New `--foreground` flag on `deploy` and `deploy watch` for process-manager-friendly execution (#287)
 - **Remote TUI client**: `agent-minder deploy tui --remote host:port` launches a k9s-like live dashboard for monitoring remote deploy daemons. Features: live-updating task table with color-coded statuses, dependency graph visualization, analysis results viewer, agent log streaming with auto-tail, and action keys for refresh/poll/stop. Configurable poll intervals via `--task-poll` and `--analysis-poll` flags. Auth via `--api-key` flag or `MINDER_API_KEY` env var. New `internal/remotetui` package with bubbletea v2 model. (#282)
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
+- **Git log date parsing fallback**: `Log()`, `LogSince()`, and `LogGrep()` now use `time.Now()` as fallback when commit dates fail RFC3339 parsing, instead of silently producing zero-valued timestamps. Extracted shared `parseLogOutput()` helper to deduplicate parsing logic across all three functions. (#392)
 - **Replace custom lastIndex with strings.LastIndex**: Removed custom `lastIndex()` in review.go that reimplemented `strings.LastIndex()` and had a potential panic on short strings (#383)
 - **Daemon client HTTP status range check**: Accept all 2xx status codes (not just 200) in `getJSON()` and `post()` methods, so 201/204 responses are no longer treated as errors (#386)
 - **Watch filter value validation**: `ParseWatchFilter()` now rejects values containing invalid characters (e.g., semicolons, newlines, slashes). Added comprehensive test coverage for all parse paths. (#387)
