@@ -1,19 +1,38 @@
-# Example job schedules for agent-minder.
-# Uncomment and customize as needed.
-
 jobs:
+  # --- Overnight test (staggered tonight) ---
+  deps-tonight:
+    schedule: "0 19 * * 4"
+    agent: dependency-updater
+    description: "Check for outdated Go dependencies"
+    budget: 3.0
+
+  security-tonight:
+    schedule: "0 21 * * 4"
+    agent: security-scanner
+    description: "Scan for known vulnerabilities and security anti-patterns"
+    budget: 2.0
+
+  docs-tonight:
+    schedule: "0 23 * * 4"
+    agent: doc-updater
+    description: "Update docs to reflect recent code changes"
+    budget: 3.0
+
+  # --- Regular weekly schedules (switch to these after testing) ---
   # weekly-deps:
   #   schedule: "0 9 * * 1"
   #   agent: dependency-updater
-  #   description: "Check for outdated dependencies"
+  #   description: "Check for outdated Go dependencies"
   #   budget: 3.0
-
-  # nightly-security:
-  #   schedule: "0 6 * * *"
+  #
+  # weekly-security:
+  #   schedule: "0 6 * * 3"
   #   agent: security-scanner
-  #   description: "Scan for known vulnerabilities"
-
-  # bug-triage:
-  #   trigger: "label:agent-ready"
-  #   agent: autopilot
-  #   description: "Pick up and fix labeled bugs"
+  #   description: "Scan for known vulnerabilities and security anti-patterns"
+  #   budget: 2.0
+  #
+  # weekly-docs:
+  #   schedule: "0 8 * * 5"
+  #   agent: doc-updater
+  #   description: "Update docs to reflect recent code changes"
+  #   budget: 3.0
