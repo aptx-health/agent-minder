@@ -8,16 +8,18 @@ Wants=network-online.target
 Type=simple
 User=minder
 Group=minder
-WorkingDirectory=/opt/agent-minder/repo
+WorkingDirectory=/opt/agent-minder/repos
 
 # Load secrets from environment file (create from agent-minder.env.example)
 EnvironmentFile=/etc/agent-minder/agent-minder.env
 
-# Use the wrapper script to conditionally build --milestone or --label flag
-ExecStart=/opt/agent-minder/deploy/start-daemon.sh
+# Wrapper script builds CLI flags from environment variables
+ExecStart=/opt/agent-minder/start-daemon.sh
 
 Restart=on-failure
-RestartSec=10
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 # Security hardening
 NoNewPrivileges=true
@@ -25,16 +27,20 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/minder/.agent-minder
 ReadWritePaths=/home/minder/.claude
-ReadWritePaths=/opt/agent-minder/repo
+ReadWritePaths=/opt/agent-minder/repos
 PrivateTmp=true
+
+# Resource limits
+MemoryMax=4G
+MemoryHigh=3G
+CPUQuota=200%
+LimitNOFILE=65536
+TasksMax=256
 
 # Logging to journald
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=agent-minder
-
-# Resource limits
-LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
