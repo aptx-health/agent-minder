@@ -325,10 +325,16 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	}
 	defer func() { _ = logFile.Close() }()
 
-	// If no stages declared, run as a single-stage job.
+	// If no stages declared, use default pipeline.
+	// Code stage always runs; review stage added if review is enabled.
 	stages := contract.Stages
 	if len(stages) == 0 {
 		stages = []StageContract{{Name: "code", Agent: job.Agent, OnFailure: "bail"}}
+		if sc.Deploy.ReviewEnabled {
+			stages = append(stages, StageContract{
+				Name: "review", Agent: "reviewer", OnFailure: "skip", Retries: 1,
+			})
+		}
 	}
 
 	// --- Stage loop ---
