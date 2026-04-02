@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Discovery ScanRepo unit tests**: Tests for language detection (including dedup for python/java), CI system detection, build file detection, empty repo edge case, and non-repo error handling (#390)
 - **Daemon API server tests**: httptest-based unit tests for all daemon HTTP API endpoints — status, tasks, dep-graph, lessons, stop, resume, and API key middleware (#379)
 - **Deployment guide + service units**: Complete deployment documentation for running agent-minder watch mode on Ubuntu VPS (systemd) and macOS (LaunchAgent). Includes service units, install scripts, environment templates, logrotate config, firewall/Tailscale guidance, and troubleshooting. New `--foreground` flag on `deploy` and `deploy watch` for process-manager-friendly execution (#287)
 - **Remote TUI client**: `agent-minder deploy tui --remote host:port` launches a k9s-like live dashboard for monitoring remote deploy daemons. Features: live-updating task table with color-coded statuses, dependency graph visualization, analysis results viewer, agent log streaming with auto-tail, and action keys for refresh/poll/stop. Configurable poll intervals via `--task-poll` and `--analysis-poll` flags. Auth via `--api-key` flag or `MINDER_API_KEY` env var. New `internal/remotetui` package with bubbletea v2 model. (#282)
