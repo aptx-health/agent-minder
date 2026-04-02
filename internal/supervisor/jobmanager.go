@@ -82,11 +82,9 @@ func (sc *SlotContext) SetupWorktree() error {
 	_ = os.MkdirAll(filepath.Dir(sc.WorktreePath), 0755)
 
 	sc.sup.gitSetupMu.Lock()
-	// Remove stale worktree first — git branch -D fails if the branch
-	// is still checked out in an existing worktree.
-	if _, err := os.Stat(sc.WorktreePath); err == nil {
-		_ = gitpkg.WorktreeRemove(sc.RepoDir, sc.WorktreePath)
-	}
+	// Remove any worktree using this branch — it may be under a different
+	// deploy ID from a previous run.
+	_ = gitpkg.WorktreeRemoveByBranch(sc.RepoDir, sc.Branch)
 	_ = gitpkg.WorktreePrune(sc.RepoDir)
 	_ = gitpkg.DeleteBranch(sc.RepoDir, sc.Branch)
 	err := gitpkg.WorktreeAdd(sc.RepoDir, sc.WorktreePath, sc.Branch, "origin/"+sc.BaseBranch)
@@ -366,9 +364,12 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	sc.RecordLessonOutcome(false)
 
 	// Extract and handle structured bail report from agent output.
-	if result != nil && result.Result != "" {
-		m.handleBailReport(ctx, result.Result)
+	// Try result text first; handleBailReport falls back to scanning the log.
+	resultText := ""
+	if result != nil {
+		resultText = result.Result
 	}
+	m.handleBailReport(ctx, resultText)
 
 	if runErr != nil {
 		return runErr
