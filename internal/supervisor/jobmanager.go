@@ -346,7 +346,9 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	}
 
 	// No PR — classify failure.
-	ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	if job.IssueNumber > 0 {
+		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	}
 	result, _ := parseAgentLog(sc.LogPath)
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
@@ -355,6 +357,11 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
 	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s (exit %d)", sc.JobLabel(), exitCode))
 	sc.RecordLessonOutcome(false)
+
+	// Extract and handle structured bail report from agent output.
+	if result != nil && result.Result != "" {
+		m.handleBailReport(ctx, result.Result)
+	}
 
 	if runErr != nil {
 		return runErr
