@@ -516,3 +516,55 @@ func (s *Store) GetOnboarding(repoDir string) (*RepoOnboarding, error) {
 	}
 	return &o, nil
 }
+
+// --- Job Schedules ---
+
+// UpsertSchedule inserts or updates a job schedule.
+func (s *Store) UpsertSchedule(js *JobSchedule) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO job_schedules
+		(name, deployment_id, cron_expr, trigger_expr, agent, description, budget, max_turns, enabled, next_run_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		js.Name, js.DeploymentID, js.CronExpr, js.TriggerExpr,
+		js.Agent, js.Description, js.Budget, js.MaxTurns, js.Enabled, js.NextRunAt)
+	return err
+}
+
+// GetSchedules returns all schedules for a deployment.
+func (s *Store) GetSchedules(deploymentID string) ([]*JobSchedule, error) {
+	var schedules []*JobSchedule
+	err := s.db.Select(&schedules,
+		"SELECT * FROM job_schedules WHERE deployment_id = ? ORDER BY name", deploymentID)
+	return schedules, err
+}
+
+// GetEnabledSchedules returns enabled schedules for a deployment.
+func (s *Store) GetEnabledSchedules(deploymentID string) ([]*JobSchedule, error) {
+	var schedules []*JobSchedule
+	err := s.db.Select(&schedules,
+		"SELECT * FROM job_schedules WHERE deployment_id = ? AND enabled = 1 ORDER BY name", deploymentID)
+	return schedules, err
+}
+
+// GetSchedule retrieves a single schedule by name.
+func (s *Store) GetSchedule(name string) (*JobSchedule, error) {
+	var js JobSchedule
+	err := s.db.Get(&js, "SELECT * FROM job_schedules WHERE name = ?", name)
+	if err != nil {
+		return nil, err
+	}
+	return &js, nil
+}
+
+// UpdateScheduleRun records that a schedule just fired.
+func (s *Store) UpdateScheduleRun(name string, lastRun, nextRun time.Time) error {
+	_, err := s.db.Exec(
+		"UPDATE job_schedules SET last_run_at = ?, next_run_at = ? WHERE name = ?",
+		lastRun, nextRun, name)
+	return err
+}
+
+// DeleteSchedule removes a schedule.
+func (s *Store) DeleteSchedule(name string) error {
+	_, err := s.db.Exec("DELETE FROM job_schedules WHERE name = ?", name)
+	return err
+}

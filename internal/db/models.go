@@ -156,6 +156,22 @@ func (l *Lesson) EffectivenessRatio() float64 {
 	return float64(l.TimesHelpful) / float64(total)
 }
 
+// JobSchedule tracks a scheduled or triggered job definition.
+type JobSchedule struct {
+	Name         string          `db:"name"`
+	DeploymentID string          `db:"deployment_id"`
+	CronExpr     sql.NullString  `db:"cron_expr"`
+	TriggerExpr  sql.NullString  `db:"trigger_expr"`
+	Agent        string          `db:"agent"`
+	Description  sql.NullString  `db:"description"`
+	Budget       sql.NullFloat64 `db:"budget"`
+	MaxTurns     sql.NullInt64   `db:"max_turns"`
+	Enabled      bool            `db:"enabled"`
+	LastRunAt    sql.NullTime    `db:"last_run_at"`
+	NextRunAt    sql.NullTime    `db:"next_run_at"`
+	CreatedAt    time.Time       `db:"created_at"`
+}
+
 // RepoOnboarding stores cached onboarding YAML for a repository.
 type RepoOnboarding struct {
 	RepoDir            string         `db:"repo_dir"`

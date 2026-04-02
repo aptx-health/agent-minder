@@ -13,6 +13,7 @@ import (
 	"github.com/aptx-health/agent-minder/internal/daemon"
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
+	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -343,9 +344,23 @@ func runDaemon(deployID string) error {
 	}
 
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
-	sup.SetDaemonMode(deploy.Mode == "watch")
 
-	if len(jobs) == 0 && deploy.Mode == "issues" {
+	// Load jobs.yaml scheduler if available.
+	var sched *scheduler.Scheduler
+	cfgPath := scheduler.ConfigPath(deploy.RepoDir)
+	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
+		sched = scheduler.New(store, deployID, deploy.Owner, deploy.Repo, cfg)
+		if err := sched.SyncSchedules(); err != nil {
+			fmt.Printf("Warning: sync schedules: %v\n", err)
+		} else {
+			fmt.Printf("Loaded %d job schedules from %s\n", len(cfg.Jobs), cfgPath)
+		}
+	}
+
+	// Daemon mode if watch, or if we have schedules to evaluate.
+	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil)
+
+	if len(jobs) == 0 && deploy.Mode == "issues" && sched == nil {
 		fmt.Println("Note: daemon started but no jobs found. Waiting for watch events or manual job creation.")
 	}
 
@@ -389,6 +404,11 @@ func runDaemon(deployID string) error {
 	}
 
 	_ = completer // used above
+
+	// Start scheduler loop if we have schedules.
+	if sched != nil {
+		go sched.Run(ctx)
+	}
 
 	sup.Launch(ctx)
 	<-sup.Done()

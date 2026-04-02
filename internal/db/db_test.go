@@ -415,8 +415,8 @@ INSERT INTO tasks (deployment_id, issue_number, owner, repo, status) VALUES ('d1
 	// Verify version is now 2.
 	var version int
 	_ = conn2.Get(&version, "SELECT version FROM schema_version")
-	if version != 2 {
-		t.Errorf("got schema version %d, want 2", version)
+	if version != schemaVersion {
+		t.Errorf("got schema version %d, want %d", version, schemaVersion)
 	}
 
 	// Verify jobs table has the data.
