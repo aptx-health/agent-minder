@@ -55,7 +55,6 @@ type jobJSON struct {
 	CostUSD     float64 `json:"cost_usd,omitempty"`
 }
 
-// printJSON marshals v as indented JSON and writes to stdout.
 func printJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -71,20 +70,20 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("fetch status: %w", err)
 		}
 
-		tasks, err := client.GetTasks()
+		jobs, err := client.GetJobs()
 		if err != nil {
-			return fmt.Errorf("fetch tasks: %w", err)
+			return fmt.Errorf("fetch jobs: %w", err)
 		}
 
 		if flagJSON {
-			jobs := make([]jobJSON, len(tasks))
-			for i, t := range tasks {
-				jobs[i] = jobJSON{
-					IssueNumber: t.IssueNumber,
-					IssueTitle:  t.IssueTitle,
-					Status:      t.Status,
-					PRNumber:    t.PRNumber,
-					CostUSD:     t.CostUSD,
+			jj := make([]jobJSON, len(jobs))
+			for i, j := range jobs {
+				jj[i] = jobJSON{
+					IssueNumber: j.IssueNumber,
+					IssueTitle:  j.IssueTitle,
+					Status:      j.Status,
+					PRNumber:    j.PRNumber,
+					CostUSD:     j.CostUSD,
 				}
 			}
 			return printJSON(statusJSON{
@@ -92,7 +91,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				Alive:    true,
 				PID:      status.PID,
 				Budget:   budgetJSON{Spent: status.TotalSpent, Total: status.TotalBudget},
-				Jobs:     jobs,
+				Jobs:     jj,
 			})
 		}
 
@@ -102,7 +101,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			fmt.Print(" [PAUSED]")
 		}
 		fmt.Println()
-		printTasks(tasks)
+		printJobs(jobs)
 		return nil
 	}
 
@@ -127,25 +126,25 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	spent, _ := store.TotalSpend(deployID)
-	tasks, _ := store.GetTasks(deployID)
+	jobs, _ := store.GetJobs(deployID)
 
 	if flagJSON {
 		pidVal := 0
 		if alive {
 			pidVal = pid
 		}
-		jobs := make([]jobJSON, len(tasks))
-		for i, t := range tasks {
+		jj := make([]jobJSON, len(jobs))
+		for i, j := range jobs {
 			pr := 0
-			if t.PRNumber.Valid {
-				pr = int(t.PRNumber.Int64)
+			if j.PRNumber.Valid {
+				pr = int(j.PRNumber.Int64)
 			}
-			jobs[i] = jobJSON{
-				IssueNumber: t.IssueNumber,
-				IssueTitle:  t.IssueTitle.String,
-				Status:      t.Status,
+			jj[i] = jobJSON{
+				IssueNumber: j.IssueNumber,
+				IssueTitle:  j.IssueTitle.String,
+				Status:      j.Status,
 				PRNumber:    pr,
-				CostUSD:     t.CostUSD,
+				CostUSD:     j.CostUSD,
 			}
 		}
 		return printJSON(statusJSON{
@@ -156,7 +155,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			Owner:    deploy.Owner,
 			Repo:     deploy.Repo,
 			Budget:   budgetJSON{Spent: spent, Total: deploy.TotalBudgetUSD},
-			Jobs:     jobs,
+			Jobs:     jj,
 		})
 	}
 
@@ -169,17 +168,17 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Budget: $%.2f / $%.2f\n", spent, deploy.TotalBudgetUSD)
 
-	fmt.Printf("Tasks: %d\n\n", len(tasks))
-	for _, t := range tasks {
+	fmt.Printf("Jobs: %d\n\n", len(jobs))
+	for _, j := range jobs {
 		pr := ""
-		if t.PRNumber.Valid {
-			pr = fmt.Sprintf(" PR#%d", t.PRNumber.Int64)
+		if j.PRNumber.Valid {
+			pr = fmt.Sprintf(" PR#%d", j.PRNumber.Int64)
 		}
 		cost := ""
-		if t.CostUSD > 0 {
-			cost = fmt.Sprintf(" $%.2f", t.CostUSD)
+		if j.CostUSD > 0 {
+			cost = fmt.Sprintf(" $%.2f", j.CostUSD)
 		}
-		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", t.IssueNumber, t.IssueTitle.String, t.Status, pr, cost)
+		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", j.IssueNumber, j.IssueTitle.String, j.Status, pr, cost)
 	}
 
 	return nil
@@ -209,28 +208,28 @@ func listAllDeployments() error {
 		if alive {
 			status = "running"
 		}
-		tasks, _ := store.GetTasks(d.ID)
-		fmt.Printf("%-10s %s/%s  %-8s  %d tasks  %s\n",
-			d.ID, d.Owner, d.Repo, status, len(tasks), d.StartedAt.Format("2006-01-02 15:04"))
+		jobs, _ := store.GetJobs(d.ID)
+		fmt.Printf("%-10s %s/%s  %-8s  %d jobs  %s\n",
+			d.ID, d.Owner, d.Repo, status, len(jobs), d.StartedAt.Format("2006-01-02 15:04"))
 	}
 	return nil
 }
 
-func printTasks(tasks []daemon.TaskResponse) {
-	if len(tasks) == 0 {
-		fmt.Println("No tasks.")
+func printJobs(jobs []daemon.JobResponse) {
+	if len(jobs) == 0 {
+		fmt.Println("No jobs.")
 		return
 	}
 	fmt.Println()
-	for _, t := range tasks {
+	for _, j := range jobs {
 		pr := ""
-		if t.PRNumber > 0 {
-			pr = fmt.Sprintf(" PR#%d", t.PRNumber)
+		if j.PRNumber > 0 {
+			pr = fmt.Sprintf(" PR#%d", j.PRNumber)
 		}
 		cost := ""
-		if t.CostUSD > 0 {
-			cost = fmt.Sprintf(" $%.2f", t.CostUSD)
+		if j.CostUSD > 0 {
+			cost = fmt.Sprintf(" $%.2f", j.CostUSD)
 		}
-		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", t.IssueNumber, t.IssueTitle, t.Status, pr, cost)
+		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", j.IssueNumber, j.IssueTitle, j.Status, pr, cost)
 	}
 }

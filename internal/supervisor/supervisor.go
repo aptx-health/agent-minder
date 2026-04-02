@@ -16,7 +16,6 @@ import (
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
-	"github.com/aptx-health/agent-minder/internal/lesson"
 )
 
 // debugLogger is a structured JSON logger for supervisor tracing.
@@ -53,26 +52,27 @@ type Event struct {
 	Time    time.Time
 	Type    string // "info", "started", "completed", "bailed", "stopped", "finished", "error", "warning"
 	Summary string
-	TaskID  int64
+	TaskID  int64 // kept as TaskID for API backward compat
 }
 
-// SlotInfo describes the current state of an agent slot.
-type SlotInfo struct {
-	SlotNum     int
+// RunInfo describes a currently running job.
+type RunInfo struct {
+	JobID       int64
+	Agent       string
 	IssueNumber int
 	IssueTitle  string
 	Branch      string
 	RunningFor  time.Duration
-	Status      string // "running" or "idle"
-	Paused      bool
+	Status      string // "running"
 	IsReview    bool
 	CurrentTool string
 	ToolInput   string
 	StepCount   int
 }
 
-type slotState struct {
-	task          *db.Task
+// runState tracks a running job manager goroutine.
+type runState struct {
+	job           *db.Job
 	startedAt     time.Time
 	cmd           *exec.Cmd
 	cancelFunc    context.CancelFunc
@@ -80,7 +80,7 @@ type slotState struct {
 	liveStatus    LiveStatus
 }
 
-// Supervisor manages concurrent autopilot agents.
+// Supervisor manages concurrent agent jobs.
 type Supervisor struct {
 	store   *db.Store
 	deploy  *db.Deployment
@@ -91,7 +91,8 @@ type Supervisor struct {
 
 	mu                 sync.Mutex
 	gitSetupMu         sync.Mutex
-	slots              []*slotState
+	running            map[int64]*runState // keyed by job ID
+	maxAgents          int
 	active             bool
 	daemonMode         bool
 	watchMode          bool
@@ -103,7 +104,6 @@ type Supervisor struct {
 	parentCtx          context.Context
 	cancel             context.CancelFunc
 	done               chan struct{}
-	reviewRetries      map[int64]int
 	ghClientFactory    func(token string) *ghpkg.Client
 }
 
@@ -114,15 +114,15 @@ func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken s
 		maxAgents = 3
 	}
 	return &Supervisor{
-		store:         store,
-		deploy:        deploy,
-		repoDir:       repoDir,
-		owner:         owner,
-		repo:          repo,
-		ghToken:       ghToken,
-		slots:         make([]*slotState, maxAgents),
-		events:        make(chan Event, 64),
-		reviewRetries: make(map[int64]int),
+		store:     store,
+		deploy:    deploy,
+		repoDir:   repoDir,
+		owner:     owner,
+		repo:      repo,
+		ghToken:   ghToken,
+		running:   make(map[int64]*runState),
+		maxAgents: maxAgents,
+		events:    make(chan Event, 64),
 	}
 }
 
@@ -182,43 +182,103 @@ func (s *Supervisor) Resume() {
 	s.mu.Unlock()
 }
 
-// SlotStatus returns the current state of all agent slots.
-func (s *Supervisor) SlotStatus() []SlotInfo {
+// RunningJobs returns info about all currently running jobs.
+func (s *Supervisor) RunningJobs() []RunInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	infos := make([]SlotInfo, len(s.slots))
-	for i, slot := range s.slots {
-		if slot == nil {
-			infos[i] = SlotInfo{SlotNum: i, Status: "idle", Paused: s.paused || s.budgetPaused}
-			continue
-		}
-		infos[i] = SlotInfo{
-			SlotNum:     i,
-			IssueNumber: slot.task.IssueNumber,
-			IssueTitle:  slot.task.IssueTitle.String,
-			Branch:      slot.task.Branch.String,
-			RunningFor:  time.Since(slot.startedAt),
+	var infos []RunInfo
+	for _, rs := range s.running {
+		infos = append(infos, RunInfo{
+			JobID:       rs.job.ID,
+			Agent:       rs.job.Agent,
+			IssueNumber: rs.job.IssueNumber,
+			IssueTitle:  rs.job.IssueTitle.String,
+			Branch:      rs.job.Branch.String,
+			RunningFor:  time.Since(rs.startedAt),
 			Status:      "running",
-			IsReview:    slot.task.Status == db.StatusReviewing,
-			CurrentTool: slot.liveStatus.CurrentTool,
-			ToolInput:   slot.liveStatus.ToolInput,
-			StepCount:   slot.liveStatus.StepCount,
-		}
+			IsReview:    rs.job.Status == db.StatusReviewing,
+			CurrentTool: rs.liveStatus.CurrentTool,
+			ToolInput:   rs.liveStatus.ToolInput,
+			StepCount:   rs.liveStatus.StepCount,
+		})
 	}
 	return infos
 }
 
-// StopAgent stops a specific agent by slot index.
+// SlotStatus returns backward-compatible slot info (for API/xbar).
+func (s *Supervisor) SlotStatus() []SlotInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var infos []SlotInfo
+	i := 0
+	for _, rs := range s.running {
+		infos = append(infos, SlotInfo{
+			SlotNum:     i,
+			IssueNumber: rs.job.IssueNumber,
+			IssueTitle:  rs.job.IssueTitle.String,
+			Branch:      rs.job.Branch.String,
+			RunningFor:  time.Since(rs.startedAt),
+			Status:      "running",
+			IsReview:    rs.job.Status == db.StatusReviewing,
+			CurrentTool: rs.liveStatus.CurrentTool,
+			ToolInput:   rs.liveStatus.ToolInput,
+			StepCount:   rs.liveStatus.StepCount,
+		})
+		i++
+	}
+	// Pad with idle slots up to maxAgents.
+	for i < s.maxAgents {
+		infos = append(infos, SlotInfo{SlotNum: i, Status: "idle", Paused: s.paused || s.budgetPaused})
+		i++
+	}
+	return infos
+}
+
+// SlotInfo describes the current state of an agent slot (backward compat).
+type SlotInfo struct {
+	SlotNum     int
+	IssueNumber int
+	IssueTitle  string
+	Branch      string
+	RunningFor  time.Duration
+	Status      string // "running" or "idle"
+	Paused      bool
+	IsReview    bool
+	CurrentTool string
+	ToolInput   string
+	StepCount   int
+}
+
+// StopJob stops a running job by its ID.
+func (s *Supervisor) StopJob(jobID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rs, ok := s.running[jobID]
+	if !ok {
+		return
+	}
+	rs.stoppedByUser = true
+	if rs.cancelFunc != nil {
+		rs.cancelFunc()
+	}
+}
+
+// StopAgent stops a specific agent by slot index (backward compat).
 func (s *Supervisor) StopAgent(slotIdx int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if slotIdx < 0 || slotIdx >= len(s.slots) || s.slots[slotIdx] == nil {
-		return
-	}
-	s.slots[slotIdx].stoppedByUser = true
-	if s.slots[slotIdx].cancelFunc != nil {
-		s.slots[slotIdx].cancelFunc()
+	i := 0
+	for _, rs := range s.running {
+		if i == slotIdx {
+			rs.stoppedByUser = true
+			if rs.cancelFunc != nil {
+				rs.cancelFunc()
+			}
+			return
+		}
+		i++
 	}
 }
 
@@ -237,14 +297,13 @@ func (s *Supervisor) Launch(ctx context.Context) {
 
 	go func() {
 		defer close(s.done)
-		s.fillSlots(ctx)
+		s.fillCapacity(ctx)
 
 		reviewTicker := time.NewTicker(30 * time.Second)
 		defer reviewTicker.Stop()
 
 		watchTicker := time.NewTicker(2 * time.Minute)
 		defer watchTicker.Stop()
-		// Initial watch poll if filter is configured.
 		if s.addWatchTickerToLoop() {
 			s.WatchTick(ctx)
 		}
@@ -264,18 +323,17 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				}
 
 			case <-reviewTicker.C:
-				s.enhancedCheckReviewTasks(ctx)
-				if s.hasIdleSlot() {
-					s.fillSlots(ctx)
+				s.checkMergedPRs(ctx)
+				if s.hasCapacity() {
+					s.fillCapacity(ctx)
 				}
 
 			default:
-				if s.hasIdleSlot() {
-					s.fillSlots(ctx)
+				if s.hasCapacity() {
+					s.fillCapacity(ctx)
 				}
 			}
 
-			// Check if there's work remaining.
 			if !s.hasWork() {
 				s.mu.Lock()
 				isDaemon := s.daemonMode
@@ -317,30 +375,18 @@ func (s *Supervisor) emitEvent(typ, summary string, taskID int64) {
 	select {
 	case s.events <- evt:
 	default:
-		// Drop if channel full — non-blocking.
 	}
 }
 
-func (s *Supervisor) hasIdleSlot() bool {
+func (s *Supervisor) hasCapacity() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, slot := range s.slots {
-		if slot == nil {
-			return true
-		}
-	}
-	return false
+	return len(s.running) < s.maxAgents
 }
 
 func (s *Supervisor) hasWork() bool {
 	s.mu.Lock()
-	anyRunning := false
-	for _, slot := range s.slots {
-		if slot != nil {
-			anyRunning = true
-			break
-		}
-	}
+	anyRunning := len(s.running) > 0
 	isPaused := s.paused
 	s.mu.Unlock()
 
@@ -348,10 +394,10 @@ func (s *Supervisor) hasWork() bool {
 		return true
 	}
 
-	tasks, _ := s.store.GetTasks(s.deploy.ID)
+	jobs, _ := s.store.GetJobs(s.deploy.ID)
 	waitingOnMerge := false
-	for _, t := range tasks {
-		switch t.Status {
+	for _, j := range jobs {
+		switch j.Status {
 		case db.StatusQueued, db.StatusBlocked, db.StatusReviewing, db.StatusManual:
 			return true
 		case db.StatusReview, db.StatusReviewed:
@@ -365,7 +411,6 @@ func (s *Supervisor) hasWork() bool {
 	return isPaused
 }
 
-// emitWaitingForMerge emits a one-time hint that the supervisor is waiting for PRs to be merged.
 func (s *Supervisor) emitWaitingForMerge() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -373,11 +418,10 @@ func (s *Supervisor) emitWaitingForMerge() {
 		return
 	}
 	s.waitingHintEmitted = true
-	// Emit outside lock via goroutine to avoid deadlock with channel.
 	go s.emitEvent("info", "Waiting for PR(s) to be merged (checking every 30s, ctrl+c to exit)", 0)
 }
 
-func (s *Supervisor) fillSlots(ctx context.Context) {
+func (s *Supervisor) fillCapacity(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -385,7 +429,6 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 		return
 	}
 
-	// Check budget ceiling.
 	if s.deploy.TotalBudgetUSD > 0 {
 		s.mu.Unlock()
 		exceeded := s.checkBudgetCeiling()
@@ -395,29 +438,19 @@ func (s *Supervisor) fillSlots(ctx context.Context) {
 		}
 	}
 
-	// Single fetch before launching any agents.
-	hasEmpty := false
-	for _, slot := range s.slots {
-		if slot == nil {
-			hasEmpty = true
-			break
-		}
-	}
-	if hasEmpty {
+	// Fetch once before launching.
+	if len(s.running) < s.maxAgents {
 		if err := gitpkg.Fetch(s.repoDir); err != nil {
 			s.emitEvent("warning", fmt.Sprintf("Fetch failed: %v", err), 0)
 		}
 	}
 
-	for i, slot := range s.slots {
-		if slot != nil {
-			continue
-		}
-		tasks, err := s.store.QueuedUnblockedTasks(s.deploy.ID)
-		if err != nil || len(tasks) == 0 {
+	for len(s.running) < s.maxAgents {
+		jobs, err := s.store.QueuedUnblockedJobs(s.deploy.ID)
+		if err != nil || len(jobs) == 0 {
 			break
 		}
-		s.launchAgent(ctx, i, tasks[0])
+		s.launchJob(ctx, jobs[0])
 	}
 }
 
@@ -448,275 +481,95 @@ func (s *Supervisor) checkBudgetCeiling() bool {
 	return false
 }
 
-func (s *Supervisor) launchAgent(ctx context.Context, slotIdx int, task *db.Task) {
-	home, _ := os.UserHomeDir()
-	worktreeBase := filepath.Join(home, ".agent-minder", "worktrees", s.deploy.ID)
-	worktreePath := filepath.Join(worktreeBase, fmt.Sprintf("issue-%d", task.IssueNumber))
-	branch := fmt.Sprintf("agent/issue-%d", task.IssueNumber)
-	logDir := filepath.Join(home, ".agent-minder", "agents")
-	logPath := filepath.Join(logDir, fmt.Sprintf("%s-issue-%d.log", s.deploy.ID, task.IssueNumber))
+// launchJob creates a SlotContext + JobManager and spawns a goroutine.
+// Must be called with s.mu held.
+func (s *Supervisor) launchJob(ctx context.Context, job *db.Job) {
+	_ = s.store.UpdateJobRunning(job.ID)
+	job.Status = db.StatusRunning
 
-	_ = s.store.UpdateTaskWorktree(task.ID, worktreePath, branch)
-	_ = s.store.UpdateTaskRunning(task.ID)
-	// Update the task object too for later use.
-	task.Status = db.StatusRunning
-
-	slotCtx, slotCancel := context.WithCancel(ctx)
-	s.slots[slotIdx] = &slotState{
-		task:       task,
+	jobCtx, jobCancel := context.WithCancel(ctx)
+	rs := &runState{
+		job:        job,
 		startedAt:  time.Now(),
-		cancelFunc: slotCancel,
+		cancelFunc: jobCancel,
 	}
+	s.running[job.ID] = rs
 
-	go s.runAgent(slotCtx, slotIdx, task, worktreePath, branch, logPath, false)
+	go s.runJobManager(jobCtx, job)
 }
 
-func (s *Supervisor) runAgent(ctx context.Context, slotIdx int, task *db.Task,
-	worktreePath, branch, logPath string, isResume bool) {
-
+// runJobManager runs a JobManager for the given job, then cleans up.
+func (s *Supervisor) runJobManager(ctx context.Context, job *db.Job) {
 	defer func() {
 		s.mu.Lock()
-		s.slots[slotIdx] = nil
+		delete(s.running, job.ID)
 		s.mu.Unlock()
-		// Re-evaluate and fill slots using parent context.
-		s.fillSlots(s.parentCtx)
+		s.fillCapacity(s.parentCtx)
 	}()
 
-	failStatus := db.StatusBailed
-	if isResume {
-		failStatus = "failed"
+	// Create SlotContext.
+	sc := s.newSlotContext(job.ID, job)
+
+	// Resolve contract.
+	contract, err := ResolveContract(s.repoDir, job.Agent)
+	if err != nil {
+		contract = DefaultContract(job.Agent)
 	}
 
-	home, _ := os.UserHomeDir()
-
-	// Ensure directories.
-	if !isResume {
-		_ = os.MkdirAll(filepath.Dir(worktreePath), 0755)
+	// Create and run JobManager.
+	mgr := NewDefaultJobManager(sc, contract)
+	if err := mgr.Run(ctx); err != nil {
+		debugLog("job manager error", "job", job.ID, "issue", job.IssueNumber, "error", err.Error())
 	}
-	_ = os.MkdirAll(filepath.Join(home, ".agent-minder", "agents"), 0755)
+}
 
-	// Get base branch (onboarding.yaml > deploy flag > git default).
-	baseBranch := resolveBaseBranch(s.repoDir, s.deploy)
-
-	if !isResume {
-		// Serialize git worktree operations.
-		s.gitSetupMu.Lock()
-		_ = gitpkg.DeleteBranch(s.repoDir, branch)
-		gitErr := gitpkg.WorktreeAdd(s.repoDir, worktreePath, branch, "origin/"+baseBranch)
-		s.gitSetupMu.Unlock()
-
-		if gitErr != nil {
-			s.emitEvent("error", fmt.Sprintf("Worktree setup failed for #%d: %v", task.IssueNumber, gitErr), task.ID)
-			_ = s.store.UpdateTaskStatus(task.ID, failStatus)
-			return
-		}
+// checkMergedPRs checks if any review/reviewed jobs had their PRs merged.
+func (s *Supervisor) checkMergedPRs(ctx context.Context) {
+	jobs, err := s.store.GetJobs(s.deploy.ID)
+	if err != nil {
+		return
 	}
 
-	s.emitEvent("started", fmt.Sprintf("Agent started on #%d: %s", task.IssueNumber, task.IssueTitle.String), task.ID)
-
-	// Add in-progress label.
 	ghClient := s.newGHClient()
-	_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
 
-	// Open log file.
-	var logFile *os.File
-	var err error
-	if isResume {
-		logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	} else {
-		logFile, err = os.Create(logPath)
-	}
-	if err != nil {
-		s.emitEvent("error", fmt.Sprintf("Log file error for #%d: %v", task.IssueNumber, err), task.ID)
-		_ = s.store.UpdateTaskStatus(task.ID, failStatus)
-		return
-	}
-	defer func() { _ = logFile.Close() }()
-
-	// Ensure agent definition exists.
-	agentDefSource, err := ensureAgentDef(worktreePath)
-	if err != nil {
-		s.emitEvent("error", fmt.Sprintf("Agent def error for #%d: %v", task.IssueNumber, err), task.ID)
-		_ = s.store.UpdateTaskStatus(task.ID, failStatus)
-		return
-	}
-	debugLog("agent def resolved", "issue", task.IssueNumber, "source", string(agentDefSource))
-
-	// Build command args.
-	allowedTools := resolveAllowedTools(s.repoDir)
-	testCommand := resolveTestCommand(s.repoDir)
-
-	// Load related work context.
-	var rw *relatedWork
-	dg, dgErr := s.store.GetDepGraph(s.deploy.ID)
-	siblings, sibErr := s.store.GetTasks(s.deploy.ID)
-	if dgErr == nil || sibErr == nil {
-		rw = &relatedWork{}
-		if dgErr == nil && dg != nil {
-			rw.depGraph = dg.GraphJSON
+	for _, j := range jobs {
+		if j.Status != db.StatusReview && j.Status != db.StatusReviewed {
+			continue
 		}
-		if sibErr == nil {
-			rw.siblingTasks = siblings
+		if !j.PRNumber.Valid {
+			continue
+		}
+
+		merged, err := ghClient.IsPRMerged(ctx, s.owner, s.repo, int(j.PRNumber.Int64))
+		if err == nil && merged {
+			_ = s.store.CompleteJob(j.ID, db.StatusDone)
+			ghClient.RemoveLabel(ctx, s.owner, s.repo, j.IssueNumber, "needs-review")
+			s.emitEvent("completed", fmt.Sprintf("PR #%d merged — #%d done", j.PRNumber.Int64, j.IssueNumber), j.ID)
 		}
 	}
+}
 
-	// Pre-fetch issue comments.
-	issueComments := s.fetchIssueComments(ctx, task)
-
-	// Select and inject lessons.
-	lessonsPrompt := s.selectAndRecordLessons(task)
-
-	var args []string
-	if isResume {
-		args = buildResumeClaudeArgs(task, s.deploy, baseBranch, testCommand, allowedTools, rw, issueComments, lessonsPrompt)
-	} else {
-		args = buildClaudeArgs(task, s.deploy, baseBranch, testCommand, allowedTools, rw, issueComments, lessonsPrompt)
-	}
-
-	debugLog("claude command", "issue", task.IssueNumber, "args", strings.Join(args[:len(args)-1], " "))
-
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Dir = worktreePath
-	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+s.ghToken)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		s.emitEvent("error", fmt.Sprintf("Stdout pipe error for #%d: %v", task.IssueNumber, err), task.ID)
-		_ = s.store.UpdateTaskStatus(task.ID, failStatus)
-		return
-	}
-
+// UpdateLiveStatus is called by the scanner goroutine to update job live status.
+func (s *Supervisor) UpdateLiveStatus(jobID int64, status LiveStatus) {
 	s.mu.Lock()
-	if s.slots[slotIdx] != nil {
-		s.slots[slotIdx].cmd = cmd
-	}
-	s.mu.Unlock()
-
-	if err := cmd.Start(); err != nil {
-		s.emitEvent("error", fmt.Sprintf("Agent start failed for #%d: %v", task.IssueNumber, err), task.ID)
-		_ = s.store.UpdateTaskStatus(task.ID, failStatus)
-		return
-	}
-
-	// Scanner goroutine for live status.
-	scanDone := make(chan struct{})
-	go func() {
-		defer close(scanDone)
-		scanStream(stdout, logFile, slotIdx, s)
-	}()
-
-	err = cmd.Wait()
-	<-scanDone
-
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
-
-	// Check user-initiated stop.
-	s.mu.Lock()
-	stoppedByUser := s.slots[slotIdx] != nil && s.slots[slotIdx].stoppedByUser
-	s.mu.Unlock()
-
-	if stoppedByUser {
-		_ = s.store.UpdateTaskStatus(task.ID, db.StatusStopped)
-		s.emitEvent("stopped", fmt.Sprintf("Agent stopped by user on #%d", task.IssueNumber), task.ID)
-		return
-	}
-
-	// Inspect outcome.
-	status := s.inspectOutcome(ctx, task, logPath, exitCode)
-	_ = s.store.UpdateTaskStatus(task.ID, status)
-
-	// Update cost from log.
-	if cost := parseCostFromLog(logPath); cost > 0 {
-		_ = s.store.UpdateTaskCost(task.ID, cost)
-	}
-
-	switch status {
-	case db.StatusReview:
-		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
-		_ = ghClient.AddLabel(ctx, s.owner, s.repo, task.IssueNumber, "needs-review")
-		s.emitEvent("completed", fmt.Sprintf("Agent completed #%d — PR opened", task.IssueNumber), task.ID)
-		// Record lessons as helpful (task produced a PR).
-		_ = lesson.RecordOutcome(s.store, task.ID, true)
-	case db.StatusBailed:
-		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
-		s.emitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit %d)", task.IssueNumber, exitCode), task.ID)
-		// Record lessons as unhelpful (task bailed).
-		_ = lesson.RecordOutcome(s.store, task.ID, false)
-	default:
-		ghClient.RemoveLabel(ctx, s.owner, s.repo, task.IssueNumber, "in-progress")
-		s.emitEvent("bailed", fmt.Sprintf("Agent finished #%d with status %s", task.IssueNumber, status), task.ID)
-		_ = lesson.RecordOutcome(s.store, task.ID, false)
+	defer s.mu.Unlock()
+	if rs, ok := s.running[jobID]; ok {
+		rs.liveStatus = status
 	}
 }
 
-// inspectOutcome examines the agent log and exit code to determine task status.
-func (s *Supervisor) inspectOutcome(ctx context.Context, task *db.Task, logPath string, exitCode int) string {
-	// Parse the agent result from the log.
-	result, _ := parseAgentLog(logPath)
-
-	// Classify the outcome.
-	maxTurns := task.EffectiveMaxTurns(s.deploy)
-	maxBudget := task.EffectiveMaxBudget(s.deploy)
-	status, reason, detail := classifyOutcome(result, maxTurns, maxBudget)
-
-	// Check for PR: even if the agent failed, it may have opened a PR.
-	prNum := detectPRFromLog(logPath, s.owner, s.repo)
-	if prNum > 0 {
-		_ = s.store.UpdateTaskPR(task.ID, prNum)
-		return db.StatusReview
-	}
-
-	// Also try GitHub API.
-	ghClient := s.newGHClient()
-	branch := fmt.Sprintf("agent/issue-%d", task.IssueNumber)
-	prs, err := ghClient.ListPRsForBranch(ctx, s.owner, s.repo, branch)
-	if err == nil && len(prs) > 0 {
-		_ = s.store.UpdateTaskPR(task.ID, prs[0])
-		return db.StatusReview
-	}
-
-	// No PR found — record failure info.
-	if status == "failed" || status == "warning" {
-		_ = s.store.UpdateTaskFailure(task.ID, reason, detail)
-		if status == "warning" {
-			// Non-fatal (e.g., permission denials) but no PR — still bailed.
-			return db.StatusBailed
-		}
-		return db.StatusBailed
-	}
-
-	return db.StatusBailed
-}
-
-// fetchIssueComments fetches the latest comments for context injection.
-func (s *Supervisor) fetchIssueComments(ctx context.Context, task *db.Task) string {
-	ghClient := s.newGHClient()
-	content, err := ghClient.FetchItemContent(ctx, s.owner, s.repo, task.IssueNumber, "issue")
-	if err != nil {
-		return ""
-	}
-	return strings.Join(content.Comments, "\n\n")
-}
+// --- Utility functions used by SlotContext and JobManager ---
 
 // parseCostFromLog extracts cost from the agent log (stream-json format).
 func parseCostFromLog(logPath string) float64 {
-	// Parse the last result event for total_cost_usd.
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		return 0
 	}
-	// Simple scan for "total_cost_usd" in the log.
 	lines := strings.Split(string(data), "\n")
 	var cost float64
 	for _, line := range lines {
 		if idx := strings.Index(line, `"total_cost_usd"`); idx >= 0 {
-			// Extract the number after the colon.
 			rest := line[idx+len(`"total_cost_usd"`):]
 			rest = strings.TrimLeft(rest, `: `)
 			end := strings.IndexAny(rest, ",}")
@@ -736,41 +589,17 @@ func detectPRFromLog(logPath, owner, repo string) int {
 	if err != nil {
 		return 0
 	}
-	// Look for "github.com/owner/repo/pull/N" pattern.
 	target := fmt.Sprintf("github.com/%s/%s/pull/", owner, repo)
-	s := string(data)
-	idx := strings.LastIndex(s, target)
+	content := string(data)
+	idx := strings.LastIndex(content, target)
 	if idx < 0 {
 		return 0
 	}
-	rest := s[idx+len(target):]
+	rest := content[idx+len(target):]
 	end := strings.IndexFunc(rest, func(r rune) bool { return r < '0' || r > '9' })
 	if end <= 0 {
 		return 0
 	}
 	num, _ := strconv.Atoi(rest[:end])
 	return num
-}
-
-// selectAndRecordLessons selects relevant lessons and records the injection.
-func (s *Supervisor) selectAndRecordLessons(task *db.Task) string {
-	lessons, err := lesson.SelectLessons(s.store, s.owner, s.repo)
-	if err != nil || len(lessons) == 0 {
-		return ""
-	}
-
-	// Record which lessons were injected.
-	_ = lesson.RecordInjection(s.store, task.ID, lessons)
-
-	debugLog("lessons injected", "issue", task.IssueNumber, "count", len(lessons))
-	return lesson.FormatForPrompt(lessons)
-}
-
-// UpdateLiveStatus is called by the scanner goroutine to update slot live status.
-func (s *Supervisor) UpdateLiveStatus(slotIdx int, status LiveStatus) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if slotIdx >= 0 && slotIdx < len(s.slots) && s.slots[slotIdx] != nil {
-		s.slots[slotIdx].liveStatus = status
-	}
 }

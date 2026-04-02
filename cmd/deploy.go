@@ -165,10 +165,32 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Agents: %d, Turns: %d, Budget: $%.2f/task, Total: $%.2f\n",
 		flagMaxAgents, flagMaxTurns, flagBudget, flagTotalBudget)
 
+	// Prepare: fetch issues, create jobs, build dep graph (needed for both paths).
+	if len(issues) > 0 {
+		ghToken := os.Getenv("GITHUB_TOKEN")
+		completer := claudecli.NewCLICompleter()
+		fmt.Println("Preparing...")
+		result, err := supervisor.Prepare(context.Background(), store, completer, deploy, issues, ghToken)
+		if err != nil {
+			_ = store.Close()
+			return fmt.Errorf("prepare: %w", err)
+		}
+		fmt.Printf("  Jobs: %d\n", result.Total)
+		fmt.Printf("  Agent def: %s\n", result.AgentDef.Description())
+
+		if len(result.Options) > 0 {
+			opt := result.Options[0]
+			fmt.Printf("  Dep graph: %s (%d unblocked)\n", opt.Name, opt.Unblocked)
+			if err := supervisor.ApplyDepOption(store, deploy, opt); err != nil {
+				_ = store.Close()
+				return fmt.Errorf("apply dep graph: %w", err)
+			}
+		}
+	}
+
 	if flagForeground || flagServe == "" {
-		// Run in foreground.
 		_ = store.Close()
-		return runForeground(deployID, issues)
+		return runForeground(deployID)
 	}
 
 	// Daemonize: re-exec with --daemon flag.
@@ -214,7 +236,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 }
 
 // runForeground runs the supervisor in the current process.
-func runForeground(deployID string, issues []int) error {
+// Prepare() has already been called — jobs exist in the DB.
+func runForeground(deployID string) error {
 	conn, err := db.Open(db.DefaultDBPath())
 	if err != nil {
 		return err
@@ -228,26 +251,6 @@ func runForeground(deployID string, issues []int) error {
 	}
 
 	ghToken := os.Getenv("GITHUB_TOKEN")
-	completer := claudecli.NewCLICompleter()
-
-	// Prepare: fetch issues, create tasks, build dep graph.
-	fmt.Println("Preparing...")
-	result, err := supervisor.Prepare(context.Background(), store, completer, deploy, issues, ghToken)
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
-	}
-
-	fmt.Printf("  Tasks: %d\n", result.Total)
-	fmt.Printf("  Agent def: %s\n", result.AgentDef.Description())
-
-	// If there are dep graph options, auto-select the first (most conservative).
-	if len(result.Options) > 0 {
-		opt := result.Options[0]
-		fmt.Printf("  Dep graph: %s (%d unblocked)\n", opt.Name, opt.Unblocked)
-		if err := supervisor.ApplyDepOption(store, deploy, opt); err != nil {
-			return fmt.Errorf("apply dep graph: %w", err)
-		}
-	}
 
 	// Create and launch supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
@@ -317,7 +320,7 @@ func runDaemon(deployID string) error {
 	if daemon.WasCrashShutdown(deployID) {
 		recovered, _ := daemon.RecoverDaemonState(store, deployID)
 		if recovered > 0 {
-			fmt.Printf("Recovered %d stale running tasks\n", recovered)
+			fmt.Printf("Recovered %d stale running jobs\n", recovered)
 		}
 	}
 
@@ -329,27 +332,21 @@ func runDaemon(deployID string) error {
 	ghToken := os.Getenv("GITHUB_TOKEN")
 	completer := claudecli.NewCLICompleter()
 
-	// Check if tasks already exist (daemon restart).
-	tasks, _ := store.GetTasks(deployID)
-	if len(tasks) == 0 {
-		// Fresh deploy — need to parse issues from... they're already in the DB from the parent process.
-		// Actually, the parent only created the deployment record. We need to prepare.
-		// But we don't have the issue list here. Let's check if this is watch mode.
+	// Check if jobs already exist (daemon restart).
+	jobs, _ := store.GetJobs(deployID)
+	if len(jobs) == 0 {
 		if deploy.Mode == "watch" {
 			// Watch mode — supervisor will discover issues.
 		} else {
-			fmt.Println("Warning: no tasks found and not in watch mode")
+			fmt.Println("Warning: no jobs found and not in watch mode")
 		}
 	}
 
-	// Create supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
 	sup.SetDaemonMode(deploy.Mode == "watch")
 
-	// If we have no tasks yet and issues were specified, prepare them.
-	if len(tasks) == 0 && deploy.Mode == "issues" {
-		// The parent process should have created tasks. If not, check completed preparation.
-		fmt.Println("Note: daemon started but no tasks found. Waiting for watch events or manual task creation.")
+	if len(jobs) == 0 && deploy.Mode == "issues" {
+		fmt.Println("Note: daemon started but no jobs found. Waiting for watch events or manual job creation.")
 	}
 
 	// Handle signals.
@@ -376,17 +373,15 @@ func runDaemon(deployID string) error {
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 	}
 
-	// Prepare if we have no tasks (fresh daemon with issues mode).
-	existingTasks, _ := store.GetTasks(deployID)
-	if len(existingTasks) == 0 && deploy.Mode != "watch" {
-		// This shouldn't happen in normal flow — parent creates tasks.
-		// But handle gracefully.
-		fmt.Println("No tasks to run. Exiting.")
+	// Check if we have jobs to run.
+	existingJobs, _ := store.GetJobs(deployID)
+	if len(existingJobs) == 0 && deploy.Mode != "watch" {
+		fmt.Println("No jobs to run. Exiting.")
 		return nil
 	}
 
 	// Auto-select dep graph if needed and not already set.
-	if _, err := store.GetDepGraph(deployID); err != nil && len(existingTasks) > 1 {
+	if _, err := store.GetDepGraph(deployID); err != nil && len(existingJobs) > 1 {
 		options, err := supervisor.BuildDepOptionsFromStore(ctx, completer, store, deploy)
 		if err == nil && len(options) > 0 {
 			_ = supervisor.ApplyDepOption(store, deploy, options[0])

@@ -575,6 +575,56 @@ func (c *Client) IsPRMerged(ctx context.Context, owner, repo string, number int)
 	return merged, nil
 }
 
+// EnableAutoMerge enables GitHub's auto-merge on a PR so it merges when CI passes.
+// Falls back to immediate merge if auto-merge is not available (e.g., not enabled on repo).
+func (c *Client) EnableAutoMerge(ctx context.Context, owner, repo string, number int, method string) error {
+	// Get the PR's node ID for the GraphQL mutation.
+	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, number)
+	if err != nil {
+		return fmt.Errorf("get PR #%d: %w", number, err)
+	}
+
+	nodeID := pr.GetNodeID()
+	if nodeID == "" {
+		return c.MergePR(ctx, owner, repo, number, method, "")
+	}
+
+	mergeMethod := "MERGE"
+	switch strings.ToLower(method) {
+	case "squash":
+		mergeMethod = "SQUASH"
+	case "rebase":
+		mergeMethod = "REBASE"
+	}
+
+	// Use raw GraphQL request via go-github's underlying HTTP client.
+	query := fmt.Sprintf(`mutation {
+		enablePullRequestAutoMerge(input: {pullRequestId: %q, mergeMethod: %s}) {
+			clientMutationId
+		}
+	}`, nodeID, mergeMethod)
+
+	body := struct {
+		Query string `json:"query"`
+	}{Query: query}
+
+	req, err := c.gh.NewRequest("POST", "graphql", body)
+	if err != nil {
+		return c.MergePR(ctx, owner, repo, number, method, "")
+	}
+
+	_, err = c.gh.Do(ctx, req, nil)
+	if err != nil {
+		// Auto-merge may not be enabled on the repo — fall back to immediate merge.
+		if strings.Contains(err.Error(), "auto-merge") || strings.Contains(err.Error(), "not allowed") || strings.Contains(err.Error(), "405") {
+			return c.MergePR(ctx, owner, repo, number, method, "")
+		}
+		return fmt.Errorf("enable auto-merge PR #%d: %w", number, err)
+	}
+
+	return nil
+}
+
 // FindMilestoneNumber looks up a milestone by name and returns its number.
 func (c *Client) FindMilestoneNumber(ctx context.Context, owner, repo, name string) (int, error) {
 	milestones, _, err := c.gh.Issues.ListMilestones(ctx, owner, repo, &github.MilestoneListOptions{

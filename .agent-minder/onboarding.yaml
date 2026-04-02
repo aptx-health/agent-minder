@@ -1,0 +1,75 @@
+version: 1
+scanned_at: 2026-03-19T18:35:10.614677Z
+inventory:
+    languages:
+        - go
+    package_managers:
+        - go-modules
+    build_files:
+        - go.mod
+    ci:
+        - github-actions
+    tooling:
+        secrets: doppler
+        process: ""
+        containers: ""
+        env: []
+    existing_claude_config:
+        settings_json: false
+        agent_def: true
+        claude_md: true
+context:
+    build_command: go build ./...
+    test_command: go test ./...
+    lint_command: golangci-lint run ./...
+    special_instructions: |
+        Go 1.25+ required (bubbletea v2). Pre-commit hooks via lefthook run gofmt, go build, and golangci-lint.
+        Commit messages must include issue reference (Fixes #N or #N).
+        Anthropic SDK: use TextBlockParam{Text: "..."} for system prompts (NOT NewTextBlock()).
+        DB migrations go in internal/db/schema.go with version increment.
+        TUI interactions must follow TUI-UX-GUIDE.md conventions.
+    tools_needed:
+        - Bash
+        - Read
+        - Edit
+        - Write
+        - Glob
+        - Grep
+permissions:
+    allowed_tools:
+        - "Bash(go test *)"
+        - "Bash(go build *)"
+        - "Bash(go vet *)"
+        - "Bash(go get *)"
+        - "Bash(go doc *)"
+        - "Bash(go env *)"
+        - "Bash(gh issue *)"
+        - "Bash(gh pr *)"
+        - "Bash(gh api *)"
+        - "Bash(git add *)"
+        - "Bash(git commit *)"
+        - "Bash(git checkout *)"
+        - "Bash(git log *)"
+        - "Bash(git diff *)"
+        - "Bash(git status *)"
+        - "Bash(git branch *)"
+        - "Bash(git show *)"
+        - "Bash(git remote *)"
+        - "Bash(git fetch *)"
+        - "Bash(git push *)"
+        - "Bash(git pull *)"
+        - "Bash(git rebase *)"
+        - "Bash(git worktree *)"
+        - "Bash(git stash *)"
+        - "Bash(git merge *)"
+        - "Bash(ls *)"
+        - "Bash(mkdir *)"
+        - "Bash(fd *)"
+        - "Bash(wc *)"
+        - "Bash(which *)"
+        - "Bash(golangci-lint *)"
+        - "Bash(gofmt *)"
+        - "Bash(lefthook run pre-commit)"
+validation:
+    status: untested
+    failures: []

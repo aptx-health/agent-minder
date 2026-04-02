@@ -75,27 +75,27 @@ func (c *Client) GetStatus() (*StatusResponse, error) {
 	return &resp, nil
 }
 
-// GetTasks fetches all tasks.
-func (c *Client) GetTasks() ([]TaskResponse, error) {
-	var resp []TaskResponse
-	if err := c.getJSON("/tasks", &resp); err != nil {
+// GetJobs fetches all jobs.
+func (c *Client) GetJobs() ([]JobResponse, error) {
+	var resp []JobResponse
+	if err := c.getJSON("/jobs", &resp); err != nil {
 		return nil, err
 	}
 	return resp, nil
 }
 
-// GetTask fetches a single task.
-func (c *Client) GetTask(id int64) (*TaskResponse, error) {
-	var resp TaskResponse
-	if err := c.getJSON(fmt.Sprintf("/tasks/%d", id), &resp); err != nil {
+// GetJob fetches a single job.
+func (c *Client) GetJob(id int64) (*JobResponse, error) {
+	var resp JobResponse
+	if err := c.getJSON(fmt.Sprintf("/jobs/%d", id), &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-// GetTaskLog fetches the log content for a task.
-func (c *Client) GetTaskLog(id int64) (string, error) {
-	resp, err := c.do("GET", fmt.Sprintf("/tasks/%d/log", id))
+// GetJobLog fetches the log content for a job.
+func (c *Client) GetJobLog(id int64) (string, error) {
+	resp, err := c.do("GET", fmt.Sprintf("/jobs/%d/log", id))
 	if err != nil {
 		return "", err
 	}

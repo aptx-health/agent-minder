@@ -234,14 +234,14 @@ func detectTestCommand(repoDir string) string {
 	return ""
 }
 
-// relatedWork holds dep graph and sibling task context.
+// relatedWork holds dep graph and sibling job context.
 type relatedWork struct {
-	depGraph     string
-	siblingTasks []*db.Task
+	depGraph    string
+	siblingJobs []*db.Job
 }
 
 // renderRelatedWork formats dependency and sibling context as markdown.
-func renderRelatedWork(task *db.Task, rw *relatedWork) string {
+func renderRelatedWork(job *db.Job, rw *relatedWork) string {
 	if rw == nil {
 		return ""
 	}
@@ -254,15 +254,15 @@ func renderRelatedWork(task *db.Task, rw *relatedWork) string {
 		b.WriteString("\n```\n\n")
 	}
 
-	if len(rw.siblingTasks) > 0 {
-		b.WriteString("## Related Tasks\n\n")
+	if len(rw.siblingJobs) > 0 {
+		b.WriteString("## Related Jobs\n\n")
 		b.WriteString("| Issue | Title | Status |\n")
 		b.WriteString("|-------|-------|--------|\n")
-		for _, t := range rw.siblingTasks {
-			if t.ID == task.ID {
+		for _, j := range rw.siblingJobs {
+			if j.ID == job.ID {
 				continue
 			}
-			fmt.Fprintf(&b, "| #%d | %s | %s |\n", t.IssueNumber, t.IssueTitle.String, t.Status)
+			fmt.Fprintf(&b, "| #%d | %s | %s |\n", j.IssueNumber, j.IssueTitle.String, j.Status)
 		}
 		b.WriteString("\n")
 	}
@@ -271,16 +271,16 @@ func renderRelatedWork(task *db.Task, rw *relatedWork) string {
 }
 
 // renderTaskContext builds the user prompt with task-specific context.
-func renderTaskContext(task *db.Task, deploy *db.Deployment, baseBranch, testCommand string, rw *relatedWork, issueComments string) string {
+func renderTaskContext(job *db.Job, deploy *db.Deployment, baseBranch, testCommand string, rw *relatedWork, issueComments string) string {
 	var b strings.Builder
 	owner, repo := deploy.Owner, deploy.Repo
 
 	fmt.Fprintf(&b, "## Task Context\n\n")
-	fmt.Fprintf(&b, "**Issue:** #%d — %s\n", task.IssueNumber, task.IssueTitle.String)
+	fmt.Fprintf(&b, "**Issue:** #%d — %s\n", job.IssueNumber, job.IssueTitle.String)
 	fmt.Fprintf(&b, "**Repository:** %s/%s\n\n", owner, repo)
 
-	if task.IssueBody.Valid && task.IssueBody.String != "" {
-		b.WriteString(task.IssueBody.String)
+	if job.IssueBody.Valid && job.IssueBody.String != "" {
+		b.WriteString(job.IssueBody.String)
 		b.WriteString("\n\n")
 	}
 
@@ -290,22 +290,22 @@ func renderTaskContext(task *db.Task, deploy *db.Deployment, baseBranch, testCom
 		b.WriteString("\n\n")
 	}
 
-	fmt.Fprintf(&b, "**Worktree:** %s\n", task.WorktreePath.String)
-	fmt.Fprintf(&b, "**Branch:** %s (already checked out)\n", task.Branch.String)
+	fmt.Fprintf(&b, "**Worktree:** %s\n", job.WorktreePath.String)
+	fmt.Fprintf(&b, "**Branch:** %s (already checked out)\n", job.Branch.String)
 	fmt.Fprintf(&b, "**Base branch:** %s\n\n", baseBranch)
 
 	if testCommand != "" {
 		fmt.Fprintf(&b, "## Test command\n\nRun tests: `%s`\n\n", testCommand)
 	}
 
-	if related := renderRelatedWork(task, rw); related != "" {
+	if related := renderRelatedWork(job, rw); related != "" {
 		b.WriteString(related)
 	}
 
 	fmt.Fprintf(&b, "## Commands for this task\n\n")
-	fmt.Fprintf(&b, "Label in-progress: gh issue edit %d --add-label \"in-progress\" -R %s/%s\n", task.IssueNumber, owner, repo)
-	fmt.Fprintf(&b, "Post starting comment: gh issue comment %d --body \"Agent starting work on this issue\" -R %s/%s\n", task.IssueNumber, owner, repo)
-	fmt.Fprintf(&b, "Commit message must include: Fixes #%d\n", task.IssueNumber)
+	fmt.Fprintf(&b, "Label in-progress: gh issue edit %d --add-label \"in-progress\" -R %s/%s\n", job.IssueNumber, owner, repo)
+	fmt.Fprintf(&b, "Post starting comment: gh issue comment %d --body \"Agent starting work on this issue\" -R %s/%s\n", job.IssueNumber, owner, repo)
+	fmt.Fprintf(&b, "Commit message must include: Fixes #%d\n", job.IssueNumber)
 	fmt.Fprintf(&b, "Rebase before push:\n")
 	fmt.Fprintf(&b, "  git fetch origin %s\n", baseBranch)
 	fmt.Fprintf(&b, "  git rebase origin/%s\n", baseBranch)
@@ -314,41 +314,22 @@ func renderTaskContext(task *db.Task, deploy *db.Deployment, baseBranch, testCom
 	return b.String()
 }
 
-// renderResumeTaskContext builds a continuation prompt for resuming work.
-func renderResumeTaskContext(task *db.Task, deploy *db.Deployment, baseBranch, testCommand string, rw *relatedWork, issueComments string) string {
-	var b strings.Builder
-
-	fmt.Fprintf(&b, "## Resuming Previous Work\n\n")
-	fmt.Fprintf(&b, "You are resuming work on issue #%d in an existing worktree.\n", task.IssueNumber)
-	if task.FailureReason.Valid && task.FailureReason.String != "" {
-		fmt.Fprintf(&b, "Previous attempt ended due to: **%s**", task.FailureReason.String)
-		if task.FailureDetail.Valid && task.FailureDetail.String != "" {
-			fmt.Fprintf(&b, " (%s)", task.FailureDetail.String)
-		}
-		b.WriteString(".\n")
-	}
-	b.WriteString("\nReview prior work, continue from where it left off, and open a PR when ready.\n\n")
-	b.WriteString(renderTaskContext(task, deploy, baseBranch, testCommand, rw, issueComments))
-
-	return b.String()
-}
-
 // renderReviewTaskContext builds a review-specific prompt.
-func renderReviewTaskContext(task *db.Task, deploy *db.Deployment, baseBranch, testCommand string, rw *relatedWork, issueComments string) string {
+func renderReviewTaskContext(job *db.Job, deploy *db.Deployment, baseBranch, testCommand string, rw *relatedWork, issueComments string) string {
 	var b strings.Builder
 	owner, repo := deploy.Owner, deploy.Repo
 
 	fmt.Fprintf(&b, "## Review Context\n\n")
-	fmt.Fprintf(&b, "**PR:** #%d\n", task.PRNumber.Int64)
-	fmt.Fprintf(&b, "**Issue:** #%d — %s\n", task.IssueNumber, task.IssueTitle.String)
+	fmt.Fprintf(&b, "**PR:** #%d\n", job.PRNumber.Int64)
+	fmt.Fprintf(&b, "**Issue:** #%d — %s\n", job.IssueNumber, job.IssueTitle.String)
 	fmt.Fprintf(&b, "**Repository:** %s/%s\n", owner, repo)
-	fmt.Fprintf(&b, "**Branch:** %s\n", task.Branch.String)
+	fmt.Fprintf(&b, "**Branch:** %s\n", job.Branch.String)
 	fmt.Fprintf(&b, "**Base branch:** %s\n", baseBranch)
-	fmt.Fprintf(&b, "**Worktree:** %s\n\n", task.WorktreePath.String)
+	fmt.Fprintf(&b, "**Worktree:** %s\n\n", job.WorktreePath.String)
 
-	if task.IssueBody.Valid && task.IssueBody.String != "" {
+	if job.IssueBody.Valid && job.IssueBody.String != "" {
 		b.WriteString("## Issue Description\n\n")
-		b.WriteString(task.IssueBody.String)
+		b.WriteString(job.IssueBody.String)
 		b.WriteString("\n\n")
 	}
 
@@ -363,13 +344,13 @@ func renderReviewTaskContext(task *db.Task, deploy *db.Deployment, baseBranch, t
 		b.WriteString("**IMPORTANT:** You MUST run this test command after making any fixes.\n\n")
 	}
 
-	if related := renderRelatedWork(task, rw); related != "" {
+	if related := renderRelatedWork(job, rw); related != "" {
 		b.WriteString(related)
 	}
 
 	fmt.Fprintf(&b, "## Commands for this review\n\n")
-	fmt.Fprintf(&b, "View PR diff: gh pr diff %d -R %s/%s\n", task.PRNumber.Int64, owner, repo)
-	fmt.Fprintf(&b, "View PR: gh pr view %d -R %s/%s\n", task.PRNumber.Int64, owner, repo)
+	fmt.Fprintf(&b, "View PR diff: gh pr diff %d -R %s/%s\n", job.PRNumber.Int64, owner, repo)
+	fmt.Fprintf(&b, "View PR: gh pr view %d -R %s/%s\n", job.PRNumber.Int64, owner, repo)
 	fmt.Fprintf(&b, "Rebase before push:\n")
 	fmt.Fprintf(&b, "  git fetch origin %s\n", baseBranch)
 	fmt.Fprintf(&b, "  git rebase origin/%s\n", baseBranch)
@@ -378,36 +359,16 @@ func renderReviewTaskContext(task *db.Task, deploy *db.Deployment, baseBranch, t
 }
 
 // buildClaudeArgs constructs CLI arguments for a fresh agent run.
-func buildClaudeArgs(task *db.Task, deploy *db.Deployment, baseBranch, testCommand string, allowedTools []string, rw *relatedWork, issueComments, lessonsPrompt string) []string {
-	prompt := renderTaskContext(task, deploy, baseBranch, testCommand, rw, issueComments)
+func buildClaudeArgs(job *db.Job, deploy *db.Deployment, baseBranch, testCommand string, allowedTools []string, rw *relatedWork, issueComments, lessonsPrompt string) []string {
+	prompt := renderTaskContext(job, deploy, baseBranch, testCommand, rw, issueComments)
 	args := []string{
 		"--agent", "autopilot",
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--max-turns", strconv.Itoa(task.EffectiveMaxTurns(deploy)),
-		"--max-budget-usd", fmt.Sprintf("%.2f", task.EffectiveMaxBudget(deploy)),
+		"--max-turns", strconv.Itoa(job.EffectiveMaxTurns(deploy)),
+		"--max-budget-usd", fmt.Sprintf("%.2f", job.EffectiveMaxBudget(deploy)),
 		"--allowedTools", toCliAllowedTools(allowedTools),
-	}
-	if lessonsPrompt != "" {
-		args = append(args, "--append-system-prompt", lessonsPrompt)
-	}
-	args = append(args, "--", prompt)
-	return args
-}
-
-// buildResumeClaudeArgs constructs CLI arguments for resuming an agent.
-func buildResumeClaudeArgs(task *db.Task, deploy *db.Deployment, baseBranch, testCommand string, allowedTools []string, rw *relatedWork, issueComments, lessonsPrompt string) []string {
-	prompt := renderResumeTaskContext(task, deploy, baseBranch, testCommand, rw, issueComments)
-	args := []string{
-		"--agent", "autopilot",
-		"-p",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--max-turns", strconv.Itoa(task.EffectiveMaxTurns(deploy)),
-		"--max-budget-usd", fmt.Sprintf("%.2f", task.EffectiveMaxBudget(deploy)),
-		"--allowedTools", toCliAllowedTools(allowedTools),
-		"--resume",
 	}
 	if lessonsPrompt != "" {
 		args = append(args, "--append-system-prompt", lessonsPrompt)
@@ -417,8 +378,8 @@ func buildResumeClaudeArgs(task *db.Task, deploy *db.Deployment, baseBranch, tes
 }
 
 // buildReviewClaudeArgs constructs CLI arguments for the review agent.
-func buildReviewClaudeArgs(task *db.Task, deploy *db.Deployment, baseBranch, testCommand string, allowedTools []string, rw *relatedWork, issueComments string) []string {
-	prompt := renderReviewTaskContext(task, deploy, baseBranch, testCommand, rw, issueComments)
+func buildReviewClaudeArgs(job *db.Job, deploy *db.Deployment, baseBranch, testCommand string, allowedTools []string, rw *relatedWork, issueComments string) []string {
+	prompt := renderReviewTaskContext(job, deploy, baseBranch, testCommand, rw, issueComments)
 	maxTurns := deploy.MaxTurns
 	maxBudget := deploy.MaxBudgetUSD
 	if deploy.ReviewMaxTurns.Valid {

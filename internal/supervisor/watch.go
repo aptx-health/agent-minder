@@ -68,11 +68,11 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 
 	issues := searchResult.Items
 
-	// Get existing tasks to find new issues.
-	existing, _ := s.store.GetTasks(s.deploy.ID)
+	// Get existing jobs to find new issues.
+	existing, _ := s.store.GetJobs(s.deploy.ID)
 	knownIssues := make(map[int]bool)
-	for _, t := range existing {
-		knownIssues[t.IssueNumber] = true
+	for _, j := range existing {
+		knownIssues[j.IssueNumber] = true
 	}
 
 	// Check skip label.
@@ -97,8 +97,10 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 			body = content.Body
 		}
 
-		t := &db.Task{
+		j := &db.Job{
 			DeploymentID: s.deploy.ID,
+			Agent:        "autopilot",
+			Name:         fmt.Sprintf("issue-%d", issue.Number),
 			IssueNumber:  issue.Number,
 			IssueTitle:   sql.NullString{String: issue.Title, Valid: true},
 			IssueBody:    sql.NullString{String: body, Valid: body != ""},
@@ -107,12 +109,12 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 			Status:       db.StatusQueued,
 		}
 
-		if err := s.store.CreateTask(t); err != nil {
+		if err := s.store.CreateJob(j); err != nil {
 			continue
 		}
 
 		discovered++
-		s.emitEvent("info", fmt.Sprintf("Discovered #%d: %s", issue.Number, issue.Title), t.ID)
+		s.emitEvent("info", fmt.Sprintf("Discovered #%d: %s", issue.Number, issue.Title), j.ID)
 	}
 
 	return discovered
@@ -155,7 +157,7 @@ func (s *Supervisor) EnableWatch(filter string) error {
 func (s *Supervisor) WatchTick(ctx context.Context) int {
 	discovered := s.watchPoll(ctx)
 	if discovered > 0 {
-		s.fillSlots(ctx)
+		s.fillCapacity(ctx)
 	}
 	return discovered
 }

@@ -93,22 +93,24 @@ func TestHandleTasks(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 
-	var empty []TaskResponse
+	var empty []JobResponse
 	if err := json.NewDecoder(rr.Body).Decode(&empty); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 
 	// Add a task.
-	task := &db.Task{
+	task := &db.Job{
 		DeploymentID: "test-deploy",
+		Agent:        "autopilot",
+		Name:         "issue-42",
 		IssueNumber:  42,
 		IssueTitle:   sql.NullString{String: "Fix auth", Valid: true},
 		Owner:        "acme",
 		Repo:         "widgets",
 		Status:       db.StatusQueued,
 	}
-	if err := store.CreateTask(task); err != nil {
-		t.Fatalf("CreateTask: %v", err)
+	if err := store.CreateJob(task); err != nil {
+		t.Fatalf("CreateJob: %v", err)
 	}
 
 	rr = doRequest(t, srv, "GET", "/tasks")
@@ -116,28 +118,28 @@ func TestHandleTasks(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 
-	var tasks []TaskResponse
-	if err := json.NewDecoder(rr.Body).Decode(&tasks); err != nil {
+	var jobs []JobResponse
+	if err := json.NewDecoder(rr.Body).Decode(&jobs); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(tasks) != 1 {
-		t.Fatalf("got %d tasks, want 1", len(tasks))
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
 	}
-	if tasks[0].IssueNumber != 42 {
-		t.Errorf("issue_number = %d, want 42", tasks[0].IssueNumber)
+	if jobs[0].IssueNumber != 42 {
+		t.Errorf("issue_number = %d, want 42", jobs[0].IssueNumber)
 	}
-	if tasks[0].Status != "queued" {
-		t.Errorf("status = %q, want %q", tasks[0].Status, "queued")
+	if jobs[0].Status != "queued" {
+		t.Errorf("status = %q, want %q", jobs[0].Status, "queued")
 	}
-	if tasks[0].IssueTitle != "Fix auth" {
-		t.Errorf("issue_title = %q, want %q", tasks[0].IssueTitle, "Fix auth")
+	if jobs[0].IssueTitle != "Fix auth" {
+		t.Errorf("issue_title = %q, want %q", jobs[0].IssueTitle, "Fix auth")
 	}
 }
 
 func TestHandleTaskByID(t *testing.T) {
 	srv, store := testServer(t)
 
-	task := &db.Task{
+	task := &db.Job{
 		DeploymentID: "test-deploy",
 		IssueNumber:  99,
 		IssueTitle:   sql.NullString{String: "Add feature", Valid: true},
@@ -145,17 +147,17 @@ func TestHandleTaskByID(t *testing.T) {
 		Repo:         "widgets",
 		Status:       db.StatusQueued,
 	}
-	if err := store.CreateTask(task); err != nil {
-		t.Fatalf("CreateTask: %v", err)
+	if err := store.CreateJob(task); err != nil {
+		t.Fatalf("CreateJob: %v", err)
 	}
 
 	// Valid task.
-	rr := doRequest(t, srv, "GET", "/tasks/1")
+	rr := doRequest(t, srv, "GET", "/jobs/1")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
 
-	var resp TaskResponse
+	var resp JobResponse
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -167,13 +169,13 @@ func TestHandleTaskByID(t *testing.T) {
 	}
 
 	// Non-existent task → 404.
-	rr = doRequest(t, srv, "GET", "/tasks/9999")
+	rr = doRequest(t, srv, "GET", "/jobs/9999")
 	if rr.Code != http.StatusNotFound {
-		t.Errorf("expected 404 for missing task, got %d", rr.Code)
+		t.Errorf("expected 404 for missing job, got %d", rr.Code)
 	}
 
 	// Invalid ID → 400.
-	rr = doRequest(t, srv, "GET", "/tasks/abc")
+	rr = doRequest(t, srv, "GET", "/jobs/abc")
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid id, got %d", rr.Code)
 	}
@@ -244,41 +246,41 @@ func TestHandleLessons(t *testing.T) {
 	}
 }
 
-func TestHandleTaskLog(t *testing.T) {
+func TestHandleJobLog(t *testing.T) {
 	srv, store := testServer(t)
 
 	// Invalid ID → 400.
-	rr := doRequest(t, srv, "GET", "/tasks/abc/log")
+	rr := doRequest(t, srv, "GET", "/jobs/abc/log")
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for invalid id, got %d", rr.Code)
 	}
 
-	// Non-existent task → 404 with task_not_found.
-	rr = doRequest(t, srv, "GET", "/tasks/9999/log")
+	// Non-existent task → 404 with job_not_found.
+	rr = doRequest(t, srv, "GET", "/jobs/9999/log")
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for missing task, got %d", rr.Code)
+		t.Fatalf("expected 404 for missing job, got %d", rr.Code)
 	}
 	var errResp map[string]string
 	if err := json.NewDecoder(rr.Body).Decode(&errResp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if errResp["error"] != "task_not_found" {
-		t.Errorf("error = %q, want %q", errResp["error"], "task_not_found")
+	if errResp["error"] != "job_not_found" {
+		t.Errorf("error = %q, want %q", errResp["error"], "job_not_found")
 	}
 
-	// Task exists but has no log → 404 with log_not_found.
-	task := &db.Task{
+	// Job exists but has no log → 404 with log_not_found.
+	task := &db.Job{
 		DeploymentID: "test-deploy",
 		IssueNumber:  50,
 		Owner:        "acme",
 		Repo:         "widgets",
 		Status:       db.StatusQueued,
 	}
-	if err := store.CreateTask(task); err != nil {
-		t.Fatalf("CreateTask: %v", err)
+	if err := store.CreateJob(task); err != nil {
+		t.Fatalf("CreateJob: %v", err)
 	}
 
-	rr = doRequest(t, srv, "GET", fmt.Sprintf("/tasks/%d/log", task.ID))
+	rr = doRequest(t, srv, "GET", fmt.Sprintf("/jobs/%d/log", task.ID))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing log, got %d", rr.Code)
 	}
@@ -295,11 +297,11 @@ func TestHandleTaskLog(t *testing.T) {
 	if err := os.WriteFile(logFile, []byte("line1\nline2\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	if _, err := store.DB().Exec("UPDATE tasks SET agent_log = ? WHERE id = ?", logFile, task.ID); err != nil {
+	if _, err := store.DB().Exec("UPDATE jobs SET agent_log = ? WHERE id = ?", logFile, task.ID); err != nil {
 		t.Fatalf("set agent_log: %v", err)
 	}
 
-	rr = doRequest(t, srv, "GET", fmt.Sprintf("/tasks/%d/log", task.ID))
+	rr = doRequest(t, srv, "GET", fmt.Sprintf("/jobs/%d/log", task.ID))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
@@ -309,11 +311,11 @@ func TestHandleTaskLog(t *testing.T) {
 	}
 
 	// Task with log path set but file missing → 404 with log_not_found.
-	if _, err := store.DB().Exec("UPDATE tasks SET agent_log = ? WHERE id = ?", "/nonexistent/agent.log", task.ID); err != nil {
+	if _, err := store.DB().Exec("UPDATE jobs SET agent_log = ? WHERE id = ?", "/nonexistent/agent.log", task.ID); err != nil {
 		t.Fatalf("set agent_log: %v", err)
 	}
 
-	rr = doRequest(t, srv, "GET", fmt.Sprintf("/tasks/%d/log", task.ID))
+	rr = doRequest(t, srv, "GET", fmt.Sprintf("/jobs/%d/log", task.ID))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing log file, got %d", rr.Code)
 	}
