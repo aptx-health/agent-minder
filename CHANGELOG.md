@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Daemon PID and heartbeat lifecycle tests**: Comprehensive unit tests for WritePID/RemovePID, WriteHeartbeat/ReadHeartbeat round-trip, WasCrashShutdown with stale/recent/missing heartbeats, IsRunning with current/dead/invalid PIDs, CleanStalePID, and StartHeartbeat goroutine lifecycle (#391)
 - **JSON output for status command**: `minder status <deploy-id> --json` outputs structured JSON for scripting and piping into `jq`. Works in both local and remote modes. (#377)
 - **Daemon API server tests**: httptest-based unit tests for all daemon HTTP API endpoints — status, tasks, dep-graph, lessons, stop, resume, and API key middleware (#379)
 - **Deployment guide + service units**: Complete deployment documentation for running agent-minder watch mode on Ubuntu VPS (systemd) and macOS (LaunchAgent). Includes service units, install scripts, environment templates, logrotate config, firewall/Tailscale guidance, and troubleshooting. New `--foreground` flag on `deploy` and `deploy watch` for process-manager-friendly execution (#287)
