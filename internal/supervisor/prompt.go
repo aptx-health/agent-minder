@@ -87,8 +87,11 @@ File count alone is NOT a reason to bail — a 20-file rename is simpler than a 
 ## If you cannot proceed — structured bail
 When you decide to bail, do the following in order:
 
-1. Post a comment on the issue summarizing what you learned and the implementation plan
-2. Add the "blocked" label and remove the "in-progress" label
+1. Write your bail report to a file, then post it as an issue comment:
+   - Write the report to /tmp/bail-report.md using the Write tool
+   - Post with: gh issue comment <number> --body-file /tmp/bail-report.md
+   - This avoids shell escaping issues with inline --body
+2. Update labels: gh issue edit <number> --add-label blocked --remove-label in-progress
 3. Commit any partial work you've done (even without a PR) so future attempts have context
 4. As your FINAL message, output a JSON block wrapped in <bail-report> tags (this MUST be
    in your last text response — the orchestrator parses it from your output):
