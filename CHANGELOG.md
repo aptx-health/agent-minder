@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
+- **Git log date parsing fallback**: `Log()`, `LogSince()`, and `LogGrep()` now use `time.Now()` as fallback when commit dates fail RFC3339 parsing, instead of silently producing zero-valued timestamps. Extracted shared `parseLogOutput()` helper to deduplicate parsing logic across all three functions. (#392)
 - **Replace custom lastIndex with strings.LastIndex**: Removed custom `lastIndex()` in review.go that reimplemented `strings.LastIndex()` and had a potential panic on short strings (#383)
 - **Daemon client HTTP status range check**: Accept all 2xx status codes (not just 200) in `getJSON()` and `post()` methods, so 201/204 responses are no longer treated as errors (#386)
 - **Watch filter value validation**: `ParseWatchFilter()` now rejects values containing invalid characters (e.g., semicolons, newlines, slashes). Added comprehensive test coverage for all parse paths. (#387)
