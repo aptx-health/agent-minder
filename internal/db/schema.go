@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -127,6 +127,21 @@ CREATE TABLE IF NOT EXISTS repo_onboarding (
 	validation_failures TEXT,
 	scanned_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS job_schedules (
+	name TEXT PRIMARY KEY,
+	deployment_id TEXT NOT NULL,
+	cron_expr TEXT,
+	trigger_expr TEXT,
+	agent TEXT NOT NULL,
+	description TEXT,
+	budget REAL,
+	max_turns INTEGER,
+	enabled INTEGER DEFAULT 1,
+	last_run_at DATETIME,
+	next_run_at DATETIME,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // migrateV1toV2 migrates a v1 database (tasks table) to v2 (jobs table).
@@ -159,6 +174,24 @@ ALTER TABLE job_lessons RENAME COLUMN task_id TO job_id;
 UPDATE schema_version SET version = 2;
 `
 
+const migrateV2toV3 = `
+CREATE TABLE IF NOT EXISTS job_schedules (
+	name TEXT PRIMARY KEY,
+	deployment_id TEXT NOT NULL,
+	cron_expr TEXT,
+	trigger_expr TEXT,
+	agent TEXT NOT NULL,
+	description TEXT,
+	budget REAL,
+	max_turns INTEGER,
+	enabled INTEGER DEFAULT 1,
+	last_run_at DATETIME,
+	next_run_at DATETIME,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+UPDATE schema_version SET version = 3;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -182,11 +215,19 @@ func Open(dsn string) (*sqlx.DB, error) {
 		hasVersion = true
 	}
 
-	if hasVersion && version == 1 {
-		// Migrate v1 → v2.
-		if _, err := db.Exec(migrateV1toV2); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("migrating v1→v2: %w", err)
+	if hasVersion && version < schemaVersion {
+		// Run migrations sequentially.
+		if version < 2 {
+			if _, err := db.Exec(migrateV1toV2); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v1→v2: %w", err)
+			}
+		}
+		if version < 3 {
+			if _, err := db.Exec(migrateV2toV3); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v2→v3: %w", err)
+			}
 		}
 	} else if !hasVersion {
 		// Fresh database — apply schema from scratch.
