@@ -249,6 +249,20 @@ func WorktreePrune(repoDir string) error {
 	return err
 }
 
+// WorktreeRemoveByBranch finds and removes any worktree that has the given branch checked out.
+func WorktreeRemoveByBranch(repoDir, branch string) error {
+	worktrees, err := Worktrees(repoDir)
+	if err != nil {
+		return err
+	}
+	for _, wt := range worktrees {
+		if wt.Branch == branch && !wt.IsMain {
+			_ = WorktreeRemove(repoDir, wt.Path)
+		}
+	}
+	return nil
+}
+
 // DeleteBranch deletes a local branch.
 func DeleteBranch(repoDir, branch string) error {
 	_, err := run(repoDir, "branch", "-D", branch)
