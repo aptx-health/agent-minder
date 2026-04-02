@@ -165,10 +165,32 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Agents: %d, Turns: %d, Budget: $%.2f/task, Total: $%.2f\n",
 		flagMaxAgents, flagMaxTurns, flagBudget, flagTotalBudget)
 
+	// Prepare: fetch issues, create jobs, build dep graph (needed for both paths).
+	if len(issues) > 0 {
+		ghToken := os.Getenv("GITHUB_TOKEN")
+		completer := claudecli.NewCLICompleter()
+		fmt.Println("Preparing...")
+		result, err := supervisor.Prepare(context.Background(), store, completer, deploy, issues, ghToken)
+		if err != nil {
+			_ = store.Close()
+			return fmt.Errorf("prepare: %w", err)
+		}
+		fmt.Printf("  Jobs: %d\n", result.Total)
+		fmt.Printf("  Agent def: %s\n", result.AgentDef.Description())
+
+		if len(result.Options) > 0 {
+			opt := result.Options[0]
+			fmt.Printf("  Dep graph: %s (%d unblocked)\n", opt.Name, opt.Unblocked)
+			if err := supervisor.ApplyDepOption(store, deploy, opt); err != nil {
+				_ = store.Close()
+				return fmt.Errorf("apply dep graph: %w", err)
+			}
+		}
+	}
+
 	if flagForeground || flagServe == "" {
-		// Run in foreground.
 		_ = store.Close()
-		return runForeground(deployID, issues)
+		return runForeground(deployID)
 	}
 
 	// Daemonize: re-exec with --daemon flag.
@@ -214,7 +236,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 }
 
 // runForeground runs the supervisor in the current process.
-func runForeground(deployID string, issues []int) error {
+// Prepare() has already been called — jobs exist in the DB.
+func runForeground(deployID string) error {
 	conn, err := db.Open(db.DefaultDBPath())
 	if err != nil {
 		return err
@@ -228,26 +251,6 @@ func runForeground(deployID string, issues []int) error {
 	}
 
 	ghToken := os.Getenv("GITHUB_TOKEN")
-	completer := claudecli.NewCLICompleter()
-
-	// Prepare: fetch issues, create tasks, build dep graph.
-	fmt.Println("Preparing...")
-	result, err := supervisor.Prepare(context.Background(), store, completer, deploy, issues, ghToken)
-	if err != nil {
-		return fmt.Errorf("prepare: %w", err)
-	}
-
-	fmt.Printf("  Jobs: %d\n", result.Total)
-	fmt.Printf("  Agent def: %s\n", result.AgentDef.Description())
-
-	// If there are dep graph options, auto-select the first (most conservative).
-	if len(result.Options) > 0 {
-		opt := result.Options[0]
-		fmt.Printf("  Dep graph: %s (%d unblocked)\n", opt.Name, opt.Unblocked)
-		if err := supervisor.ApplyDepOption(store, deploy, opt); err != nil {
-			return fmt.Errorf("apply dep graph: %w", err)
-		}
-	}
 
 	// Create and launch supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
