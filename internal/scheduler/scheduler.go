@@ -127,10 +127,16 @@ func (s *Scheduler) fireSchedule(sched *db.JobSchedule) {
 	// Generate unique job name: schedule-name-YYYYMMDD-HHMM
 	jobName := fmt.Sprintf("%s-%s", sched.Name, now.Format("20060102-1504"))
 
+	title := sched.Name
+	if sched.Description.Valid && sched.Description.String != "" {
+		title = sched.Description.String
+	}
+
 	job := &db.Job{
 		DeploymentID: s.deployID,
 		Agent:        sched.Agent,
 		Name:         jobName,
+		IssueTitle:   sql.NullString{String: title, Valid: true},
 		Owner:        s.owner,
 		Repo:         s.repo,
 		Status:       db.StatusQueued,

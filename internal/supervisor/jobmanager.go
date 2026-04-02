@@ -62,6 +62,14 @@ func (sc *SlotContext) EmitEvent(typ, summary string) {
 	sc.sup.emitEvent(typ, summary, sc.Job.ID)
 }
 
+// JobLabel returns a human-readable identifier: "#42" for reactive, "job-name" for proactive.
+func (sc *SlotContext) JobLabel() string {
+	if sc.Job.IssueNumber > 0 {
+		return fmt.Sprintf("#%d", sc.Job.IssueNumber)
+	}
+	return sc.Job.Name
+}
+
 // NewGHClient creates a GitHub client.
 func (sc *SlotContext) NewGHClient() *ghpkg.Client {
 	return sc.sup.newGHClient()
@@ -266,18 +274,18 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	job := sc.Job
 
 	// Stage 1: Code.
-	sc.EmitEvent("started", fmt.Sprintf("Agent started on #%d: %s", job.IssueNumber, job.IssueTitle.String))
+	sc.EmitEvent("started", fmt.Sprintf("Agent started on %s: %s", sc.JobLabel(), job.IssueTitle.String))
 	_ = sc.Store.UpdateJobStage(job.ID, "code", "")
 
 	if err := sc.SetupWorktree(); err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Worktree setup failed for #%d: %v", job.IssueNumber, err))
+		sc.EmitEvent("error", fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
 		_ = sc.Store.UpdateJobFailure(job.ID, "worktree", err.Error())
 		return err
 	}
 
 	agentDefSrc, err := sc.EnsureAgentDef(AgentAutopilot)
 	if err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Agent def error for #%d: %v", job.IssueNumber, err))
+		sc.EmitEvent("error", fmt.Sprintf("Agent def error for %s: %v", sc.JobLabel(), err))
 		_ = sc.Store.UpdateJobFailure(job.ID, "agent_def", err.Error())
 		return err
 	}
@@ -290,7 +298,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	// Open log.
 	logFile, err := sc.OpenLogFile(false)
 	if err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Log file error for #%d: %v", job.IssueNumber, err))
+		sc.EmitEvent("error", fmt.Sprintf("Log file error for %s: %v", sc.JobLabel(), err))
 		_ = sc.Store.UpdateJobFailure(job.ID, "log", err.Error())
 		return err
 	}
@@ -309,7 +317,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	// Check user-initiated stop.
 	if sc.WasStoppedByUser() {
 		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusStopped)
-		sc.EmitEvent("stopped", fmt.Sprintf("Agent stopped by user on #%d", job.IssueNumber))
+		sc.EmitEvent("stopped", fmt.Sprintf("Agent stopped by user on %s", sc.JobLabel()))
 		return nil
 	}
 
@@ -326,7 +334,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
 		_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
 		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReview)
-		sc.EmitEvent("completed", fmt.Sprintf("Agent completed #%d — PR #%d opened", job.IssueNumber, prNum))
+		sc.EmitEvent("completed", fmt.Sprintf("Agent completed %s — PR #%d opened", sc.JobLabel(), prNum))
 		sc.RecordLessonOutcome(true)
 
 		// Stage 2: Review (if enabled and contract has review stage).
@@ -345,7 +353,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	_, reason, detail := classifyOutcome(result, maxTurns, maxBudget)
 
 	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
-	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on #%d (exit %d)", job.IssueNumber, exitCode))
+	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s (exit %d)", sc.JobLabel(), exitCode))
 	sc.RecordLessonOutcome(false)
 
 	if runErr != nil {
@@ -377,7 +385,7 @@ func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *o
 		return
 	}
 
-	sc.EmitEvent("started", fmt.Sprintf("Review agent started on #%d (PR #%d)", job.IssueNumber, job.PRNumber.Int64))
+	sc.EmitEvent("started", fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64))
 	_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewing)
 
 	// Write separator in log.
@@ -401,7 +409,7 @@ func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *o
 	_ = sc.Store.UpdateJobReview(job.ID, risk, 0)
 	_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewed)
 
-	sc.EmitEvent("completed", fmt.Sprintf("Review of #%d complete (risk: %s)", job.IssueNumber, risk))
+	sc.EmitEvent("completed", fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk))
 	if assessment.Summary != "" {
 		sc.EmitEvent("info", fmt.Sprintf("Review: %s", assessment.Summary))
 	}
@@ -410,7 +418,7 @@ func (m *DefaultJobManager) runReviewStage(ctx context.Context, parentLogFile *o
 	if len(assessment.Lessons) > 0 {
 		captured := captureLessonsFromAssessment(sc.Store, sc.Owner, sc.Repo, assessment)
 		if len(captured) > 0 {
-			sc.EmitEvent("info", fmt.Sprintf("Captured %d lessons from review of #%d", len(captured), job.IssueNumber))
+			sc.EmitEvent("info", fmt.Sprintf("Captured %d lessons from review of %s", len(captured), sc.JobLabel()))
 		}
 	}
 
