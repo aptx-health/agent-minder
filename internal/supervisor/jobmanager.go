@@ -172,6 +172,9 @@ func (sc *SlotContext) DetectPR(ctx context.Context) int {
 
 // FetchIssueComments fetches issue comments from GitHub.
 func (sc *SlotContext) FetchIssueComments(ctx context.Context) string {
+	if sc.sup == nil {
+		return ""
+	}
 	ghClient := sc.NewGHClient()
 	content, err := ghClient.FetchItemContent(ctx, sc.Owner, sc.Repo, sc.Job.IssueNumber, "issue")
 	if err != nil {
