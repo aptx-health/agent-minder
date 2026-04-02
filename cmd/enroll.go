@@ -209,8 +209,11 @@ For each agent the user wants, install it using the Write tool:
   (e.g., for a Go project's dependency-updater, mention go.mod, go get -u, govulncheck)
 
 ### 4. Validate
-- Run validation to ensure the onboarding config is correct
-- Check that all agent definitions in .claude/agents/ are parseable
+- Validate by running: minder agents list --repo .
+  This uses the actual Go YAML parser that consumes the config and agent defs.
+  If minder is not on PATH, try: go run ./cmd/minder agents list --repo .
+  Do NOT use Python or Ruby YAML parsers — they have incompatibilities with Go's parser.
+- If validation fails, fix the issue and re-validate
 
 Be concise and efficient. Most repos need minimal configuration.`,
 		filePath, info.Path, info.Inventory.Languages, agentReport, templateRef.String())
