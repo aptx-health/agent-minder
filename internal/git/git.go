@@ -76,6 +76,36 @@ func CurrentBranch(dir string) (string, error) {
 	return run(dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+// parseLogOutput parses the pipe-delimited output from git log into LogEntry
+// slices. The expected format per line is "hash|subject|author|ISO-date".
+// If a date cannot be parsed, the current time is used as a fallback so that
+// entries are never silently assigned a zero-valued timestamp.
+func parseLogOutput(out string) []LogEntry {
+	if out == "" {
+		return nil
+	}
+
+	var entries []LogEntry
+	now := time.Now()
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		date, err := time.Parse(time.RFC3339, parts[3])
+		if err != nil {
+			date = now
+		}
+		entries = append(entries, LogEntry{
+			Hash:    parts[0],
+			Subject: parts[1],
+			Author:  parts[2],
+			Date:    date,
+		})
+	}
+	return entries
+}
+
 // Log returns the most recent n log entries.
 func Log(dir string, n int) ([]LogEntry, error) {
 	// Format: hash|subject|author|ISO date
@@ -84,25 +114,7 @@ func Log(dir string, n int) ([]LogEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if out == "" {
-		return nil, nil
-	}
-
-	var entries []LogEntry
-	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) < 4 {
-			continue
-		}
-		date, _ := time.Parse(time.RFC3339, parts[3])
-		entries = append(entries, LogEntry{
-			Hash:    parts[0],
-			Subject: parts[1],
-			Author:  parts[2],
-			Date:    date,
-		})
-	}
-	return entries, nil
+	return parseLogOutput(out), nil
 }
 
 // LogSince returns log entries since the given time.
@@ -112,25 +124,7 @@ func LogSince(dir string, since time.Time) ([]LogEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if out == "" {
-		return nil, nil
-	}
-
-	var entries []LogEntry
-	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) < 4 {
-			continue
-		}
-		date, _ := time.Parse(time.RFC3339, parts[3])
-		entries = append(entries, LogEntry{
-			Hash:    parts[0],
-			Subject: parts[1],
-			Author:  parts[2],
-			Date:    date,
-		})
-	}
-	return entries, nil
+	return parseLogOutput(out), nil
 }
 
 // Branches returns all branches (local and remote).
@@ -212,21 +206,7 @@ func LogGrep(dir string, pattern string) ([]LogEntry, error) {
 		return nil, nil
 	}
 
-	var entries []LogEntry
-	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "|", 4)
-		if len(parts) < 4 {
-			continue
-		}
-		date, _ := time.Parse(time.RFC3339, parts[3])
-		entries = append(entries, LogEntry{
-			Hash:    parts[0],
-			Subject: parts[1],
-			Author:  parts[2],
-			Date:    date,
-		})
-	}
-	return entries, nil
+	return parseLogOutput(out), nil
 }
 
 // Diff returns the diff between two refs (e.g., "main...feature/auth").
