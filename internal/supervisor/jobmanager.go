@@ -76,11 +76,18 @@ func (sc *SlotContext) NewGHClient() *ghpkg.Client {
 }
 
 // SetupWorktree creates a git worktree for this job.
+// Cleans up any stale worktree/branch from a previous run first.
 // Safe to call concurrently — uses the supervisor's gitSetupMu.
 func (sc *SlotContext) SetupWorktree() error {
 	_ = os.MkdirAll(filepath.Dir(sc.WorktreePath), 0755)
 
 	sc.sup.gitSetupMu.Lock()
+	// Remove stale worktree first — git branch -D fails if the branch
+	// is still checked out in an existing worktree.
+	if _, err := os.Stat(sc.WorktreePath); err == nil {
+		_ = gitpkg.WorktreeRemove(sc.RepoDir, sc.WorktreePath)
+	}
+	_ = gitpkg.WorktreePrune(sc.RepoDir)
 	_ = gitpkg.DeleteBranch(sc.RepoDir, sc.Branch)
 	err := gitpkg.WorktreeAdd(sc.RepoDir, sc.WorktreePath, sc.Branch, "origin/"+sc.BaseBranch)
 	sc.sup.gitSetupMu.Unlock()
