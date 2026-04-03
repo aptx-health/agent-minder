@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -192,6 +192,63 @@ CREATE TABLE IF NOT EXISTS job_schedules (
 UPDATE schema_version SET version = 3;
 `
 
+// migrateV3toV4 changes the UNIQUE constraint on jobs from (deployment_id, issue_number)
+// to (deployment_id, name). The old constraint prevents multiple proactive jobs
+// (which all have issue_number=0) from existing in the same deployment.
+const migrateV3toV4 = `
+-- Disable FK checks during table recreation.
+PRAGMA foreign_keys = OFF;
+
+-- SQLite requires table recreation to change constraints.
+DROP TABLE IF EXISTS jobs_new;
+CREATE TABLE jobs_new (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	deployment_id TEXT NOT NULL REFERENCES deployments(id),
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL DEFAULT '',
+	issue_number INTEGER NOT NULL DEFAULT 0,
+	issue_title TEXT,
+	issue_body TEXT,
+	owner TEXT NOT NULL,
+	repo TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'queued',
+	current_stage TEXT,
+	stages_json TEXT,
+	result_json TEXT,
+	worktree_path TEXT,
+	branch TEXT,
+	pr_number INTEGER,
+	cost_usd REAL DEFAULT 0.0,
+	agent_log TEXT,
+	failure_reason TEXT,
+	failure_detail TEXT,
+	review_risk TEXT,
+	review_comment_id INTEGER,
+	dependencies TEXT,
+	max_turns INTEGER,
+	max_budget_usd REAL,
+	queued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	started_at DATETIME,
+	completed_at DATETIME,
+	UNIQUE(deployment_id, name)
+);
+
+INSERT INTO jobs_new SELECT
+	id, deployment_id, agent, name, issue_number, issue_title, issue_body,
+	owner, repo, status, current_stage, stages_json, result_json,
+	worktree_path, branch, pr_number, cost_usd, agent_log,
+	failure_reason, failure_detail, review_risk, review_comment_id,
+	dependencies, max_turns, max_budget_usd, queued_at, started_at, completed_at
+FROM jobs;
+
+DROP TABLE jobs;
+ALTER TABLE jobs_new RENAME TO jobs;
+
+PRAGMA foreign_keys = ON;
+
+UPDATE schema_version SET version = 4;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -207,6 +264,10 @@ func Open(dsn string) (*sqlx.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
+
+	// SQLite only supports one writer at a time. Limiting to a single connection
+	// prevents SQLITE_BUSY contention between goroutines (supervisor, scheduler, API).
+	db.SetMaxOpenConns(1)
 
 	// Check if this is an existing v1 database that needs migration.
 	var version int
@@ -227,6 +288,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV2toV3); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v2→v3: %w", err)
+			}
+		}
+		if version < 4 {
+			if _, err := db.Exec(migrateV3toV4); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v3→v4: %w", err)
 			}
 		}
 	} else if !hasVersion {
