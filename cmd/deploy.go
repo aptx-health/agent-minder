@@ -433,9 +433,9 @@ func runDaemon(deployID string) error {
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 	}
 
-	// Check if we have jobs to run.
+	// Check if we have jobs to run or schedules to wait for.
 	existingJobs, _ := store.GetJobs(deployID)
-	if len(existingJobs) == 0 && deploy.Mode != "watch" {
+	if len(existingJobs) == 0 && deploy.Mode != "watch" && sched == nil {
 		fmt.Println("No jobs to run. Exiting.")
 		return nil
 	}
