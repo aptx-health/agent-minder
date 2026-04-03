@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -75,6 +76,12 @@ func (s *Scheduler) SyncSchedules() error {
 // Run starts the scheduler loop. It checks every interval for due schedules
 // and inserts job rows. Blocks until ctx is cancelled.
 func (s *Scheduler) Run(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[scheduler] panic recovered: %v", r)
+		}
+	}()
+
 	// Initial tick.
 	s.tick()
 
@@ -95,6 +102,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) tick() {
 	schedules, err := s.store.GetEnabledSchedules(s.deployID)
 	if err != nil {
+		log.Printf("[scheduler] GetEnabledSchedules error: %v", err)
 		return
 	}
 
@@ -105,17 +113,16 @@ func (s *Scheduler) tick() {
 			continue
 		}
 
-		// Check if due: next_run_at <= now.
 		if !sched.NextRunAt.Valid || sched.NextRunAt.Time.After(now) {
 			continue
 		}
 
-		// Dedup: skip if a job with this name is already queued or running.
 		if s.jobAlreadyActive(sched.Name) {
+			log.Printf("[scheduler] skip %s (already active)", sched.Name)
 			continue
 		}
 
-		// Fire: insert a job row.
+		log.Printf("[scheduler] firing %s (agent: %s)", sched.Name, sched.Agent)
 		s.fireSchedule(sched)
 	}
 }
@@ -150,12 +157,14 @@ func (s *Scheduler) fireSchedule(sched *db.JobSchedule) {
 	}
 
 	if err := s.store.CreateJob(job); err != nil {
-		return // dedup: unique constraint may fire if name collides
+		log.Printf("[scheduler] CreateJob error for %s: %v", sched.Name, err)
+		return
 	}
 
 	// Update schedule: last_run_at and compute next_run_at.
 	cron, err := ParseCron(sched.CronExpr.String)
 	if err != nil {
+		log.Printf("[scheduler] ParseCron error for %s: %v", sched.Name, err)
 		return
 	}
 	nextRun := cron.NextAfter(now)

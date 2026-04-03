@@ -93,7 +93,9 @@ echo "$TASKS" | jq -r '.[] |
    else "?" end) as $icon |
   (if .pr_number > 0 then " PR#\(.pr_number)" else "" end) as $pr |
   (if .cost_usd > 0 then " $\(.cost_usd | tostring | .[0:5])" else "" end) as $cost |
-  "\($icon) #\(.issue_number) \(.issue_title[:45])\($pr)\($cost) | font=Menlo size=11"'
+  (if .issue_number > 0 then "#\(.issue_number) " else "" end) as $issue |
+  (if .name != null and .issue_number == 0 then "\(.name[:30]) " else "" end) as $jobname |
+  "\($icon) \($issue)\($jobname)\(.issue_title[:45])\($pr)\($cost) | font=Menlo size=11"'
 
 # Actions.
 echo "---"
