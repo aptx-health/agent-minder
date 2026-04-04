@@ -282,20 +282,30 @@ func runForeground(deployID string) error {
 	// Create supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
 
-	// Load jobs.yaml scheduler if available.
+	// Load jobs.yaml scheduler and trigger routes.
 	var sched *scheduler.Scheduler
+	var routes []supervisor.TriggerRoute
 	cfgPath := scheduler.ConfigPath(deploy.RepoDir)
 	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
 		sched = scheduler.New(store, deployID, deploy.Owner, deploy.Repo, cfg)
 		if err := sched.SyncSchedules(); err != nil {
 			fmt.Printf("Warning: sync schedules: %v\n", err)
-		} else {
-			fmt.Printf("  Loaded %d job schedules\n", len(cfg.Jobs))
+		}
+		for _, def := range cfg.Jobs {
+			if label := def.TriggerLabel(); label != "" {
+				routes = append(routes, supervisor.TriggerRoute{Label: label, Agent: def.Agent})
+			}
+		}
+		if len(routes) > 0 {
+			sup.SetTriggerRoutes(routes)
 		}
 	}
 
-	// Stay alive if we have schedules or watch mode.
-	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil)
+	hasTriggers := len(routes) > 0
+	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil || hasTriggers)
+
+	// --- Startup summary ---
+	printStartupSummary(deploy, routes, store, deployID)
 
 	// Handle signals.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -392,19 +402,15 @@ func runDaemon(deployID string) error {
 
 	// Load jobs.yaml scheduler if available.
 	var sched *scheduler.Scheduler
+	var routes []supervisor.TriggerRoute
 	cfgPath := scheduler.ConfigPath(deploy.RepoDir)
 	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
 		sched = scheduler.New(store, deployID, deploy.Owner, deploy.Repo, cfg)
 		if err := sched.SyncSchedules(); err != nil {
 			fmt.Printf("Warning: sync schedules: %v\n", err)
-		} else {
-			fmt.Printf("Loaded %d job schedules from %s\n", len(cfg.Jobs), cfgPath)
 		}
-	}
 
-	// Extract trigger routes from jobs.yaml and register with supervisor.
-	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
-		var routes []supervisor.TriggerRoute
+		// Extract trigger routes and cron schedules for display.
 		for _, def := range cfg.Jobs {
 			if label := def.TriggerLabel(); label != "" {
 				routes = append(routes, supervisor.TriggerRoute{Label: label, Agent: def.Agent})
@@ -412,12 +418,14 @@ func runDaemon(deployID string) error {
 		}
 		if len(routes) > 0 {
 			sup.SetTriggerRoutes(routes)
-			fmt.Printf("  Trigger routes: %d label→agent mappings\n", len(routes))
 		}
 	}
 
-	// Daemon mode if watch, or if we have schedules to evaluate.
-	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil)
+	// Daemon mode if watch, or if we have schedules/triggers to evaluate.
+	hasTriggers := len(routes) > 0
+	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil || hasTriggers)
+
+	printStartupSummary(deploy, routes, store, deployID)
 
 	if len(jobs) == 0 && deploy.Mode == "issues" && sched == nil {
 		fmt.Println("Note: daemon started but no jobs found. Waiting for watch events or manual job creation.")
@@ -496,4 +504,27 @@ func resolveOwnerRepo(repoDir string) (string, string, error) {
 	// Strip .git suffix if present.
 	repo = strings.TrimSuffix(repo, ".git")
 	return owner, repo, nil
+}
+
+func printStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute, store *db.Store, deployID string) {
+	fmt.Println("Subscriptions:")
+	if deploy.WatchFilter.Valid && deploy.WatchFilter.String != "" {
+		fmt.Printf("  Watch: %s → autopilot\n", deploy.WatchFilter.String)
+	}
+	for _, r := range routes {
+		fmt.Printf("  Trigger: label:%s → %s\n", r.Label, r.Agent)
+	}
+	schedules, _ := store.GetEnabledSchedules(deployID)
+	for _, s := range schedules {
+		if s.CronExpr.Valid {
+			next := ""
+			if s.NextRunAt.Valid {
+				next = s.NextRunAt.Time.Format("Mon 15:04 UTC")
+			}
+			fmt.Printf("  Cron: %s (%s) → %s [next: %s]\n", s.Name, s.CronExpr.String, s.Agent, next)
+		}
+	}
+	if len(routes) == 0 && len(schedules) == 0 && (!deploy.WatchFilter.Valid || deploy.WatchFilter.String == "") {
+		fmt.Println("  (none)")
+	}
 }
