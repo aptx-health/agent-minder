@@ -1,14 +1,12 @@
 #!/bin/bash
-# agent-minder xbar plugin
+# agent-minder SwiftBar/xbar plugin
 # Shows agent status in the macOS menu bar.
 #
-# Install: symlink or copy to your xbar plugins directory
-#   ln -s ~/repos/agent-minder/xbar/minder.5s.sh ~/Library/Application\ Support/xbar/plugins/
+# Install: symlink to your SwiftBar plugins directory
+#   ln -s ~/repos/agent-minder/xbar/minder.5s.sh ~/Library/Application\ Support/SwiftBar/plugins/
 #
-# The filename "minder.5s.sh" means xbar refreshes every 5 seconds.
+# The filename "minder.5s.sh" means it refreshes every 5 seconds.
 # Requires: curl, jq
-#
-# Configure the daemon address below, or set MINDER_ADDR env var.
 
 ADDR="${MINDER_ADDR:-localhost:7749}"
 API_KEY="${MINDER_API_KEY:-}"
@@ -22,10 +20,10 @@ fi
 # Fetch status.
 STATUS=$(curl $CURL_OPTS "http://$ADDR/status" 2>/dev/null)
 if [ -z "$STATUS" ] || ! echo "$STATUS" | jq -e '.deploy_id' >/dev/null 2>&1; then
-  echo "🤖 offline"
+  echo "🤖 offline | color=#999999"
   echo "---"
-  echo "No minder daemon running on $ADDR"
-  echo "Start one: minder deploy <issues> --serve :7749 | font=Menlo size=11"
+  echo "No minder daemon running on $ADDR | size=12"
+  echo "Start: minder deploy --serve :7749 | size=11 font=Menlo color=#666666"
   exit 0
 fi
 
@@ -41,7 +39,6 @@ QUEUED=$(echo "$TASKS" | jq '[.[] | select(.status=="queued" or .status=="blocke
 REVIEW=$(echo "$TASKS" | jq '[.[] | select(.status=="review" or .status=="reviewing" or .status=="reviewed")] | length')
 DONE=$(echo "$TASKS" | jq '[.[] | select(.status=="done")] | length')
 BAILED=$(echo "$TASKS" | jq '[.[] | select(.status=="bailed" or .status=="stopped")] | length')
-TOTAL=$(echo "$TASKS" | jq 'length')
 
 # Budget info.
 SPENT=$(echo "$STATUS" | jq -r '.total_spent // 0' | xargs printf '%.2f')
@@ -59,51 +56,58 @@ else
   UPTIME_FMT="${UPTIME}s"
 fi
 
-# Menu bar title.
+# Menu bar title — color-coded.
 if [ "$PAUSED" = "true" ]; then
-  echo "🤖 ⏸ paused"
+  echo "🤖 paused | color=#FF9500"
 elif [ "$RUNNING" -gt 0 ]; then
-  echo "🤖 ${RUNNING}⚡${REVIEW}👀${DONE}✓"
+  echo "🤖 ${RUNNING} active | color=#34C759"
 elif [ "$REVIEW" -gt 0 ]; then
-  echo "🤖 ${REVIEW}👀 waiting"
+  echo "🤖 ${REVIEW} review | color=#5856D6"
 elif [ "$QUEUED" -gt 0 ]; then
-  echo "🤖 ${QUEUED} queued"
+  echo "🤖 ${QUEUED} queued | color=#007AFF"
+elif [ "$BAILED" -gt 0 ] && [ "$DONE" -eq 0 ]; then
+  echo "🤖 idle | color=#FF3B30"
 else
-  echo "🤖 done"
+  echo "🤖 idle | color=#8E8E93"
 fi
 
 echo "---"
 
-# Deploy info.
-echo "Deploy $DEPLOY_ID ($UPTIME_FMT) | size=11 color=#888888"
-echo "Cost: \$$SPENT / \$$BUDGET | size=11 color=#888888"
+# Deploy header.
+echo "Deploy $DEPLOY_ID  ·  ${UPTIME_FMT}  ·  \$$SPENT/\$$BUDGET | size=12 color=#8E8E93"
 echo "---"
 
-# Task list with status icons.
+# Job list — color-coded by status.
 echo "$TASKS" | jq -r '.[] |
-  (if .status == "running" then "⚡"
-   elif .status == "queued" then "⏳"
-   elif .status == "blocked" then "🔒"
-   elif .status == "review" then "👀"
-   elif .status == "reviewing" then "🔍"
-   elif .status == "reviewed" then "✅"
-   elif .status == "done" then "✓"
-   elif .status == "bailed" then "✗"
-   elif .status == "stopped" then "⏹"
-   else "?" end) as $icon |
-  (if .pr_number > 0 then " PR#\(.pr_number)" else "" end) as $pr |
-  (if .cost_usd > 0 then " $\(.cost_usd | tostring | .[0:5])" else "" end) as $cost |
+  (if .status == "running" then { icon: "▶", color: "#34C759" }
+   elif .status == "queued" then { icon: "◦", color: "#007AFF" }
+   elif .status == "blocked" then { icon: "⊘", color: "#FF9500" }
+   elif .status == "review" then { icon: "◎", color: "#5856D6" }
+   elif .status == "reviewing" then { icon: "◉", color: "#5856D6" }
+   elif .status == "reviewed" then { icon: "✓", color: "#34C759" }
+   elif .status == "done" then { icon: "✓", color: "#8E8E93" }
+   elif .status == "bailed" then { icon: "✗", color: "#FF3B30" }
+   elif .status == "stopped" then { icon: "■", color: "#FF9500" }
+   else { icon: "?", color: "#8E8E93" } end) as $style |
+  (if .pr_number > 0 then "  →PR#\(.pr_number)" else "" end) as $pr |
+  (if .cost_usd > 0 then "  $\(.cost_usd | tostring | .[0:5])" else "" end) as $cost |
   (if .issue_number > 0 then "#\(.issue_number) " else "" end) as $issue |
   (if .name != null and .issue_number == 0 then "\(.name[:30]) " else "" end) as $jobname |
-  "\($icon) \($issue)\($jobname)\(.issue_title[:45])\($pr)\($cost) | font=Menlo size=11"'
+  (if .agent != null and .agent != "autopilot" then "[\(.agent)] " else "" end) as $agent |
+  "\($style.icon) \($agent)\($issue)\($jobname)\(.issue_title[:40])\($pr)\($cost) | font=Menlo size=12 color=\($style.color)"'
 
-# Actions.
-echo "---"
-
-if [ "$PAUSED" = "true" ]; then
-  echo "▶ Resume Budget | bash=curl param1=-sX param2=POST param3=http://$ADDR/resume terminal=false refresh=true"
+# Show empty state.
+if [ "$(echo "$TASKS" | jq 'length')" -eq 0 ]; then
+  echo "No active jobs | size=12 color=#8E8E93"
 fi
 
-echo "Refresh | refresh=true"
 echo "---"
-echo "⏹ Stop Daemon | bash=curl param1=-sX param2=POST param3=http://$ADDR/stop terminal=false refresh=true color=red"
+
+# Actions.
+if [ "$PAUSED" = "true" ]; then
+  echo "▶ Resume Budget | bash=curl param1=-sX param2=POST param3=http://$ADDR/resume terminal=false refresh=true color=#34C759"
+fi
+
+echo "↻ Refresh | refresh=true"
+echo "---"
+echo "■ Stop Daemon | bash=curl param1=-sX param2=POST param3=http://$ADDR/stop terminal=false refresh=true color=#FF3B30"
