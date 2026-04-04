@@ -1,4 +1,12 @@
 jobs:
+  # --- Trigger routes (label→agent) ---
+  bug-fix:
+    trigger: "label:bug"
+    agent: bug-fixer
+    description: "Fix bugs automatically"
+    budget: 5.0
+
+  # --- Weekly cron schedules (UTC times) ---
   weekly-deps:
     schedule: "0 15 * * 1"
     agent: dependency-updater
