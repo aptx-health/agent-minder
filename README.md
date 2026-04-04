@@ -162,6 +162,7 @@ macOS menu bar widget shows agent status at a glance. See `xbar/minder.5s.sh`.
 | `minder stop [deploy-id]` | Stop a running deployment |
 | `minder lesson add\|list\|edit\|remove\|pin\|groom` | Manage the learning system |
 | `minder jobs list\|run` | View and trigger scheduled jobs |
+| `minder agents list\|show <name>` | List available agents or show definition details |
 | `minder enroll [repo-dir]` | Scan a repo and generate onboarding config |
 
 ### Deploy flags
@@ -215,7 +216,7 @@ xbar/                        # macOS menu bar plugin
 
 ### Data storage
 
-SQLite at `~/.agent-minder/v2.db` (WAL mode, foreign keys). Schema v3.
+SQLite at `~/.agent-minder/v2.db` (WAL mode, foreign keys). Schema v4.
 
 | Table | Purpose |
 |-------|---------|

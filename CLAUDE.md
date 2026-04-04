@@ -4,137 +4,94 @@ Go CLI coordination layer on top of [agent-msg](../agent-msg). Monitors git repo
 
 ## Quick orientation
 
-- **Module**: `github.com/dustinlange/agent-minder`
+- **Module**: `github.com/aptx-health/agent-minder`
 - **Go version**: 1.25+ (bubbletea v2 requirement)
-- **State**: SQLite at `~/.agent-minder/minder.db` (WAL mode, foreign keys)
-- **agent-msg DB**: `~/repos/agent-msg/messages.db` (or `AGENT_MSG_DB` env var)
-- **LLM**: Claude Code CLI (`claude -p`) — no API key needed
+- **State**: SQLite at `~/.agent-minder/v2.db` (WAL mode, foreign keys, single-writer via `SetMaxOpenConns(1)`)
+- **LLM**: Claude Code CLI (`claude -p` / `claude --agent`) — no API key needed
+- **Version**: 0.2.1-dev (`minder --version`)
 
 ## Architecture
 
-### LLM pipeline (internal/poller)
+All LLM calls go through `internal/claudecli`, which wraps `claude -p` with `--output-format json` and `claude --agent` for agent execution.
 
-All LLM calls go through `internal/claudecli`, which wraps `claude -p` with `--output-format json`. The `claudecli.Completer` interface is the single abstraction for all LLM interactions.
+### Supervisor (internal/supervisor)
 
-Each poll cycle with new activity runs a single `claude -p --model <analyzer_model>` call with `--json-schema` to enforce structured output:
+Manages N concurrent Claude Code agents working on GitHub issues in isolated worktrees. Long-lived — stays alive after all tasks complete (both daemon and TUI modes).
 
-```json
-{
-  "analysis": "status update text",
-  "concerns": [{"severity": "warning", "message": "..."}],
-  "bus_message": {"topic": "project/coord", "message": "..."}
-}
-```
-
-Raw git commits and bus messages are passed directly to the analyzer (no separate summarization step). The model is controlled by `project.LLMAnalyzerModel` (default: `"sonnet"`).
-
-- `parseAnalysis()` in `analysis.go` handles raw JSON, markdown-fenced JSON, and plain text fallback
-- Concerns are managed by the analyzer: each cycle returns the full desired concern list, `reconcileConcerns()` diffs against existing (adds new, resolves dropped, updates severity)
-- Concern severity levels: `info`, `warning`, `danger` — color-coded in TUI
-- Bus messages are published via `msgbus.Publisher` only when the analyzer includes `bus_message`
-
-### Bus integration (internal/msgbus)
-
-- `Client` — read-only connection (`?mode=ro`) for polling messages
-- `Publisher` — read-write connection for publishing messages back to agent-msg; supports `PublishReplace()` for single-message topics (e.g., onboarding)
-- Both work against the same `messages.db` file; agent-msg bash scripts remain compatible
-- Both use `sqliteutil.OpenWithRecovery()` to auto-detect and recover from stale WAL/SHM files
-
-### TUI (internal/tui)
-
-**UX patterns: see [TUI-UX-GUIDE.md](TUI-UX-GUIDE.md)** — all new/modified interactions must follow those conventions.
-
-Bubbletea v2 dashboard. Key bindings: `p` pause, `r` poll now, `e` expand, `u` user msg, `m` broadcast, `o` onboard, `a` autopilot, `A` stop autopilot (with confirmation), `t` theme, `q` quit.
-
-- Spinner (bubbles/v2/spinner MiniDot) shown during manual poll (`r`), broadcast, and onboard generation
-- Concerns capped at 5 displayed with "+N more" indicator; color-coded by severity (info=muted, warning=amber, danger=bold red)
-- Event log dynamically sized to remaining terminal height
-- Broadcast mode: `m` opens textarea, ctrl+d sends through tier 2 LLM → publishes to bus
-- Onboard mode: `o` opens textarea for optional guidance, ctrl+d generates onboarding message via tier 2 LLM → publishes to `<project>/onboarding` with replace semantics
-- Autopilot modes: `""` (normal) → `"confirm"` (y/n to launch) → `"running"` (slot status displayed) → `"stop-confirm"` (y/n to stop)
-- During autopilot, poll frequency is halved (min 30s) and `StatusBlock()` is injected into tier 2 analyzer input
-
-### Autopilot (internal/autopilot)
-
-Supervisor manages N concurrent Claude Code agents working on GitHub issues in isolated worktrees.
-
-**Flow:** `a` in TUI → `Prepare()` (checks for existing tasks, offers keep/rebuild if found, else fresh scan) → user selects dep graph option → `Launch()` fills slots with unblocked tasks → agents run `claude -p` → inspect outcome → clean up → refill slots.
-
-**Task lifecycle:** `queued` → `running` → `review` (PR opened) → `done` (PR merged) | `bailed` (no PR, agent gave up)
+**Job lifecycle:** `queued` → `running` → `review` (PR opened) → `reviewing` → `reviewed` → `done` (PR merged) | `bailed` (agent gave up)
 
 **Key behaviors:**
-- `Prepare()` preserves existing tasks across restarts — if tasks exist, shows reprepare-choice (k=keep, r=rebuild); selected dep graph stored in `autopilot_dep_graphs` table
-- On reprepare keep: stale running → queued, everything else preserved; new tracked items discovered and analyzed incrementally with reverse dep injection
-- On reprepare rebuild: done stays done, review/failed/bailed/stopped/running → manual, queued/blocked → cleared; full dep graph regenerated
-- Issues with the skip label (default `no-agent`, configurable via `project.AutopilotSkipLabel`) are excluded
-- Dependency graph built via one LLM call using analyzer model; includes all tracked items as context for cross-repo deps
-- External dependency blocking: `QueuedUnblockedTasks()` cross-references `tracked_items` — if a dep is tracked and open, it blocks
-- New task discovery: handled during ReprepareKeep — new tracked items get incremental dep analysis with reverse dependency injection (existing queued/blocked tasks can gain deps on new issues)
-- Review check: every 30s, checks if PRs for `review` tasks have been merged → promotes to `done`
-- Label management: agent adds `in-progress` on start; supervisor swaps to `needs-review` when PR detected; removes `needs-review` when merged
-- On restart, `Prepare()` clears all tasks and rebuilds — no resume of stale state
-- Stop confirmation: `A` → "Stop all running agents? (y/n)" — waits for agent processes to exit naturally
+- LLM-built dependency graph determines execution order; stored in `dep_graphs` table
+- Agent contracts in `.claude/agents/*.md` declare mode, output, context providers, dedup strategies, and multi-stage pipelines
+- Stage executor iterates declared pipeline stages with conditional routing (`on_success`/`on_failure`) and context passing between stages
+- Built-in agents: `autopilot`, `reviewer`, `designer`, `onboarding`, `dependency-updater`, `security-scanner`, `doc-updater`
+- Review pipeline: supervisor spawns reviewer agent when jobs enter `review` status; posts structured PR comment with risk tier (`low-risk`/`needs-testing`/`suspect`)
+- Auto-merge: when enabled, low-risk PRs are automatically squash-merged (waits for CI)
+- Smart bail detection: multi-level JSON escaping handling, write-to-file pattern for issue comments
+- Watch mode: continuous GitHub polling for new issues matching label/milestone filter
+- Daemon mode: automated dep graph resolution via LLM with reasoning/confidence fields; low-confidence warnings
 
 **Paths:**
-- Worktree: `~/.agent-minder/worktrees/<project>/issue-<N>`, branch: `agent/issue-<N>`
-- Agent logs: `~/.agent-minder/agents/<project>-issue-<N>.log`
+- Worktree: `~/.agent-minder/worktrees/<deploy-id>/issue-<N>`, branch: `agent/issue-<N>`
+- Agent logs: `~/.agent-minder/agents/<deploy-id>-issue-<N>.log`
 
-**Agent command:** `claude --agent autopilot -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var. Allowed tools are loaded from `.agent-minder/onboarding.yaml` (if present) or a built-in default set.
+**Agent command:** `claude --agent <name> -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var.
 
-### DB schema (internal/db) — currently v23
+### DB schema (internal/db) — currently v4
 
-**projects**: name, goal_type, goal_description, refresh_interval_sec, message_ttl_sec, auto_enroll_worktrees, minder_identity, llm_provider (deprecated), llm_model (deprecated), llm_summarizer_model, llm_analyzer_model, autopilot_max_agents, autopilot_max_turns, autopilot_max_budget_usd, autopilot_skip_label, autopilot_auto_merge, autopilot_review_max_turns (nullable), autopilot_review_max_budget_usd (nullable)
+**deployments**: id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns, max_budget_usd, analyzer_model, skip_label, auto_merge, review_enabled, review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch, started_at
 
-**polls**: project_id, new_commits, new_messages, concerns_raised, llm_response (legacy), tier1_response, tier2_response, bus_message_sent, polled_at
+**jobs**: id, deployment_id, agent, name, issue_number, issue_title, issue_body, owner, repo, status (queued/running/review/reviewing/reviewed/done/bailed/blocked), current_stage, stages_json, result_json, worktree_path, branch, pr_number, cost_usd, agent_log, failure_reason, failure_detail, review_risk, review_comment_id, dependencies, max_turns, max_budget_usd, queued_at, started_at, completed_at — UNIQUE on (deployment_id, name)
 
-**autopilot_tasks**: project_id, issue_number, issue_title, issue_body, dependencies (JSON), status (queued/running/review/reviewing/reviewed/done/bailed/blocked/manual/skipped), worktree_path, branch, pr_number, agent_log, started_at, completed_at, max_turns_override (nullable), max_budget_override (nullable), review_risk (nullable), review_comment_id (nullable) — UNIQUE on project_id+issue_number
+**dep_graphs**: deployment_id (PK), graph_json, option_name, reasoning, confidence, created_at
 
-**autopilot_dep_graphs**: project_id (UNIQUE), graph_json, option_name, reasoning, confidence, created_at — persists the selected dependency graph across autopilot restarts; reasoning and confidence populated by daemon mode auto-selection
+**lessons**: id, repo_scope, content, source, active, pinned, times_injected, times_helpful, times_unhelpful, superseded_by, last_injected_at, created_at, updated_at
 
-**completed_items**: project_id, source, owner, repo, number, item_type, title, final_status, summary, completed_at — archived from tracked_items when they reach terminal state (only if progress_summary was non-empty)
+**job_lessons**: job_id, lesson_id (composite PK)
 
-**Also**: repos, worktrees, topics, concerns (see `schema.go` for full DDL)
+**repo_onboarding**: repo_dir (PK), owner, repo, yaml_content, validation_status, validation_failures, scanned_at
 
-Migrations: v1→v2 (two-tier LLM columns), v3 (tracked_items), v4 (content hash + summaries), v5 (idle_pause_sec), v6 (is_draft + review_state), v7 (completed_items), v8 (analyzer_focus), v9 (autopilot_tasks table + autopilot project columns), v18 (deprecate llm_provider/llm_model columns), v20 (autopilot_dep_graphs table for persisting dep graphs), v21 (per-task max_turns_override + max_budget_override columns), v23 (review automation: autopilot_auto_merge, review_max_turns/budget on projects; review_risk, review_comment_id on tasks; reviewing/reviewed statuses), v28 (daemon dep graph: reasoning + confidence columns on autopilot_dep_graphs).
+**job_schedules**: name (PK), deployment_id, cron_expr, trigger_expr, agent, description, budget, max_turns, enabled, last_run_at, next_run_at, created_at
 
-`Poll.LLMResponse()` accessor returns tier2 > tier1 > raw (backward compat).
+Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents).
 
 ## Package map
 
 | Package | Purpose | Notes |
 |---------|---------|-------|
-| `internal/autopilot` | Autopilot supervisor | Manages concurrent Claude Code agents on GitHub issues |
-| `cmd/` | Cobra commands | init, start, status, enroll, pause, resume |
-| `internal/db` | SQLite schema + CRUD | `Store` wraps sqlx.DB, migrations in `schema.go` |
+| `cmd/` | Cobra commands | deploy, status, stop, enroll, lesson, jobs, agents, tui |
+| `internal/supervisor` | Job supervisor | Contracts, context providers, dedup, review, dep graph, bail, stage executor |
+| `internal/daemon` | Deploy daemon | PID files, heartbeat, HTTP API server + client |
+| `internal/scheduler` | Job scheduler | Cron parser, `jobs.yaml` config, scheduled job firing |
+| `internal/db` | SQLite schema + CRUD | sqlx.DB wrapper, migrations in `schema.go` |
 | `internal/claudecli` | Claude Code CLI wrapper | `Completer` interface, `claude -p` invocation |
-| `internal/poller` | Poll loop + LLM pipeline | `poller.go`, `analysis.go` (parsing + dedup) |
-| `internal/tui` | Bubbletea dashboard | `app.go` (model/update/view), `styles.go` (themes) |
 | `internal/git` | Git CLI wrappers | `LogSince()`, `Branches()`, `WorktreeList()` |
-| `internal/discovery` | Repo scanning | `ScanRepo()`, `DeriveProjectName()`, `SuggestTopics()` |
+| `internal/github` | GitHub API client | go-github wrapper, ETag transport, URL parsing |
+| `internal/lesson` | Learning system | Lesson selection, injection, grooming |
+| `internal/onboarding` | Repo scanning + config | `onboarding.yaml` generation, validator |
+| `internal/discovery` | Language/framework detection | `ScanRepo()`, `DeriveProjectName()` |
+| `internal/agentutil` | Agent log parsing | `ParseAgentLog()` for stream-json results |
 | `internal/sqliteutil` | SQLite health + WAL recovery | `OpenWithRecovery()`, stale -shm/-wal cleanup |
-| `internal/msgbus` | Agent-msg client + publisher | Read-only `Client`, read-write `Publisher` + `PublishReplace()` |
-| `internal/config` | Global config + credentials | Viper-based YAML config, keychain integration via `internal/secrets` |
-| `internal/discord` | Discord bot | Slash commands + embeds backed by deploy daemon API |
-| `internal/notify` | Webhook notifications | Batched event delivery; Slack, Discord, and generic JSON formats |
-| `internal/api` | Deploy daemon HTTP API | Server + Client for remote daemon interaction |
 
 ## Commands
 
-- `init <repo-dir> [...]` — Interactive wizard → SQLite. Sets goal, topics, poll interval, LLM models.
-- `start <project>` / `resume <project>` — TUI + poller. Creates publisher for bus writes.
-- `status <project>` — CLI text summary, no LLM call.
-- `enroll <project> <repo-dir>` — Add repo to project.
+- `deploy [issues...] [flags]` — Launch agents on issues or start daemon. Key flags: `--repo`, `--agent`, `--watch`, `--serve`, `--foreground`, `--max-agents`, `--auto-merge`, `--total-budget`.
+- `status [deploy-id]` — Deployment status (`--json` for structured output, `--remote host:port` for remote daemon).
+- `stop [deploy-id]` — Stop a running deployment (local or `--remote`).
+- `enroll [repo-dir]` — Scan repo, generate `onboarding.yaml`, install agent definitions.
+- `lesson add|list|edit|remove|pin|groom` — Manage the learning system.
+- `jobs list|run` — View and trigger scheduled jobs from `jobs.yaml`.
+- `agents list|show <name>` — List available agents or show agent definition details.
 
 ## Testing
 
 ```bash
-go test ./...                           # All unit tests
-go test ./internal/db/... -v            # DB + migration tests
-go test ./internal/poller/... -v        # Analysis parsing + concern dedup
-go test ./internal/msgbus/... -v        # Client + publisher tests
-
-# Integration test (requires Claude Code CLI + existing agent-test project):
-go test -tags integration -run TestIntegrationAnalysisPipeline -v ./internal/poller/ -timeout 120s
+go test ./...                              # All unit tests
+go test ./internal/db/... -v               # DB + migration tests
+go test ./internal/supervisor/... -v       # Supervisor, contracts, context, dedup, templates
+go test ./internal/scheduler/... -v        # Cron parser, config, scheduler
+go test ./internal/daemon/... -v           # HTTP API endpoints
+go test ./internal/lesson/... -v           # Lesson selection + grooming
 ```
 
 ## Debug logging
@@ -160,42 +117,21 @@ The `lnav/agent-minder.json` format file ships with the repo. It color-codes sta
 
 ## Key patterns
 
-- `Poller.doPoll()` is the main loop body — gathers git + bus data, runs single analysis call via `claudecli.Completer`, publishes, records
-- `Poller.Broadcast()` is the user-initiated broadcast path — gathers context, calls completer, publishes
-- `Poller.Onboard()` generates onboarding messages — gathers rich context, calls completer, publishes to `<project>/onboarding` with replace semantics
-- All TUI async operations use bubbletea Cmd pattern (return `func() tea.Msg`), not raw goroutines
-- Spinner ticks flow through the standard bubbletea Update loop via `spinner.TickMsg`
-- Theme is global mutable state (package-level `themeIndex`), cycled via `cycleTheme()`
+- Supervisor is long-lived — stays alive after all tasks complete, refills slots on a 30s ticker
+- Agent contracts (`.claude/agents/*.md`) declare mode, output, context providers, dedup strategies, and pipeline stages
+- Context providers assemble prompt context from declared providers (issue, repo_info, file_list, recent_commits, lessons, sibling_jobs, dep_graph)
+- Stage executor iterates declared pipeline stages with conditional routing and context passing
+- Dedup engine prevents duplicate work via stackable strategies (branch_exists, open_pr_with_label, recent_run)
+- `internal/claudecli` wraps all LLM calls via `claude -p --output-format json`
+- SQLite uses single-writer (`SetMaxOpenConns(1)`) to prevent SQLITE_BUSY contention between supervisor, scheduler, and API goroutines
 
-## Useful shortcuts
+## Environment variables
 
-```bash
-# Recreate a completed agent's worktree (branch must still exist — works for review tasks)
-git worktree add ~/.agent-minder/worktrees/<project>/issue-<N> agent/issue-<N>
-
-# Shell helper
-minder-checkout() {
-  git worktree add ~/.agent-minder/worktrees/$1/issue-$2 agent/issue-$2
-  cd ~/.agent-minder/worktrees/$1/issue-$2
-}
-# Usage: minder-checkout minder-improvement 65
-```
-
-## Testing in worktrees
-
-Use `scripts/test-env.sh` to run an isolated instance against its own DB and log file:
-
-```bash
-source scripts/test-env.sh <project-name>
-go run . start "$MINDER_PROJECT"
-```
-
-This auto-derives paths from the branch name (e.g., `agent/issue-65` → `~/.agent-minder/minder-agent-issue-65.db`), copies the production DB on first run, and enables debug logging.
-
-**Environment variables:**
-- `MINDER_DB` — override database path (default: `~/.agent-minder/minder.db`)
+- `GITHUB_TOKEN` — GitHub API token (required for agent execution)
+- `MINDER_DB` — override database path (default: `~/.agent-minder/v2.db`)
 - `MINDER_LOG` — override debug log path (default: `~/.agent-minder/debug.log`)
 - `MINDER_DEBUG=1` — enable structured JSON debug logging
+- `MINDER_API_KEY` — API key for remote daemon access
 
 ## Claude Code CLI notes
 
