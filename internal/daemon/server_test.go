@@ -382,6 +382,160 @@ func TestHandleResume(t *testing.T) {
 	}
 }
 
+func TestStatusAfterDaemonRestart(t *testing.T) {
+	// Simulate a daemon restart: first deploy creates jobs, then a second
+	// deploy starts on the same DB. The plugin (hitting the new server)
+	// should see the new deploy ID, an empty job list, and fresh uptime.
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	conn, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	store := db.NewStore(conn)
+
+	// --- First deploy ---
+	deploy1 := &db.Deployment{
+		ID:             "deploy-old",
+		RepoDir:        "/tmp/repo",
+		Owner:          "acme",
+		Repo:           "widgets",
+		Mode:           "issues",
+		MaxAgents:      3,
+		TotalBudgetUSD: 25.0,
+	}
+	if err := store.CreateDeployment(deploy1); err != nil {
+		t.Fatalf("CreateDeployment(old): %v", err)
+	}
+
+	// Add jobs to the old deploy.
+	for i, title := range []string{"Fix auth", "Add tests"} {
+		job := &db.Job{
+			DeploymentID: "deploy-old",
+			Agent:        "autopilot",
+			Name:         fmt.Sprintf("issue-%d", i+1),
+			IssueNumber:  i + 1,
+			IssueTitle:   sql.NullString{String: title, Valid: true},
+			Owner:        "acme",
+			Repo:         "widgets",
+			Status:       db.StatusRunning,
+			CostUSD:      1.50,
+		}
+		if err := store.CreateJob(job); err != nil {
+			t.Fatalf("CreateJob(%s): %v", title, err)
+		}
+	}
+
+	srv1 := NewServer(ServerConfig{
+		Store:    store,
+		DeployID: "deploy-old",
+	})
+
+	// Verify first deploy returns its jobs.
+	rr := doRequest(t, srv1, "GET", "/jobs")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /jobs (old): expected 200, got %d", rr.Code)
+	}
+	var oldJobs []JobResponse
+	if err := json.NewDecoder(rr.Body).Decode(&oldJobs); err != nil {
+		t.Fatalf("decode old jobs: %v", err)
+	}
+	if len(oldJobs) != 2 {
+		t.Fatalf("old deploy: got %d jobs, want 2", len(oldJobs))
+	}
+
+	// Verify first deploy status.
+	rr = doRequest(t, srv1, "GET", "/status")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /status (old): expected 200, got %d", rr.Code)
+	}
+	var oldStatus StatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&oldStatus); err != nil {
+		t.Fatalf("decode old status: %v", err)
+	}
+	if oldStatus.DeployID != "deploy-old" {
+		t.Errorf("old deploy_id = %q, want %q", oldStatus.DeployID, "deploy-old")
+	}
+
+	// --- Daemon restart: new deploy ---
+	deploy2 := &db.Deployment{
+		ID:             "deploy-new",
+		RepoDir:        "/tmp/repo",
+		Owner:          "acme",
+		Repo:           "widgets",
+		Mode:           "issues",
+		MaxAgents:      5,
+		TotalBudgetUSD: 50.0,
+		BaseBranch:     "main",
+	}
+	if err := store.CreateDeployment(deploy2); err != nil {
+		t.Fatalf("CreateDeployment(new): %v", err)
+	}
+
+	srv2 := NewServer(ServerConfig{
+		Store:    store,
+		DeployID: "deploy-new",
+	})
+
+	// /status should reflect the new deploy.
+	rr = doRequest(t, srv2, "GET", "/status")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /status (new): expected 200, got %d", rr.Code)
+	}
+	var newStatus StatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&newStatus); err != nil {
+		t.Fatalf("decode new status: %v", err)
+	}
+	if newStatus.DeployID != "deploy-new" {
+		t.Errorf("new deploy_id = %q, want %q", newStatus.DeployID, "deploy-new")
+	}
+	if newStatus.TotalBudget != 50.0 {
+		t.Errorf("new total_budget = %v, want 50", newStatus.TotalBudget)
+	}
+	if newStatus.Config.MaxAgents != 5 {
+		t.Errorf("new config.max_agents = %d, want 5", newStatus.Config.MaxAgents)
+	}
+	if newStatus.TotalSpent != 0 {
+		t.Errorf("new total_spent = %v, want 0 (no jobs yet)", newStatus.TotalSpent)
+	}
+
+	// /jobs should return empty list — old deploy's jobs must not leak.
+	rr = doRequest(t, srv2, "GET", "/jobs")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /jobs (new): expected 200, got %d", rr.Code)
+	}
+	var newJobs []JobResponse
+	if err := json.NewDecoder(rr.Body).Decode(&newJobs); err != nil {
+		t.Fatalf("decode new jobs: %v", err)
+	}
+	if len(newJobs) != 0 {
+		t.Errorf("new deploy: got %d jobs, want 0 (stale jobs leaking from old deploy)", len(newJobs))
+	}
+
+	// /metrics should also reflect zero jobs/cost.
+	rr = doRequest(t, srv2, "GET", "/metrics")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /metrics (new): expected 200, got %d", rr.Code)
+	}
+	var metrics map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if totalJobs, ok := metrics["total_jobs"].(float64); !ok || totalJobs != 0 {
+		t.Errorf("new metrics.total_jobs = %v, want 0", metrics["total_jobs"])
+	}
+	if totalCost, ok := metrics["total_cost"].(float64); !ok || totalCost != 0 {
+		t.Errorf("new metrics.total_cost = %v, want 0", metrics["total_cost"])
+	}
+
+	// /dep-graph should 404 — old deploy's graph must not carry over.
+	rr = doRequest(t, srv2, "GET", "/dep-graph")
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("GET /dep-graph (new): expected 404, got %d (stale dep graph leaking)", rr.Code)
+	}
+}
+
 func TestAPIKeyMiddleware(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
