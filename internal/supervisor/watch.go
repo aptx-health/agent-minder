@@ -209,8 +209,14 @@ func (s *Supervisor) WatchTick(ctx context.Context) int {
 	return discovered
 }
 
-// addWatchToLaunchLoop adds watch polling to the main supervisor loop.
-// This is called from Launch() if a watch filter is configured.
+// addWatchTickerToLoop enables watch polling in the supervisor loop.
+// Returns true if there's a --watch filter OR trigger routes from jobs.yaml.
 func (s *Supervisor) addWatchTickerToLoop() bool {
-	return s.deploy.WatchFilter.Valid && s.deploy.WatchFilter.String != ""
+	if s.deploy.WatchFilter.Valid && s.deploy.WatchFilter.String != "" {
+		return true
+	}
+	s.mu.Lock()
+	hasTriggers := len(s.triggerRoutes) > 0
+	s.mu.Unlock()
+	return hasTriggers
 }

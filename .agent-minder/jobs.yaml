@@ -6,6 +6,12 @@ jobs:
     description: "Fix bugs automatically"
     budget: 5.0
 
+  agent-ready:
+    trigger: "label:agent-ready"
+    agent: autopilot
+    description: "Pick up and work on labeled issues"
+    budget: 5.0
+
   # --- Weekly cron schedules (UTC times) ---
   weekly-deps:
     schedule: "0 15 * * 1"
