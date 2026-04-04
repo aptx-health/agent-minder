@@ -325,16 +325,15 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	}
 	defer func() { _ = logFile.Close() }()
 
-	// If no stages declared, use default pipeline.
-	// Code stage always runs; review stage added if review is enabled.
+	// Build stage pipeline from contract, adding review if enabled and not already declared.
 	stages := contract.Stages
 	if len(stages) == 0 {
 		stages = []StageContract{{Name: "code", Agent: job.Agent, OnFailure: "bail"}}
-		if sc.Deploy.ReviewEnabled {
-			stages = append(stages, StageContract{
-				Name: "review", Agent: "reviewer", OnFailure: "skip", Retries: 1,
-			})
-		}
+	}
+	if sc.Deploy.ReviewEnabled && contract.Output == "pr" && !hasStage(stages, "review") {
+		stages = append(stages, StageContract{
+			Name: "review", Agent: "reviewer", OnFailure: "skip", Retries: 1,
+		})
 	}
 
 	// --- Stage loop ---
@@ -619,6 +618,16 @@ func formatReviewFeedback(assessment *ReviewAssessment) string {
 		fmt.Fprintf(&b, "\n**Summary:** %s\n", assessment.Summary)
 	}
 	return b.String()
+}
+
+// hasStage checks if a stage list contains a stage with the given name.
+func hasStage(stages []StageContract, name string) bool {
+	for _, s := range stages {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // extractReviewAssessmentFromLog is a package-level version of the review assessment extraction.

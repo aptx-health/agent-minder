@@ -20,7 +20,7 @@ fi
 # Fetch status.
 STATUS=$(curl $CURL_OPTS "http://$ADDR/status" 2>/dev/null)
 if [ -z "$STATUS" ] || ! echo "$STATUS" | jq -e '.deploy_id' >/dev/null 2>&1; then
-  echo "🤖 offline | color=#999999"
+  echo "🤖 offline | color=#444444"
   echo "---"
   echo "No minder daemon running on $ADDR | size=12"
   echo "Start: minder deploy --serve :7749 | size=11 font=Menlo color=#666666"
@@ -58,37 +58,37 @@ fi
 
 # Menu bar title — color-coded.
 if [ "$PAUSED" = "true" ]; then
-  echo "🤖 paused | color=#FF9500"
+  echo "🤖 paused | color=#B35A00"
 elif [ "$RUNNING" -gt 0 ]; then
-  echo "🤖 ${RUNNING} active | color=#34C759"
+  echo "🤖 ${RUNNING} active | color=#1B7A3D"
 elif [ "$REVIEW" -gt 0 ]; then
-  echo "🤖 ${REVIEW} review | color=#5856D6"
+  echo "🤖 ${REVIEW} review | color=#3A35A0"
 elif [ "$QUEUED" -gt 0 ]; then
-  echo "🤖 ${QUEUED} queued | color=#007AFF"
+  echo "🤖 ${QUEUED} queued | color=#0055CC"
 elif [ "$BAILED" -gt 0 ] && [ "$DONE" -eq 0 ]; then
-  echo "🤖 idle | color=#FF3B30"
+  echo "🤖 idle | color=#CC2200"
 else
-  echo "🤖 idle | color=#8E8E93"
+  echo "🤖 idle | color=#444444"
 fi
 
 echo "---"
 
 # Deploy header.
-echo "Deploy $DEPLOY_ID  ·  ${UPTIME_FMT}  ·  \$$SPENT/\$$BUDGET | size=12 color=#8E8E93"
+echo "Deploy $DEPLOY_ID  ·  ${UPTIME_FMT}  ·  \$$SPENT/\$$BUDGET | size=12 color=#555555"
 echo "---"
 
 # Job list — color-coded by status.
 echo "$TASKS" | jq -r '.[] |
-  (if .status == "running" then { icon: "▶", color: "#34C759" }
-   elif .status == "queued" then { icon: "◦", color: "#007AFF" }
-   elif .status == "blocked" then { icon: "⊘", color: "#FF9500" }
-   elif .status == "review" then { icon: "◎", color: "#5856D6" }
-   elif .status == "reviewing" then { icon: "◉", color: "#5856D6" }
-   elif .status == "reviewed" then { icon: "✓", color: "#34C759" }
-   elif .status == "done" then { icon: "✓", color: "#8E8E93" }
-   elif .status == "bailed" then { icon: "✗", color: "#FF3B30" }
-   elif .status == "stopped" then { icon: "■", color: "#FF9500" }
-   else { icon: "?", color: "#8E8E93" } end) as $style |
+  (if .status == "running" then { icon: "▶", color: "#1B7A3D" }
+   elif .status == "queued" then { icon: "◦", color: "#0055CC" }
+   elif .status == "blocked" then { icon: "⊘", color: "#B35A00" }
+   elif .status == "review" then { icon: "◎", color: "#3A35A0" }
+   elif .status == "reviewing" then { icon: "◉", color: "#3A35A0" }
+   elif .status == "reviewed" then { icon: "✓", color: "#1B7A3D" }
+   elif .status == "done" then { icon: "✓", color: "#555555" }
+   elif .status == "bailed" then { icon: "✗", color: "#CC2200" }
+   elif .status == "stopped" then { icon: "■", color: "#B35A00" }
+   else { icon: "?", color: "#555555" } end) as $style |
   (if .pr_number > 0 then "  →PR#\(.pr_number)" else "" end) as $pr |
   (if .cost_usd > 0 then "  $\(.cost_usd | tostring | .[0:5])" else "" end) as $cost |
   (if .issue_number > 0 then "#\(.issue_number) " else "" end) as $issue |
@@ -98,16 +98,16 @@ echo "$TASKS" | jq -r '.[] |
 
 # Show empty state.
 if [ "$(echo "$TASKS" | jq 'length')" -eq 0 ]; then
-  echo "No active jobs | size=12 color=#8E8E93"
+  echo "No active jobs | size=12 color=#555555"
 fi
 
 echo "---"
 
 # Actions.
 if [ "$PAUSED" = "true" ]; then
-  echo "▶ Resume Budget | bash=curl param1=-sX param2=POST param3=http://$ADDR/resume terminal=false refresh=true color=#34C759"
+  echo "▶ Resume Budget | bash=curl param1=-sX param2=POST param3=http://$ADDR/resume terminal=false refresh=true color=#1B7A3D"
 fi
 
 echo "↻ Refresh | refresh=true"
 echo "---"
-echo "■ Stop Daemon | bash=curl param1=-sX param2=POST param3=http://$ADDR/stop terminal=false refresh=true color=#FF3B30"
+echo "■ Stop Daemon | bash=curl param1=-sX param2=POST param3=http://$ADDR/stop terminal=false refresh=true color=#CC2200"
