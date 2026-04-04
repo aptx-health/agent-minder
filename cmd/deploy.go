@@ -402,6 +402,20 @@ func runDaemon(deployID string) error {
 		}
 	}
 
+	// Extract trigger routes from jobs.yaml and register with supervisor.
+	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
+		var routes []supervisor.TriggerRoute
+		for _, def := range cfg.Jobs {
+			if label := def.TriggerLabel(); label != "" {
+				routes = append(routes, supervisor.TriggerRoute{Label: label, Agent: def.Agent})
+			}
+		}
+		if len(routes) > 0 {
+			sup.SetTriggerRoutes(routes)
+			fmt.Printf("  Trigger routes: %d label→agent mappings\n", len(routes))
+		}
+	}
+
 	// Daemon mode if watch, or if we have schedules to evaluate.
 	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil)
 

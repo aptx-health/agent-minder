@@ -97,6 +97,7 @@ type Supervisor struct {
 	active             bool
 	daemonMode         bool
 	watchMode          bool
+	triggerRoutes      []TriggerRoute // label→agent routing from jobs.yaml
 	paused             bool
 	budgetPaused       bool
 	budgetWarned       bool

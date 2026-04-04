@@ -36,6 +36,18 @@ func (j *JobDef) IsTrigger() bool {
 	return j.Trigger != ""
 }
 
+// TriggerLabel returns the label name if this is a label trigger, or empty string.
+func (j *JobDef) TriggerLabel() string {
+	if !j.IsTrigger() {
+		return ""
+	}
+	parts := strings.SplitN(j.Trigger, ":", 2)
+	if len(parts) == 2 && parts[0] == "label" {
+		return parts[1]
+	}
+	return ""
+}
+
 // ParsedSchedule returns the parsed cron expression, or nil if not scheduled.
 func (j *JobDef) ParsedSchedule() (*CronExpr, error) {
 	if j.Schedule == "" {
