@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Weekly cron schedules for proactive agents**: Built-in agent definitions now include default cron schedules (weekly dependency checks, security scans, doc updates) (#431)
+- **Repo-level agent defs and overnight cron jobs**: Agent definitions can be stored in repos at `.claude/agents/` and discovered at deploy time; overnight cron scheduling for proactive agents (#375)
+- **Built-in agents**: `dependency-updater`, `security-scanner`, and `doc-updater` agents ship as built-in agent definitions alongside `autopilot`, `reviewer`, `designer`, and `onboarding` (#402, #404)
+- **`minder agents list|show` commands**: List available agents (built-in + repo-level) and display agent definition details including contract fields (#407)
+- **Enroll agent setup**: `minder enroll` now installs agent definitions into the repo and guides the onboarding agent to customize them (#418)
+- **Agent flag context providers**: `--agent` flag on deploy wires context providers declared in agent contracts (#406)
 - **Version flag**: `minder --version` now prints the current version (0.2.1-dev) (#422)
 - **Stage executor pipeline**: Generic stage pipeline execution from contract YAML with conditional routing (`on_success`/`on_failure`), context passing between stages, and built-in pipeline templates. Smart review retries only trigger on fixable issues (not bail/exhaust), with review feedback injected as additional prompt context on retry. Per-stage retry tracking prevents infinite loops. (#374)
 - **Agent log parser tests**: Comprehensive unit tests for `agentutil.ParseAgentLog` covering valid result events, error results, missing result events, malformed JSON lines, empty files, large lines, and first-result-wins behavior (#389)
@@ -20,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
+- **Scheduler SQLite contention and UNIQUE constraint**: Fixed SQLITE_BUSY errors from concurrent scheduler/supervisor DB access; handle UNIQUE constraint violations when reinserting schedules; improved error logging (#431)
+- **Daemon exiting on scheduler-only deploys**: Fixed daemon exiting immediately when running with only scheduled jobs and no issue arguments (#427)
+- **Enroll validation**: Use minder CLI for YAML validation instead of Python/Ruby YAML parsers (#422)
+- **Default review stage**: Add default review stage when agent contract has no stages declared, preventing nil pointer errors (#374)
+- **Smart bail extraction**: Handle multi-level JSON escaping in bail report extraction; improved write-to-file pattern for issue comments; fix bail extraction and worktree cleanup across deploy IDs (#408)
 - **Stable slot numbering for running jobs**: `RunningJobs()`, `SlotStatus()`, and `StopAgent()` now sort by job ID before assigning slot numbers, preventing nondeterministic ordering from Go map iteration (#384)
 - **Git log date parsing fallback**: `Log()`, `LogSince()`, and `LogGrep()` now use `time.Now()` as fallback when commit dates fail RFC3339 parsing, instead of silently producing zero-valued timestamps. Extracted shared `parseLogOutput()` helper to deduplicate parsing logic across all three functions. (#392)
 - **Replace custom lastIndex with strings.LastIndex**: Removed custom `lastIndex()` in review.go that reimplemented `strings.LastIndex()` and had a potential panic on short strings (#383)
