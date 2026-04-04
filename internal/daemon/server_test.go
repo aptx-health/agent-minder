@@ -84,6 +84,36 @@ func TestHandleStatus(t *testing.T) {
 	}
 }
 
+func TestHandleJobsEmptyReturnsArray(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// A fresh deploy with no jobs should return [] not null.
+	rr := doRequest(t, srv, "GET", "/jobs")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+	if body != "[]\n" {
+		t.Errorf("empty jobs response = %q, want %q (must be JSON array, not null)", body, "[]\n")
+	}
+}
+
+func TestHandleLessonsEmptyReturnsArray(t *testing.T) {
+	srv, _ := testServer(t)
+
+	// No lessons exist — should return [] not null.
+	rr := doRequest(t, srv, "GET", "/lessons")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+	if body != "[]\n" {
+		t.Errorf("empty lessons response = %q, want %q (must be JSON array, not null)", body, "[]\n")
+	}
+}
+
 func TestHandleTasks(t *testing.T) {
 	srv, store := testServer(t)
 

@@ -152,7 +152,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	var resp []JobResponse
+	resp := make([]JobResponse, 0, len(jobs))
 	for _, j := range jobs {
 		resp = append(resp, jobToResponse(j))
 	}
@@ -264,7 +264,7 @@ func (s *Server) handleLessons(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var resp []LessonResponse
+	resp := make([]LessonResponse, 0, len(lessons))
 	for _, l := range lessons {
 		resp = append(resp, LessonResponse{
 			ID:             l.ID,

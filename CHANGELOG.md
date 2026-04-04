@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
+- **SwiftBar plugin shows stale status after daemon restart**: Updated `scripts/agent-minder.30s.sh` to use v2 schema (`deployments`/`jobs` tables, `v2.db` path) and filter to only active deployments via PID file checks. Also fixed `/jobs` and `/lessons` API endpoints to return `[]` instead of `null` when empty. (#434)
 - **Scheduler SQLite contention and UNIQUE constraint**: Fixed SQLITE_BUSY errors from concurrent scheduler/supervisor DB access; handle UNIQUE constraint violations when reinserting schedules; improved error logging (#431)
 - **Daemon exiting on scheduler-only deploys**: Fixed daemon exiting immediately when running with only scheduled jobs and no issue arguments (#427)
 - **Enroll validation**: Use minder CLI for YAML validation instead of Python/Ruby YAML parsers (#422)
