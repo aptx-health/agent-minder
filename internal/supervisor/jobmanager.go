@@ -361,7 +361,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	// regardless of whether they declare explicit stages.
 	stages := contract.Stages
 	if len(stages) == 0 {
-		stages = []StageContract{{Name: "code", Agent: job.Agent, OnFailure: "bail"}}
+		stages = []StageContract{{Name: "run", Agent: job.Agent, OnFailure: "bail"}}
 	}
 	if sc.Deploy.ReviewEnabled && contract.Output == "pr" && !hasReviewStage(stages) {
 		stages = append(stages, StageContract{

@@ -50,7 +50,7 @@ func DefaultContract(agentName string) *AgentContract {
 		BranchPrefix: "agent/issue",
 		Timeout:      "2h",
 		Stages: []StageContract{
-			{Name: "code", Timeout: "45m", OnFailure: "bail"},
+			{Name: "run", Timeout: "45m", OnFailure: "bail"},
 		},
 	}
 }
@@ -64,7 +64,7 @@ func DefaultAutopilotContract() *AgentContract {
 		BranchPrefix: "agent/issue",
 		Timeout:      "2h",
 		Stages: []StageContract{
-			{Name: "code", Timeout: "45m", OnFailure: "bail"},
+			{Name: "implement", Timeout: "45m", OnFailure: "bail"},
 			{Name: "review", Agent: "reviewer", Timeout: "15m", OnFailure: "skip", Retries: 1},
 		},
 	}

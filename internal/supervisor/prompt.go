@@ -52,6 +52,12 @@ description: >
 tools: Bash, Read, Edit, Write, Glob, Grep
 mode: reactive
 output: pr
+stages:
+  - name: implement
+  - name: review
+    agent: reviewer
+    on_failure: skip
+    retries: 1
 context:
   - issue
   - repo_info

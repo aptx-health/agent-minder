@@ -442,7 +442,7 @@ func TestPipeline_ProactiveAgent(t *testing.T) {
 		Mode:   "proactive",
 		Output: "pr",
 		Stages: []StageContract{
-			{Name: "code", Agent: "dependency-updater", OnFailure: "bail"},
+			{Name: "scan", Agent: "dependency-updater", OnFailure: "bail"},
 			{Name: "review", Agent: "reviewer", OnFailure: "skip", Retries: 1},
 		},
 	}
@@ -694,7 +694,7 @@ func TestPipeline_ReviewSkipOnNoPR(t *testing.T) {
 		Mode:   "reactive",
 		Output: "none",
 		Stages: []StageContract{
-			{Name: "code", Agent: "report-gen", OnFailure: "bail"},
+			{Name: "run", Agent: "report-gen", OnFailure: "bail"},
 			{Name: "review", Agent: "reviewer", OnFailure: "skip"},
 		},
 	}
