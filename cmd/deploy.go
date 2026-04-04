@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aptx-health/agent-minder/internal/auth"
 	"github.com/aptx-health/agent-minder/internal/claudecli"
 	"github.com/aptx-health/agent-minder/internal/daemon"
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -114,9 +115,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ghToken := os.Getenv("GITHUB_TOKEN")
-	if ghToken == "" {
-		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
+	ghToken, err := auth.GetToken()
+	if err != nil {
+		return fmt.Errorf("GITHUB_TOKEN required: set via env or run 'minder auth login'\n  %w", err)
+	}
+
+	// Ensure token is in env for daemon re-exec and agent subprocesses.
+	if os.Getenv("GITHUB_TOKEN") == "" {
+		_ = os.Setenv("GITHUB_TOKEN", ghToken)
 	}
 
 	// Auto-detect base branch if not specified.
@@ -176,7 +182,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Prepare: fetch issues, create jobs, build dep graph.
 	if len(issues) > 0 {
-		ghToken := os.Getenv("GITHUB_TOKEN")
+		ghToken, _ := auth.GetToken()
 		completer := claudecli.NewCLICompleter()
 		fmt.Println("Preparing...")
 		result, err := supervisor.Prepare(context.Background(), store, completer, deploy, issues, flagAgent, ghToken)
@@ -277,7 +283,7 @@ func runForeground(deployID string) error {
 		return fmt.Errorf("get deployment: %w", err)
 	}
 
-	ghToken := os.Getenv("GITHUB_TOKEN")
+	ghToken, _ := auth.GetToken()
 
 	// Create supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
@@ -385,7 +391,7 @@ func runDaemon(deployID string) error {
 		return fmt.Errorf("get deployment: %w", err)
 	}
 
-	ghToken := os.Getenv("GITHUB_TOKEN")
+	ghToken, _ := auth.GetToken()
 	completer := claudecli.NewCLICompleter()
 
 	// Check if jobs already exist (daemon restart).

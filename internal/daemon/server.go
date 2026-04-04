@@ -325,8 +325,9 @@ type JobResponse struct {
 	ID           int64   `json:"id"`
 	Agent        string  `json:"agent"`
 	Name         string  `json:"name"`
+	Title        string  `json:"title"`
 	IssueNumber  int     `json:"issue_number,omitempty"`
-	IssueTitle   string  `json:"issue_title,omitempty"`
+	IssueTitle   string  `json:"issue_title,omitempty"` // deprecated: use title
 	Owner        string  `json:"owner"`
 	Repo         string  `json:"repo"`
 	Status       string  `json:"status"`
@@ -365,12 +366,19 @@ type LessonResponse struct {
 // --- Helpers ---
 
 func jobToResponse(j *db.Job) JobResponse {
+	// Title: prefer issue title for reactive jobs, fall back to job name.
+	title := j.IssueTitle.String
+	if title == "" {
+		title = j.Name
+	}
+
 	resp := JobResponse{
 		ID:           j.ID,
 		Agent:        j.Agent,
 		Name:         j.Name,
+		Title:        title,
 		IssueNumber:  j.IssueNumber,
-		IssueTitle:   j.IssueTitle.String,
+		IssueTitle:   j.IssueTitle.String, // deprecated compat
 		Owner:        j.Owner,
 		Repo:         j.Repo,
 		Status:       j.Status,

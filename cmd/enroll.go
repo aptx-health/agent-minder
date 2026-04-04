@@ -174,7 +174,7 @@ Languages: %v
 
 %s
 
-## Your goals
+## Your goals (in order)
 
 ### 1. Onboarding configuration
 - Ask about the test command (verify it works by running it)
@@ -185,28 +185,12 @@ Languages: %v
 - Determine which tools agents need (start with defaults, add as needed)
 - Update the onboarding file with the gathered information (including base_branch in the context section)
 
-### 2. Customize agent definitions
-Agent definition files are in .claude/agents/*.md. Each file has YAML frontmatter
-between --- markers, followed by instruction text.
+### 2. Choose which agents to install
+Present all available agent types and let the user choose which to install.
+Required agents (autopilot, reviewer) are always installed. Optional agents:
 
-CRITICAL RULES for agent definitions:
-- The YAML frontmatter (between the --- markers) must NOT be modified. It contains
-  contract fields that the orchestrator parses. Changing it will break the agent.
-- You may ONLY modify the instruction text BELOW the closing --- marker.
-- Customize the instructions based on what you learn about the repo: coding conventions,
-  test patterns, important directories, review standards, etc.
-- Keep instructions concise and actionable.
-
-Reference frontmatter for each agent type:
-%s
-
-### 3. Offer optional agents
-After the basic setup, ask the user if they want to install optional agents.
-Present each one with a brief description and whether it makes sense for this repo:
-
-- **bug-fixer**: Specialized bug-fixing agent. Investigates code, attempts fixes even
-  when headless reproduction isn't possible, writes regression tests when feasible.
-  Relevant for any repo. Triggered by the "bug" label on issues.
+- **bug-fixer**: Specialized bug-fixing agent. Triggered by the "bug" label on issues.
+  Relevant for any repo.
 - **dependency-updater**: Scans for outdated deps, updates, tests, and PRs.
   Relevant if the repo has package managers (go.mod, package.json, requirements.txt, Cargo.toml).
 - **security-scanner**: Runs security audit tools and reports findings as issues.
@@ -214,13 +198,53 @@ Present each one with a brief description and whether it makes sense for this re
 - **doc-updater**: Reviews recent changes and updates documentation.
   Relevant if the repo has README.md, CHANGELOG.md, or API docs.
 
-For each agent the user wants, install it using the Write tool:
-- Write the file to .claude/agents/<name>.md
-- Use the exact frontmatter from the reference below (DO NOT MODIFY IT)
-- Customize ONLY the instruction body based on the repo's ecosystem
-  (e.g., for a Go project's dependency-updater, mention go.mod, go get -u, govulncheck)
+### 3. Run research sub-agents (IMPORTANT — do this BEFORE writing agent definitions)
+For EACH agent the user wants installed (including required agents), spawn a research
+sub-agent using the Bash tool to run:
 
-### 4. Configure jobs.yaml
+  claude -p --model sonnet "Research this codebase for writing an optimized <agent-name> agent definition. Focus on: <focus areas>. Output ONLY the instruction body markdown — no frontmatter, no preamble."
+
+Run ALL research sub-agents in parallel (use & and wait) to save time:
+
+  (claude -p --model sonnet "..." > /tmp/research-autopilot.md 2>/dev/null &
+   claude -p --model sonnet "..." > /tmp/research-reviewer.md 2>/dev/null &
+   claude -p --model sonnet "..." > /tmp/research-bug-fixer.md 2>/dev/null &
+   wait)
+
+Each research agent should focus on what matters for its agent type:
+
+- **autopilot**: Architecture, entry points, build/test/lint commands, git conventions,
+  commit message style, PR conventions, CLAUDE.md guidance, common pitfalls.
+- **reviewer**: Code review standards, test coverage expectations, lint/format rules,
+  CI checks, common anti-patterns, what to watch for in PRs.
+- **bug-fixer**: Test frameworks, how to reproduce bugs, error handling patterns,
+  how to write regression tests in this project's style, key bug-prone areas.
+- **dependency-updater**: Package managers and config files, exact commands to check
+  and update deps, lock file handling, version constraints, multiple ecosystems.
+- **security-scanner**: Available security tools, audit commands, sensitive code areas,
+  secrets management, existing security config files.
+- **doc-updater**: Existing docs, documentation style, doc build tools, areas that
+  drift when code changes, doc linting tools.
+
+After all research agents complete, read each output file.
+
+### 4. Write agent definitions using research results
+Agent definition files go in .claude/agents/<name>.md. Each file has YAML frontmatter
+between --- markers, followed by instruction text.
+
+CRITICAL RULES:
+- The YAML frontmatter (between the --- markers) must NOT be modified. It contains
+  contract fields that the orchestrator parses. Changing it will break the agent.
+- You may ONLY customize the instruction text BELOW the closing --- marker.
+- Use the research sub-agent output as the foundation for each instruction body.
+  Refine it: ensure it references actual commands, directories, and conventions
+  found in THIS repo. Remove any generic filler that doesn't add value.
+- Keep instructions concise and actionable.
+
+Reference frontmatter for each agent type (use these EXACTLY):
+%s
+
+### 5. Configure jobs.yaml
 Create or update .agent-minder/jobs.yaml with trigger routes and cron schedules
 based on which agents the user installed:
 
@@ -247,13 +271,15 @@ Example jobs.yaml structure:
       description: "Check for outdated dependencies"
       budget: 3.0
 
-### 5. Validate
+### 6. Validate
 - Validate agent defs: minder agents list --repo .
 - Validate jobs.yaml: minder jobs list --repo .
   Both use the actual Go YAML parser. If minder is not on PATH, use go run ./cmd/minder.
   Do NOT use Python or Ruby YAML parsers — they have incompatibilities with Go's parser.
 - If validation fails, fix the issue and re-validate
 
-Be concise and efficient. Most repos need minimal configuration.`,
+Be concise and efficient. The research agents do the heavy lifting — your job is to
+orchestrate the interview, launch research, and assemble the results into polished
+agent definitions.`,
 		filePath, info.Path, info.Inventory.Languages, agentReport, templateRef.String())
 }

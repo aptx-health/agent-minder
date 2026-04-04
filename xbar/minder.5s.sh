@@ -92,9 +92,9 @@ echo "$TASKS" | jq -r '.[] |
   (if .pr_number > 0 then "  →PR#\(.pr_number)" else "" end) as $pr |
   (if .cost_usd > 0 then "  $\(.cost_usd | tostring | .[0:5])" else "" end) as $cost |
   (if .issue_number > 0 then "#\(.issue_number) " else "" end) as $issue |
-  (if .name != null and .issue_number == 0 then "\(.name[:30]) " else "" end) as $jobname |
+  ((.title // .issue_title // .name // "")[:40]) as $title |
   (if .agent != null and .agent != "autopilot" then "[\(.agent)] " else "" end) as $agent |
-  "\($style.icon) \($agent)\($issue)\($jobname)\(.issue_title[:40])\($pr)\($cost) | font=Menlo size=12 color=\($style.color)"'
+  "\($style.icon) \($agent)\($issue)\($title)\($pr)\($cost) | font=Menlo size=12 color=\($style.color)"'
 
 # Show empty state.
 if [ "$(echo "$TASKS" | jq 'length')" -eq 0 ]; then

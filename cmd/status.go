@@ -48,8 +48,9 @@ type budgetJSON struct {
 }
 
 type jobJSON struct {
-	IssueNumber int     `json:"issue_number"`
-	IssueTitle  string  `json:"issue_title"`
+	IssueNumber int     `json:"issue_number,omitempty"`
+	Title       string  `json:"title"`
+	Agent       string  `json:"agent,omitempty"`
 	Status      string  `json:"status"`
 	PRNumber    int     `json:"pr_number,omitempty"`
 	CostUSD     float64 `json:"cost_usd,omitempty"`
@@ -80,7 +81,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			for i, j := range jobs {
 				jj[i] = jobJSON{
 					IssueNumber: j.IssueNumber,
-					IssueTitle:  j.IssueTitle,
+					Title:       j.Title,
+					Agent:       j.Agent,
 					Status:      j.Status,
 					PRNumber:    j.PRNumber,
 					CostUSD:     j.CostUSD,
@@ -139,9 +141,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			if j.PRNumber.Valid {
 				pr = int(j.PRNumber.Int64)
 			}
+			title := j.IssueTitle.String
+			if title == "" {
+				title = j.Name
+			}
 			jj[i] = jobJSON{
 				IssueNumber: j.IssueNumber,
-				IssueTitle:  j.IssueTitle.String,
+				Title:       title,
+				Agent:       j.Agent,
 				Status:      j.Status,
 				PRNumber:    pr,
 				CostUSD:     j.CostUSD,
@@ -178,7 +185,19 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if j.CostUSD > 0 {
 			cost = fmt.Sprintf(" $%.2f", j.CostUSD)
 		}
-		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", j.IssueNumber, j.IssueTitle.String, j.Status, pr, cost)
+		title := j.IssueTitle.String
+		if title == "" {
+			title = j.Name
+		}
+		if j.IssueNumber > 0 {
+			fmt.Printf("  #%-5d %-30s %-10s%s%s\n", j.IssueNumber, title, j.Status, pr, cost)
+		} else {
+			agent := ""
+			if j.Agent != "autopilot" {
+				agent = fmt.Sprintf("[%s] ", j.Agent)
+			}
+			fmt.Printf("  %-6s %-30s %-10s%s%s\n", agent, title, j.Status, pr, cost)
+		}
 	}
 
 	return nil
@@ -230,6 +249,18 @@ func printJobs(jobs []daemon.JobResponse) {
 		if j.CostUSD > 0 {
 			cost = fmt.Sprintf(" $%.2f", j.CostUSD)
 		}
-		fmt.Printf("  #%-5d %-30s %-10s%s%s\n", j.IssueNumber, j.IssueTitle, j.Status, pr, cost)
+		title := j.Title
+		if title == "" {
+			title = j.IssueTitle // fallback for older daemons
+		}
+		if j.IssueNumber > 0 {
+			fmt.Printf("  #%-5d %-30s %-10s%s%s\n", j.IssueNumber, title, j.Status, pr, cost)
+		} else {
+			agent := ""
+			if j.Agent != "autopilot" {
+				agent = fmt.Sprintf("[%s] ", j.Agent)
+			}
+			fmt.Printf("  %-6s %-30s %-10s%s%s\n", agent, title, j.Status, pr, cost)
+		}
 	}
 }

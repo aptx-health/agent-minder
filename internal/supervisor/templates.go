@@ -27,6 +27,12 @@ description: >
 tools: Bash, Read, Edit, Write, Glob, Grep
 mode: reactive
 output: pr
+stages:
+  - name: implement
+  - name: review
+    agent: reviewer
+    on_failure: skip
+    retries: 1
 context:
   - issue
   - repo_info
@@ -93,6 +99,12 @@ description: >
 tools: Bash, Read, Edit, Write, Glob, Grep
 mode: reactive
 output: pr
+stages:
+  - name: fix
+  - name: review
+    agent: reviewer
+    on_failure: skip
+    retries: 1
 context:
   - issue
   - repo_info
@@ -142,6 +154,12 @@ description: >
 tools: Bash, Read, Edit, Write, Glob, Grep
 mode: proactive
 output: pr
+stages:
+  - name: scan
+  - name: review
+    agent: reviewer
+    on_failure: skip
+    retries: 1
 context:
   - repo_info
   - file_list
@@ -193,6 +211,8 @@ description: >
 tools: Bash, Read, Edit, Write, Glob, Grep
 mode: proactive
 output: issue
+stages:
+  - name: audit
 context:
   - repo_info
   - file_list
@@ -240,6 +260,12 @@ description: >
 tools: Bash, Read, Edit, Write, Glob, Grep
 mode: proactive
 output: pr
+stages:
+  - name: update
+  - name: review
+    agent: reviewer
+    on_failure: skip
+    retries: 1
 context:
   - repo_info
   - file_list
