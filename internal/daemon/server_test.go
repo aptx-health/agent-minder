@@ -134,6 +134,9 @@ func TestHandleTasks(t *testing.T) {
 	if jobs[0].IssueTitle != "Fix auth" {
 		t.Errorf("issue_title = %q, want %q", jobs[0].IssueTitle, "Fix auth")
 	}
+	if jobs[0].Title != "Fix auth" {
+		t.Errorf("title = %q, want %q", jobs[0].Title, "Fix auth")
+	}
 }
 
 func TestHandleTaskByID(t *testing.T) {
@@ -166,6 +169,9 @@ func TestHandleTaskByID(t *testing.T) {
 	}
 	if resp.IssueTitle != "Add feature" {
 		t.Errorf("issue_title = %q, want %q", resp.IssueTitle, "Add feature")
+	}
+	if resp.Title != "Add feature" {
+		t.Errorf("title = %q, want %q", resp.Title, "Add feature")
 	}
 
 	// Non-existent task → 404.
