@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
@@ -41,6 +42,17 @@ type stageResult struct {
 	assessment *ReviewAssessment // review assessment if this was a review stage
 }
 
+// TestHooks allows tests to override SlotContext methods that call external
+// systems (Claude CLI, git, GitHub API). When a hook is non-nil, the
+// corresponding method uses it instead of the real implementation.
+type TestHooks struct {
+	RunClaudeAgentFn          func(ctx context.Context, args []string, logFile *os.File) (int, error)
+	DetectPRFn                func(ctx context.Context) int
+	SetupWorktreeFn           func() error
+	EnsureAgentDefFn          func(name AgentName) (AgentDefSource, error)
+	ExtractReviewAssessmentFn func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment
+}
+
 // SlotContext provides primitives that job managers use to interact
 // with the system (worktrees, agent execution, events, GitHub, lessons).
 type SlotContext struct {
@@ -64,6 +76,9 @@ type SlotContext struct {
 
 	// Internal reference to supervisor.
 	sup *Supervisor
+
+	// Test hooks — nil in production, set by tests to override external calls.
+	Hooks *TestHooks
 }
 
 // EmitEvent emits a supervisor event for this job.
@@ -88,6 +103,10 @@ func (sc *SlotContext) NewGHClient() *ghpkg.Client {
 // Cleans up any stale worktree/branch from a previous run first.
 // Safe to call concurrently — uses the supervisor's gitSetupMu.
 func (sc *SlotContext) SetupWorktree() error {
+	if sc.Hooks != nil && sc.Hooks.SetupWorktreeFn != nil {
+		return sc.Hooks.SetupWorktreeFn()
+	}
+
 	_ = os.MkdirAll(filepath.Dir(sc.WorktreePath), 0755)
 
 	sc.sup.gitSetupMu.Lock()
@@ -109,6 +128,9 @@ func (sc *SlotContext) SetupWorktree() error {
 
 // EnsureAgentDef ensures the agent definition exists in the worktree.
 func (sc *SlotContext) EnsureAgentDef(name AgentName) (AgentDefSource, error) {
+	if sc.Hooks != nil && sc.Hooks.EnsureAgentDefFn != nil {
+		return sc.Hooks.EnsureAgentDefFn(name)
+	}
 	return ensureAgentDefByName(sc.WorktreePath, name)
 }
 
@@ -125,6 +147,10 @@ func (sc *SlotContext) OpenLogFile(appendMode bool) (*os.File, error) {
 // RunClaudeAgent executes a claude agent process and streams output.
 // Returns the exit code and any error.
 func (sc *SlotContext) RunClaudeAgent(ctx context.Context, args []string, logFile *os.File) (int, error) {
+	if sc.Hooks != nil && sc.Hooks.RunClaudeAgentFn != nil {
+		return sc.Hooks.RunClaudeAgentFn(ctx, args, logFile)
+	}
+
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Dir = sc.WorktreePath
 	cmd.Stderr = logFile
@@ -168,6 +194,10 @@ func (sc *SlotContext) RunClaudeAgent(ctx context.Context, args []string, logFil
 
 // DetectPR looks for a PR in the log or via GitHub API.
 func (sc *SlotContext) DetectPR(ctx context.Context) int {
+	if sc.Hooks != nil && sc.Hooks.DetectPRFn != nil {
+		return sc.Hooks.DetectPRFn(ctx)
+	}
+
 	// Check log first.
 	prNum := detectPRFromLog(sc.LogPath, sc.Owner, sc.Repo)
 	if prNum > 0 {
@@ -325,16 +355,18 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	}
 	defer func() { _ = logFile.Close() }()
 
-	// If no stages declared, use default pipeline.
-	// Code stage always runs; review stage added if review is enabled.
+	// Build the stage pipeline. If no stages declared, create default code stage.
+	// If review is enabled and the pipeline produces PRs but has no review stage,
+	// append one automatically. This ensures all PR-producing agents get reviewed
+	// regardless of whether they declare explicit stages.
 	stages := contract.Stages
 	if len(stages) == 0 {
 		stages = []StageContract{{Name: "code", Agent: job.Agent, OnFailure: "bail"}}
-		if sc.Deploy.ReviewEnabled {
-			stages = append(stages, StageContract{
-				Name: "review", Agent: "reviewer", OnFailure: "skip", Retries: 1,
-			})
-		}
+	}
+	if sc.Deploy.ReviewEnabled && contract.Output == "pr" && !hasReviewStage(stages) {
+		stages = append(stages, StageContract{
+			Name: "review", Agent: "reviewer", OnFailure: "skip", Retries: 1,
+		})
 	}
 
 	// --- Stage loop ---
@@ -520,7 +552,7 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 	_, _ = sc.RunClaudeAgent(ctx, args, logFile)
 
 	// Extract structured assessment.
-	assessment := extractReviewAssessmentFromLog(ctx, sc.LogPath, job, sc.sup)
+	assessment := extractReviewAssessmentFromLog(ctx, sc.LogPath, job, sc.sup, sc.Hooks)
 
 	risk := assessment.Risk
 	if risk == "" {
@@ -621,8 +653,22 @@ func formatReviewFeedback(assessment *ReviewAssessment) string {
 	return b.String()
 }
 
+// hasReviewStage checks if any stage in the pipeline is named "review".
+func hasReviewStage(stages []StageContract) bool {
+	for _, s := range stages {
+		if s.Name == "review" {
+			return true
+		}
+	}
+	return false
+}
+
 // extractReviewAssessmentFromLog is a package-level version of the review assessment extraction.
-func extractReviewAssessmentFromLog(ctx context.Context, logPath string, job *db.Job, sup *Supervisor) ReviewAssessment {
+// If the SlotContext has a test hook, it uses that instead of the real LLM call.
+func extractReviewAssessmentFromLog(ctx context.Context, logPath string, job *db.Job, sup *Supervisor, hooks *TestHooks) ReviewAssessment {
+	if hooks != nil && hooks.ExtractReviewAssessmentFn != nil {
+		return hooks.ExtractReviewAssessmentFn(ctx, logPath, job)
+	}
 	return sup.extractReviewAssessment(ctx, job, logPath)
 }
 
@@ -661,5 +707,47 @@ func SlotContextForTest(store *db.Store, deploy *db.Deployment, job *db.Job) *Sl
 		Store:  store,
 		Deploy: deploy,
 		Job:    job,
+	}
+}
+
+// NewTestSupervisor creates a Supervisor suitable for pipeline tests.
+// It sets up the event channel, running map, and a no-op GH client factory.
+func NewTestSupervisor(store *db.Store, deploy *db.Deployment, repoDir string) *Supervisor {
+	return &Supervisor{
+		store:     store,
+		deploy:    deploy,
+		repoDir:   repoDir,
+		owner:     deploy.Owner,
+		repo:      deploy.Repo,
+		running:   make(map[int64]*runState),
+		maxAgents: deploy.MaxAgents,
+		events:    make(chan Event, 256),
+		ghClientFactory: func(token string) *ghpkg.Client {
+			return ghpkg.NewClient("") // no-op client (no token = all calls fail gracefully)
+		},
+	}
+}
+
+// RegisterTestJob registers a job in the supervisor's running map so that
+// EmitEvent, WasStoppedByUser, and RunClaudeAgent can reference it.
+func (s *Supervisor) RegisterTestJob(job *db.Job) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.running[job.ID] = &runState{
+		job:       job,
+		startedAt: time.Now(),
+	}
+}
+
+// DrainEvents reads all buffered events from the supervisor channel.
+func (s *Supervisor) DrainEvents() []Event {
+	var events []Event
+	for {
+		select {
+		case e := <-s.events:
+			events = append(events, e)
+		default:
+			return events
+		}
 	}
 }
