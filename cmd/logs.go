@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -141,12 +142,35 @@ func runLogsLocal(args []string) error {
 		}
 	}
 
-	// Find log path.
+	// Find log path — try DB column first, then conventions.
 	logPath := job.AgentLog.String
+
+	if logPath == "" || !fileExists(logPath) {
+		home, _ := os.UserHomeDir()
+		base := filepath.Join(home, ".agent-minder", "agents")
+
+		// Try patterns in order: new format (agent-issue-N), old format (issue-N),
+		// and job name directly.
+		candidates := []string{
+			filepath.Join(base, fmt.Sprintf("%s-%s.log", job.DeploymentID, job.Name)),
+		}
+		if job.IssueNumber > 0 {
+			candidates = append(candidates,
+				filepath.Join(base, fmt.Sprintf("%s-issue-%d.log", job.DeploymentID, job.IssueNumber)),
+			)
+		}
+
+		logPath = ""
+		for _, c := range candidates {
+			if fileExists(c) {
+				logPath = c
+				break
+			}
+		}
+	}
+
 	if logPath == "" {
-		// Try to construct from conventions.
-		logPath = fmt.Sprintf("%s/.agent-minder/agents/%s-%s.log",
-			os.Getenv("HOME"), job.DeploymentID, job.Name)
+		return fmt.Errorf("log not found for job %s (deploy %s)", job.Name, job.DeploymentID)
 	}
 
 	f, err := os.Open(logPath)
@@ -320,4 +344,9 @@ func truncateLogStr(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
