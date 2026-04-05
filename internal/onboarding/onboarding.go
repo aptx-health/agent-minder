@@ -56,6 +56,8 @@ type Context struct {
 	BuildCommand        string   `yaml:"build_command"`
 	TestCommand         string   `yaml:"test_command"`
 	LintCommand         string   `yaml:"lint_command"`
+	TestTimeout         string   `yaml:"test_timeout"`  // e.g., "3m", "5m" — timeout for test/build commands
+	BuildTimeout        string   `yaml:"build_timeout"` // e.g., "2m", "5m" — timeout for build commands
 	BaseBranch          string   `yaml:"base_branch"`
 	SpecialInstructions string   `yaml:"special_instructions"`
 	ToolsNeeded         []string `yaml:"tools_needed"`

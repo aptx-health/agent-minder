@@ -292,6 +292,34 @@ func detectTestCommand(repoDir string) string {
 	return ""
 }
 
+// resolveTimeout reads test or build timeout from onboarding.yaml.
+// Returns a default of "3m" for tests and "2m" for builds if not configured.
+func resolveTimeout(repoDir string, kind string) string {
+	f, err := onboarding.Parse(onboarding.FilePath(repoDir))
+	if err == nil {
+		switch kind {
+		case "test":
+			if f.Context.TestTimeout != "" {
+				return f.Context.TestTimeout
+			}
+		case "build":
+			if f.Context.BuildTimeout != "" {
+				return f.Context.BuildTimeout
+			}
+		}
+	}
+
+	// Defaults.
+	switch kind {
+	case "test":
+		return "5m"
+	case "build":
+		return "3m"
+	default:
+		return "5m"
+	}
+}
+
 // buildAgentArgs constructs CLI arguments for any agent with pre-assembled prompt.
 func buildAgentArgs(job *db.Job, deploy *db.Deployment, agentName string, allowedTools []string, prompt, lessonsPrompt string) []string {
 	maxTurns := job.EffectiveMaxTurns(deploy)
