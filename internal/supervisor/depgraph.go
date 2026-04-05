@@ -55,7 +55,7 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 		j := &db.Job{
 			DeploymentID: deploy.ID,
 			Agent:        agentName,
-			Name:         fmt.Sprintf("issue-%d", num),
+			Name:         fmt.Sprintf("%s-issue-%d", agentName, num),
 			IssueNumber:  num,
 			Owner:        deploy.Owner,
 			Repo:         deploy.Repo,
