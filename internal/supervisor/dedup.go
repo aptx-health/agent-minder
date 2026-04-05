@@ -29,10 +29,12 @@ func EvaluateDedup(ctx context.Context, sc *SlotContext, strategies []string) De
 }
 
 func evaluateStrategy(ctx context.Context, sc *SlotContext, strategy string) DedupResult {
-	// Parse strategy: "branch_exists", "open_pr_with_label:<label>", "recent_run:<hours>"
+	// Parse strategy: "branch_exists", "open_pr", "open_pr_with_label:<label>", "recent_run:<hours>"
 	switch {
 	case strategy == "branch_exists":
 		return dedupBranchExists(sc)
+	case strategy == "open_pr":
+		return dedupOpenPR(ctx, sc)
 	case strings.HasPrefix(strategy, "open_pr_with_label:"):
 		label := strings.TrimPrefix(strategy, "open_pr_with_label:")
 		return dedupOpenPRWithLabel(ctx, sc, label)
@@ -67,6 +69,30 @@ func dedupBranchExists(sc *SlotContext) DedupResult {
 				Skip:   true,
 				Reason: fmt.Sprintf("branch %q already exists on remote", branch),
 			}
+		}
+	}
+	return DedupResult{}
+}
+
+// dedupOpenPR skips if there's an open PR from the job's branch.
+// Unlike branch_exists, this allows retries when the branch exists but
+// the agent was interrupted before opening a PR (e.g., usage limit, crash).
+func dedupOpenPR(ctx context.Context, sc *SlotContext) DedupResult {
+	branch := sc.Branch
+	if branch == "" {
+		return DedupResult{}
+	}
+
+	ghClient := sc.NewGHClient()
+	prStatus, err := ghClient.FetchPRForBranch(ctx, sc.Owner, sc.Repo, branch)
+	if err != nil {
+		debugLog("dedup open_pr check failed", "branch", branch, "error", err)
+		return DedupResult{} // can't check, don't skip
+	}
+	if prStatus != nil && prStatus.State == "open" {
+		return DedupResult{
+			Skip:   true,
+			Reason: fmt.Sprintf("open PR #%d already exists for branch %q", prStatus.Number, branch),
 		}
 	}
 	return DedupResult{}
