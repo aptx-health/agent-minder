@@ -281,6 +281,19 @@ func (sc *SlotContext) ClearUsageLimitFlag() {
 	}
 }
 
+// TriggerLabel returns the label that triggered this job, if any.
+// Looks up the job's agent in the supervisor's trigger routes.
+func (sc *SlotContext) TriggerLabel() string {
+	sc.sup.mu.Lock()
+	defer sc.sup.mu.Unlock()
+	for _, route := range sc.sup.triggerRoutes {
+		if route.Agent == sc.Job.Agent {
+			return route.Label
+		}
+	}
+	return ""
+}
+
 // ParseCost extracts cost from the agent log.
 func (sc *SlotContext) ParseCost() float64 {
 	return parseCostFromLog(sc.LogPath)
@@ -745,6 +758,11 @@ func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk str
 
 	if job.IssueNumber > 0 {
 		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+
+		// Remove the trigger label that started this job (e.g., "bug", "spike", "agent-ready").
+		if triggerLabel := sc.TriggerLabel(); triggerLabel != "" {
+			ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, triggerLabel)
+		}
 	}
 
 	if job.PRNumber.Valid {
