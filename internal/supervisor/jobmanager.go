@@ -74,6 +74,8 @@ type SlotContext struct {
 	// Resolved config.
 	BaseBranch   string
 	TestCommand  string
+	TestTimeout  string // e.g., "3m" — agents should wrap test commands with timeout
+	BuildTimeout string // e.g., "2m" — agents should wrap build commands with timeout
 	AllowedTools []string
 
 	// Internal reference to supervisor.
@@ -311,6 +313,8 @@ func (s *Supervisor) newSlotContext(jobID int64, job *db.Job) *SlotContext {
 		LogPath:      logPath,
 		BaseBranch:   resolveBaseBranch(s.repoDir, s.deploy),
 		TestCommand:  resolveTestCommand(s.repoDir),
+		TestTimeout:  resolveTimeout(s.repoDir, "test"),
+		BuildTimeout: resolveTimeout(s.repoDir, "build"),
 		AllowedTools: resolveAllowedTools(s.repoDir),
 		sup:          s,
 	}

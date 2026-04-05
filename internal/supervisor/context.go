@@ -103,7 +103,11 @@ func renderRepoInfo(sc *SlotContext) string {
 	fmt.Fprintf(&b, "**Base branch:** %s\n\n", sc.BaseBranch)
 
 	if sc.TestCommand != "" {
-		fmt.Fprintf(&b, "**Test command:** `%s`\n\n", sc.TestCommand)
+		fmt.Fprintf(&b, "**Test command:** `timeout %s %s`\n", sc.TestTimeout, sc.TestCommand)
+		fmt.Fprintf(&b, "**Build command:** `timeout %s go build ./...`\n", sc.BuildTimeout)
+		fmt.Fprintf(&b, "\n**IMPORTANT:** Always wrap test and build commands with `timeout` as shown above.\n")
+		fmt.Fprintf(&b, "If a command hangs past its timeout, it will be killed automatically.\n")
+		fmt.Fprintf(&b, "A timeout exit (code 124) should be treated as a test failure, not retried indefinitely.\n\n")
 	}
 
 	// Try to include language/framework info from onboarding.
@@ -272,8 +276,8 @@ func renderReviewContext(ctx context.Context, sc *SlotContext) string {
 	}
 
 	if sc.TestCommand != "" {
-		fmt.Fprintf(&b, "## Test command\n\nRun tests: `%s`\n\n", sc.TestCommand)
-		b.WriteString("**IMPORTANT:** You MUST run this test command after making any fixes.\n\n")
+		fmt.Fprintf(&b, "## Test command\n\nRun tests: `timeout %s %s`\n\n", sc.TestTimeout, sc.TestCommand)
+		b.WriteString("**IMPORTANT:** Always use the `timeout` wrapper. If a test hangs past the timeout, it exits with code 124. Treat that as a test failure.\n\n")
 	}
 
 	// Add sibling context.
