@@ -135,6 +135,30 @@ func (c *Client) GetLessons() ([]LessonResponse, error) {
 	return resp, nil
 }
 
+// GetJobLogStream returns the raw HTTP response for streaming a job's log.
+// Caller is responsible for closing the response body.
+func (c *Client) GetJobLogStream(id int64) (*http.Response, error) {
+	// Use a longer timeout for streaming.
+	streamClient := &http.Client{Timeout: 0}
+	req, err := http.NewRequest("GET", c.baseURL+fmt.Sprintf("/jobs/%d/log", id), nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)
+	}
+	return resp, nil
+}
+
 // Stop sends a stop request to the daemon.
 func (c *Client) Stop() error {
 	return c.post("/stop")
