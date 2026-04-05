@@ -216,7 +216,8 @@ macOS menu bar widget shows agent status at a glance. Supports all job statuses 
 | `minder lesson add\|list\|edit\|remove\|pin\|groom` | Manage the learning system |
 | `minder jobs list\|run` | View and trigger scheduled jobs |
 | `minder agents list\|show\|add` | List, inspect, or create agent definitions |
-| `minder checkout [issue]` | Check out an agent's worktree for review (interactive picker) |
+| `minder checkout [issue]` | Check out an agent's worktree for review (interactive picker, `--remote`) |
+| `minder logs [issue]` | View agent log output (interactive picker, `--follow`, `--remote`, `--raw`) |
 | `minder enroll [repo-dir]` | Scan a repo and generate onboarding config |
 
 ### Deploy flags

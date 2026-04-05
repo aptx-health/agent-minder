@@ -9,6 +9,7 @@ import (
 
 	"github.com/atotto/clipboard"
 
+	"github.com/aptx-health/agent-minder/internal/daemon"
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	"github.com/aptx-health/agent-minder/internal/picker"
@@ -34,17 +35,25 @@ Examples:
 }
 
 var (
-	flagCheckoutRepo string
-	flagCheckoutJob  int64
+	flagCheckoutRepo   string
+	flagCheckoutJob    int64
+	flagCheckoutRemote string
+	flagCheckoutKey    string
 )
 
 func init() {
 	rootCmd.AddCommand(checkoutCmd)
 	checkoutCmd.Flags().StringVar(&flagCheckoutRepo, "repo", ".", "Repository directory")
 	checkoutCmd.Flags().Int64Var(&flagCheckoutJob, "job", 0, "Job ID (skip picker)")
+	checkoutCmd.Flags().StringVar(&flagCheckoutRemote, "remote", "", "Remote daemon address (host:port)")
+	checkoutCmd.Flags().StringVar(&flagCheckoutKey, "api-key", "", "API key for remote access")
 }
 
 func runCheckout(cmd *cobra.Command, args []string) error {
+	if flagCheckoutRemote != "" {
+		return runCheckoutRemote(args)
+	}
+
 	repoDir, err := resolveRepoDir(flagCheckoutRepo)
 	if err != nil {
 		return fmt.Errorf("resolve repo: %w", err)
@@ -222,8 +231,139 @@ func presentWorktree(path, branch string, job *db.Job) error {
 	return nil
 }
 
-// dirExists returns true if the path exists and is a directory.
+// dirExistsCheckout returns true if the path exists and is a directory.
 func dirExistsCheckout(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// runCheckoutRemote handles checkout from a remote daemon — fetches branch info
+// from the API, then creates a local worktree from origin/<branch>.
+func runCheckoutRemote(args []string) error {
+	repoDir, err := resolveRepoDir(flagCheckoutRepo)
+	if err != nil {
+		return fmt.Errorf("resolve repo: %w", err)
+	}
+
+	addr := flagCheckoutRemote
+	if !strings.Contains(addr, "://") {
+		addr = "http://" + addr
+	}
+	client := daemon.NewClient(addr, flagCheckoutKey)
+
+	var selected *daemon.JobResponse
+
+	if flagCheckoutJob > 0 {
+		j, err := client.GetJob(flagCheckoutJob)
+		if err != nil {
+			return fmt.Errorf("job %d not found: %w", flagCheckoutJob, err)
+		}
+		selected = j
+	}
+
+	// Issue from arg.
+	if selected == nil && len(args) > 0 {
+		arg := strings.TrimPrefix(args[0], "#")
+		issueNum, parseErr := strconv.Atoi(arg)
+		if parseErr != nil {
+			return fmt.Errorf("invalid argument %q", args[0])
+		}
+		jobs, err := client.GetJobs()
+		if err != nil {
+			return fmt.Errorf("fetch jobs: %w", err)
+		}
+		var candidates []daemon.JobResponse
+		for _, j := range jobs {
+			if j.IssueNumber == issueNum {
+				candidates = append(candidates, j)
+			}
+		}
+		if len(candidates) == 0 {
+			return fmt.Errorf("no jobs found for issue #%d", issueNum)
+		}
+		if len(candidates) > 1 {
+			selected, err = picker.PickRemoteJob(candidates, fmt.Sprintf("Multiple jobs for #%d", issueNum))
+			if err != nil {
+				return err
+			}
+		} else {
+			selected = &candidates[0]
+		}
+	}
+
+	// Interactive picker.
+	if selected == nil {
+		jobs, err := client.GetJobs()
+		if err != nil {
+			return fmt.Errorf("fetch jobs: %w", err)
+		}
+		var candidates []daemon.JobResponse
+		for _, j := range jobs {
+			if j.Status != "queued" && j.Status != "blocked" {
+				candidates = append(candidates, j)
+			}
+		}
+		if len(candidates) == 0 {
+			fmt.Println("No jobs found on remote daemon.")
+			return nil
+		}
+		selected, err = picker.PickRemoteJob(candidates, "Select a job")
+		if err != nil {
+			return err
+		}
+	}
+
+	if selected.Status == "running" || selected.Status == "reviewing" {
+		fmt.Printf("\nWarning: this job is currently %s — the agent is actively working.\n\n", selected.Status)
+	}
+
+	branch := selected.Branch
+	if branch == "" {
+		return fmt.Errorf("job has no branch — cannot create worktree")
+	}
+
+	// Fetch the branch from remote and create a local worktree.
+	fmt.Printf("Fetching branch %s from remote...\n", branch)
+	_ = gitpkg.Fetch(repoDir)
+	_ = gitpkg.WorktreePrune(repoDir)
+
+	home, _ := os.UserHomeDir()
+	worktreePath := filepath.Join(home, ".agent-minder", "worktrees", "checkout", selected.Name)
+	_ = os.MkdirAll(filepath.Dir(worktreePath), 0755)
+
+	// Remove stale worktree at this path.
+	if dirExistsCheckout(worktreePath) {
+		_ = gitpkg.WorktreeRemove(repoDir, worktreePath)
+	}
+
+	// Delete local branch if it exists, recreate from origin.
+	_ = gitpkg.DeleteBranch(repoDir, branch)
+	err = gitpkg.WorktreeAdd(repoDir, worktreePath, branch, "origin/"+branch)
+	if err != nil {
+		return fmt.Errorf("could not create worktree from branch %s: %w", branch, err)
+	}
+
+	title := selected.Title
+	fmt.Println()
+	if selected.IssueNumber > 0 {
+		fmt.Printf("  Issue:    #%d — %s\n", selected.IssueNumber, title)
+	} else {
+		fmt.Printf("  Job:      %s\n", title)
+	}
+	fmt.Printf("  Agent:    %s\n", selected.Agent)
+	fmt.Printf("  Status:   %s\n", selected.Status)
+	if selected.PRNumber > 0 {
+		fmt.Printf("  PR:       #%d\n", selected.PRNumber)
+	}
+	fmt.Printf("  Branch:   %s\n", branch)
+	fmt.Printf("  Worktree: %s\n", worktreePath)
+	fmt.Println()
+
+	if err := clipboard.WriteAll(worktreePath); err == nil {
+		fmt.Println("Path copied to clipboard.")
+	} else {
+		fmt.Printf("  cd %s\n", worktreePath)
+	}
+
+	return nil
 }
