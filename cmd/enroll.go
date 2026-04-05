@@ -197,6 +197,9 @@ Required agents (autopilot, reviewer) are always installed. Optional agents:
   Relevant for any repo, especially those with dependencies.
 - **doc-updater**: Reviews recent changes and updates documentation.
   Relevant if the repo has README.md, CHANGELOG.md, or API docs.
+- **spike**: Research and discovery agent. Investigates questions, feasibility analysis,
+  and security impact assessment. Triggered by the "spike" label. Does NOT write code —
+  posts structured findings as a comment. Relevant for any repo.
 
 ### 3. Run research sub-agents (IMPORTANT — do this BEFORE writing agent definitions)
 For EACH agent the user wants installed (including required agents), spawn a research
@@ -225,6 +228,8 @@ Each research agent should focus on what matters for its agent type:
   secrets management, existing security config files.
 - **doc-updater**: Existing docs, documentation style, doc build tools, areas that
   drift when code changes, doc linting tools.
+- **spike**: Key domain areas, common question patterns, where important design
+  decisions are documented, external services/integrations the repo depends on.
 
 After all research agents complete, read each output file.
 
@@ -253,6 +258,7 @@ based on which agents the user installed:
 - For **dependency-updater**: add a weekly cron schedule (e.g., Monday morning)
 - For **security-scanner**: add a weekly cron schedule (e.g., Wednesday morning)
 - For **doc-updater**: add a weekly cron schedule (e.g., Friday morning)
+- For **spike**: add a trigger route: trigger: "label:spike"
 
 Ask the user what cron times work for them. Use UTC times in the cron expressions.
 
