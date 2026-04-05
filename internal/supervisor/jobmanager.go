@@ -156,7 +156,12 @@ func (sc *SlotContext) RunClaudeAgent(ctx context.Context, args []string, logFil
 	}
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	// Use worktree if set up, otherwise fall back to the repo directory.
+	// Non-worktree agents (output: issue, comment) run from the repo root.
 	cmd.Dir = sc.WorktreePath
+	if sc.WorktreePath == "" || !dirExists(sc.WorktreePath) {
+		cmd.Dir = sc.RepoDir
+	}
 	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+sc.GHToken)
 
@@ -274,6 +279,19 @@ func (sc *SlotContext) ClearUsageLimitFlag() {
 	if rs, ok := sc.sup.running[sc.Job.ID]; ok {
 		rs.hitUsageLimit = false
 	}
+}
+
+// TriggerLabel returns the label that triggered this job, if any.
+// Looks up the job's agent in the supervisor's trigger routes.
+func (sc *SlotContext) TriggerLabel() string {
+	sc.sup.mu.Lock()
+	defer sc.sup.mu.Unlock()
+	for _, route := range sc.sup.triggerRoutes {
+		if route.Agent == sc.Job.Agent {
+			return route.Label
+		}
+	}
+	return ""
 }
 
 // ParseCost extracts cost from the agent log.
@@ -740,6 +758,11 @@ func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk str
 
 	if job.IssueNumber > 0 {
 		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+
+		// Remove the trigger label that started this job (e.g., "bug", "spike", "agent-ready").
+		if triggerLabel := sc.TriggerLabel(); triggerLabel != "" {
+			ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, triggerLabel)
+		}
 	}
 
 	if job.PRNumber.Valid {
@@ -900,4 +923,10 @@ func (s *Supervisor) DrainEvents() []Event {
 			return events
 		}
 	}
+}
+
+// dirExists returns true if the path exists and is a directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }

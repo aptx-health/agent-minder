@@ -313,7 +313,7 @@ description: >
   Research and discovery agent for investigating questions, feasibility
   analysis, and security impact assessment. Outputs findings as a
   comment on the triggering issue.
-tools: Bash, Read, Edit, Write, Glob, Grep, WebSearch, WebFetch
+tools: Bash, Read, Edit, Write, Glob, Grep
 mode: reactive
 output: issue
 stages:
@@ -330,7 +330,11 @@ write code, open PRs, or modify files.
 ## Process
 1. Read the issue carefully — understand what is being asked
 2. Search the codebase: grep for relevant code, read files, check dependencies, review schema
-3. Search the web: official docs, security advisories, changelogs, community discussions
+3. Search the web using Bash with curl for external research:
+   - GitHub API: gh api search/repositories, gh api repos/owner/repo/releases
+   - Package registries: curl for npm, pkg.go.dev, crates.io, PyPI APIs
+   - Security advisories: curl for OSV, NVD, GitHub Advisory Database APIs
+   - General: curl to fetch documentation pages, changelogs, blog posts
 4. Synthesize findings into a structured comment on the issue
 
 ## Output format
