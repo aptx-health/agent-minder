@@ -211,6 +211,56 @@ func TestDefaultContract(t *testing.T) {
 	if len(c.Stages) != 1 {
 		t.Errorf("stages = %d, want 1", len(c.Stages))
 	}
+	// Reactive PR agents get branch_exists dedup by default.
+	if len(c.Dedup) != 1 || c.Dedup[0] != "open_pr" {
+		t.Errorf("dedup = %v, want [open_pr]", c.Dedup)
+	}
+}
+
+func TestDefaultDedupForReactiveAgents(t *testing.T) {
+	t.Run("reactive PR agent gets open_pr", func(t *testing.T) {
+		input := []byte("---\nname: autopilot\nmode: reactive\noutput: pr\n---\nBody")
+		c, err := ParseContractFromBytes(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(c.Dedup) != 1 || c.Dedup[0] != "open_pr" {
+			t.Errorf("dedup = %v, want [open_pr]", c.Dedup)
+		}
+	})
+
+	t.Run("reactive non-PR agent gets no dedup", func(t *testing.T) {
+		input := []byte("---\nname: scanner\nmode: reactive\noutput: issue\n---\nBody")
+		c, err := ParseContractFromBytes(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(c.Dedup) != 0 {
+			t.Errorf("dedup = %v, want empty", c.Dedup)
+		}
+	})
+
+	t.Run("proactive agent keeps explicit dedup", func(t *testing.T) {
+		input := []byte("---\nname: dep-updater\nmode: proactive\noutput: pr\ndedup:\n  - recent_run:168\n---\nBody")
+		c, err := ParseContractFromBytes(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(c.Dedup) != 1 || c.Dedup[0] != "recent_run:168" {
+			t.Errorf("dedup = %v, want [recent_run:168]", c.Dedup)
+		}
+	})
+
+	t.Run("reactive agent with explicit dedup keeps it", func(t *testing.T) {
+		input := []byte("---\nname: custom\nmode: reactive\noutput: pr\ndedup:\n  - recent_run:24\n---\nBody")
+		c, err := ParseContractFromBytes(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(c.Dedup) != 1 || c.Dedup[0] != "recent_run:24" {
+			t.Errorf("dedup = %v, want [recent_run:24]", c.Dedup)
+		}
+	})
 }
 
 func TestParseContractFromFile(t *testing.T) {

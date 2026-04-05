@@ -49,6 +49,7 @@ func DefaultContract(agentName string) *AgentContract {
 		Output:       "pr",
 		BranchPrefix: "agent/issue",
 		Timeout:      "2h",
+		Dedup:        []string{"open_pr"},
 		Stages: []StageContract{
 			{Name: "run", Timeout: "45m", OnFailure: "bail"},
 		},
@@ -184,6 +185,14 @@ func applyContractDefaults(c *AgentContract) {
 		} else {
 			c.Context = []string{"repo_info", "file_list", "recent_commits:7", "lessons"}
 		}
+	}
+
+	// Default dedup: reactive PR agents get open_pr to prevent re-running
+	// issues that already have an open PR from a previous deployment.
+	// Uses open_pr (not branch_exists) so interrupted runs can retry —
+	// a branch without a PR means the agent didn't finish.
+	if len(c.Dedup) == 0 && c.IsReactive() && c.NeedsWorktree() {
+		c.Dedup = []string{"open_pr"}
 	}
 
 	// Normalize stage defaults.
