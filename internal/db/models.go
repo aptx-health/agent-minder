@@ -117,6 +117,7 @@ const (
 	StatusBailed    = "bailed"
 	StatusManual    = "manual"
 	StatusStopped   = "stopped"
+	StatusWaiting   = "waiting" // waiting for usage limit reset
 )
 
 // DepGraph stores the dependency graph for a deployment.

@@ -17,13 +17,15 @@ type LiveStatus struct {
 // Stream-json event types (unexported, used only by scanner).
 
 type streamEvent struct {
-	Type      string     `json:"type"`
-	Subtype   string     `json:"subtype,omitempty"`
-	Message   *streamMsg `json:"message,omitempty"`
-	NumTurns  int        `json:"num_turns,omitempty"`
-	TotalCost float64    `json:"total_cost_usd,omitempty"`
-	Duration  int        `json:"duration_ms,omitempty"`
-	IsError   bool       `json:"is_error,omitempty"`
+	Type        string     `json:"type"`
+	Subtype     string     `json:"subtype,omitempty"`
+	Message     *streamMsg `json:"message,omitempty"`
+	NumTurns    int        `json:"num_turns,omitempty"`
+	TotalCost   float64    `json:"total_cost_usd,omitempty"`
+	Duration    int        `json:"duration_ms,omitempty"`
+	IsError     bool       `json:"is_error,omitempty"`
+	Error       string     `json:"error,omitempty"`        // system/api_retry error category
+	ErrorStatus int        `json:"error_status,omitempty"` // HTTP status (429 for rate limit)
 }
 
 type streamMsg struct {
@@ -89,6 +91,13 @@ func scanStream(r io.Reader, logFile *os.File, jobID int64, s *Supervisor) {
 			case "result":
 				rs.liveStatus.CurrentTool = ""
 				rs.liveStatus.ToolInput = ""
+
+			case "system":
+				// Detect usage limit from api_retry events.
+				if evt.Subtype == "api_retry" &&
+					(evt.Error == "rate_limit" || evt.Error == "billing_error") {
+					rs.hitUsageLimit = true
+				}
 			}
 		}
 		s.mu.Unlock()

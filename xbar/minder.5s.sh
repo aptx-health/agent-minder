@@ -35,6 +35,7 @@ fi
 
 # Count by status.
 RUNNING=$(echo "$TASKS" | jq '[.[] | select(.status=="running")] | length')
+WAITING=$(echo "$TASKS" | jq '[.[] | select(.status=="waiting")] | length')
 QUEUED=$(echo "$TASKS" | jq '[.[] | select(.status=="queued" or .status=="blocked")] | length')
 REVIEW=$(echo "$TASKS" | jq '[.[] | select(.status=="review" or .status=="reviewing" or .status=="reviewed")] | length')
 DONE=$(echo "$TASKS" | jq '[.[] | select(.status=="done")] | length')
@@ -59,6 +60,8 @@ fi
 # Menu bar title — color-coded.
 if [ "$PAUSED" = "true" ]; then
   echo "🤖 paused | color=#B35A00"
+elif [ "$WAITING" -gt 0 ] && [ "$RUNNING" -eq 0 ]; then
+  echo "🤖 ${WAITING} waiting | color=#B35A00"
 elif [ "$RUNNING" -gt 0 ]; then
   echo "🤖 ${RUNNING} active | color=#1B7A3D"
 elif [ "$REVIEW" -gt 0 ]; then
@@ -81,6 +84,7 @@ echo "---"
 echo "$TASKS" | jq -r '.[] |
   (if .status == "running" then { icon: "▶", color: "#1B7A3D" }
    elif .status == "queued" then { icon: "◦", color: "#0055CC" }
+   elif .status == "waiting" then { icon: "⏳", color: "#B35A00" }
    elif .status == "blocked" then { icon: "⊘", color: "#B35A00" }
    elif .status == "review" then { icon: "◎", color: "#3A35A0" }
    elif .status == "reviewing" then { icon: "◉", color: "#3A35A0" }

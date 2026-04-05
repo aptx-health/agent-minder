@@ -78,6 +78,7 @@ type runState struct {
 	cmd           *exec.Cmd
 	cancelFunc    context.CancelFunc
 	stoppedByUser bool
+	hitUsageLimit bool // set by scanner when rate_limit/billing_error detected
 	liveStatus    LiveStatus
 }
 

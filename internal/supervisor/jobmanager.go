@@ -38,6 +38,8 @@ type stageResult struct {
 	success    bool              // true if stage completed successfully
 	bailed     bool              // true if agent deliberately bailed
 	exhausted  bool              // true if turn/budget limit hit
+	usageLimit bool              // true if Claude Code usage/rate limit hit
+	sessionID  string            // session ID for --resume on recovery
 	prDetected int               // PR number if one was opened during this stage
 	assessment *ReviewAssessment // review assessment if this was a review stage
 }
@@ -253,6 +255,25 @@ func (sc *SlotContext) WasStoppedByUser() bool {
 	return false
 }
 
+// HitUsageLimit checks if the agent was stopped by a usage/rate limit.
+func (sc *SlotContext) HitUsageLimit() bool {
+	sc.sup.mu.Lock()
+	defer sc.sup.mu.Unlock()
+	if rs, ok := sc.sup.running[sc.Job.ID]; ok {
+		return rs.hitUsageLimit
+	}
+	return false
+}
+
+// ClearUsageLimitFlag resets the usage limit flag for retry.
+func (sc *SlotContext) ClearUsageLimitFlag() {
+	sc.sup.mu.Lock()
+	defer sc.sup.mu.Unlock()
+	if rs, ok := sc.sup.running[sc.Job.ID]; ok {
+		rs.hitUsageLimit = false
+	}
+}
+
 // ParseCost extracts cost from the agent log.
 func (sc *SlotContext) ParseCost() float64 {
 	return parseCostFromLog(sc.LogPath)
@@ -417,6 +438,65 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			_ = sc.Store.UpdateJobCost(job.ID, cost)
 		}
 
+		// Usage limit recovery: wait and resume the session.
+		if result.usageLimit {
+			usageLimitAttempts := 0
+			for result.usageLimit && usageLimitAttempts < maxUsageLimitRetries {
+				usageLimitAttempts++
+				if err := waitForUsageLimitReset(ctx, sc, usageLimitAttempts); err != nil {
+					// Context cancelled (daemon shutting down).
+					return nil
+				}
+				sc.EmitEvent("info", fmt.Sprintf("Resuming %s after usage limit wait (session: %s)",
+					sc.JobLabel(), result.sessionID))
+
+				// Resume the same session with --resume.
+				if result.sessionID != "" {
+					resumeArgs := []string{"--resume", result.sessionID, "--output-format", "stream-json"}
+					if sc.Deploy.MaxTurns > 0 {
+						resumeArgs = append(resumeArgs, "--max-turns", fmt.Sprintf("%d", sc.Deploy.MaxTurns))
+					}
+					_, _ = sc.RunClaudeAgent(ctx, resumeArgs, logFile)
+				} else {
+					// No session ID — re-run the full stage.
+					result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
+					continue
+				}
+
+				// Re-check: did the resumed session also hit a limit?
+				resumeResult, _ := parseAgentLog(sc.LogPath)
+				if sc.HitUsageLimit() || isUsageLimitError(resumeResult) {
+					sessionID := ""
+					if resumeResult != nil {
+						sessionID = resumeResult.SessionID
+					}
+					result = stageResult{usageLimit: true, sessionID: sessionID}
+					continue
+				}
+
+				// Resumed successfully — re-evaluate the stage outcome.
+				if m.contract.Output == "pr" {
+					prNum := sc.DetectPR(ctx)
+					if prNum > 0 {
+						_ = sc.Store.UpdateJobPR(job.ID, prNum)
+						job.PRNumber = sql.NullInt64{Int64: int64(prNum), Valid: true}
+						result = stageResult{success: true, prDetected: prNum}
+					} else {
+						result = stageResult{success: false}
+					}
+				} else {
+					result = stageResult{success: true}
+				}
+			}
+
+			// Exhausted retries — still hitting limit.
+			if result.usageLimit {
+				sc.EmitEvent("error", fmt.Sprintf("Usage limit: exhausted %d retries on %s, bailing",
+					maxUsageLimitRetries, sc.JobLabel()))
+				return m.finalizeBail(ctx)
+			}
+		}
+
 		if result.success {
 			continue // next stage
 		}
@@ -486,6 +566,17 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 
 	exitCode, _ := sc.RunClaudeAgent(ctx, args, logFile)
 
+	// Check for usage limit — detected by scanner from stream events,
+	// or from the result/error text after process exit.
+	result, _ := parseAgentLog(sc.LogPath)
+	if sc.HitUsageLimit() || isUsageLimitError(result) {
+		sessionID := ""
+		if result != nil {
+			sessionID = result.SessionID
+		}
+		return stageResult{usageLimit: true, sessionID: sessionID}
+	}
+
 	// For PR-producing agents, detect the PR.
 	if m.contract.Output == "pr" {
 		prNum := sc.DetectPR(ctx)
@@ -502,7 +593,6 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	}
 
 	// No PR / non-zero exit — classify.
-	result, _ := parseAgentLog(sc.LogPath)
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
 	status, _, _ := classifyOutcome(result, maxTurns, maxBudget)
@@ -518,6 +608,62 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 		success:   false,
 		bailed:    status == "failed" || (result != nil && extractBailReport(resultText) != nil),
 		exhausted: status == "failed" && result != nil && (result.NumTurns >= maxTurns || result.TotalCost >= maxBudget*0.95),
+	}
+}
+
+// usageLimitWaitDuration is how long to sleep before retrying after a usage limit.
+const usageLimitWaitDuration = 1 * time.Hour
+
+// maxUsageLimitRetries is the maximum number of usage limit recovery attempts per stage.
+const maxUsageLimitRetries = 3
+
+// isUsageLimitError checks the agent result for usage/rate limit signals.
+// Looks for common patterns in the error text from Claude Code CLI.
+func isUsageLimitError(result *AgentResult) bool {
+	if result == nil {
+		return false
+	}
+	text := strings.ToLower(result.Result)
+	// Match patterns from Claude Code: "hit your limit", "session limit",
+	// "usage limit", "rate limit reached"
+	for _, pattern := range []string{
+		"hit your limit",
+		"session limit",
+		"usage limit",
+		"rate limit reached",
+		"rate_limit",
+		"billing_error",
+	} {
+		if strings.Contains(text, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForUsageLimitReset sleeps until the usage limit window resets.
+// Returns an error if the context is cancelled during the wait.
+func waitForUsageLimitReset(ctx context.Context, sc *SlotContext, attempt int) error {
+	wait := usageLimitWaitDuration
+	// Back off slightly on repeated hits.
+	if attempt > 1 {
+		wait = time.Duration(attempt) * usageLimitWaitDuration
+	}
+
+	sc.EmitEvent("waiting", fmt.Sprintf(
+		"Usage limit hit on %s — waiting %s before retry (attempt %d/%d)",
+		sc.JobLabel(), wait.Truncate(time.Minute), attempt, maxUsageLimitRetries))
+
+	_ = sc.Store.UpdateJobStatus(sc.Job.ID, db.StatusWaiting)
+
+	select {
+	case <-time.After(wait):
+		// Reset the flag for the next attempt.
+		sc.ClearUsageLimitFlag()
+		_ = sc.Store.UpdateJobStatus(sc.Job.ID, db.StatusRunning)
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
