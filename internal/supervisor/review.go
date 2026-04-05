@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aptx-health/agent-minder/internal/claudecli"
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -74,8 +75,14 @@ Review agent log:
 
 Produce your assessment as JSON.`, job.PRNumber.Int64, job.IssueNumber, content)
 
+	// Use a 2-minute timeout for the Haiku extraction call.
+	// Without this, a hung claude -p (e.g., from a usage limit) blocks the
+	// entire review stage goroutine indefinitely — the job never completes.
+	extractCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
 	completer := claudecli.NewCLICompleter()
-	resp, err := completer.Complete(ctx, &claudecli.Request{
+	resp, err := completer.Complete(extractCtx, &claudecli.Request{
 		SystemPrompt: "You extract structured review assessments from agent logs. Be concise and actionable.",
 		Prompt:       prompt,
 		Model:        "haiku",
