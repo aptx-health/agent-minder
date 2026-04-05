@@ -103,11 +103,12 @@ func renderRepoInfo(sc *SlotContext) string {
 	fmt.Fprintf(&b, "**Base branch:** %s\n\n", sc.BaseBranch)
 
 	if sc.TestCommand != "" {
-		fmt.Fprintf(&b, "**Test command:** `timeout %s %s`\n", sc.TestTimeout, sc.TestCommand)
-		fmt.Fprintf(&b, "**Build command:** `timeout %s go build ./...`\n", sc.BuildTimeout)
-		fmt.Fprintf(&b, "\n**IMPORTANT:** Always wrap test and build commands with `timeout` as shown above.\n")
+		testCmd := wrapWithTimeout(sc.TestCommand, sc.TestTimeout)
+		fmt.Fprintf(&b, "**Test command:** `%s`\n", testCmd)
+		fmt.Fprintf(&b, "**Test timeout:** %s\n", sc.TestTimeout)
+		fmt.Fprintf(&b, "\n**IMPORTANT:** Always use the test command exactly as shown — it includes a timeout.\n")
 		fmt.Fprintf(&b, "If a command hangs past its timeout, it will be killed automatically.\n")
-		fmt.Fprintf(&b, "A timeout exit (code 124) should be treated as a test failure, not retried indefinitely.\n\n")
+		fmt.Fprintf(&b, "A timeout kill should be treated as a test failure, not retried indefinitely.\n\n")
 	}
 
 	// Try to include language/framework info from onboarding.
@@ -276,8 +277,9 @@ func renderReviewContext(ctx context.Context, sc *SlotContext) string {
 	}
 
 	if sc.TestCommand != "" {
-		fmt.Fprintf(&b, "## Test command\n\nRun tests: `timeout %s %s`\n\n", sc.TestTimeout, sc.TestCommand)
-		b.WriteString("**IMPORTANT:** Always use the `timeout` wrapper. If a test hangs past the timeout, it exits with code 124. Treat that as a test failure.\n\n")
+		testCmd := wrapWithTimeout(sc.TestCommand, sc.TestTimeout)
+		fmt.Fprintf(&b, "## Test command\n\nRun tests: `%s`\n\n", testCmd)
+		b.WriteString("**IMPORTANT:** Always use the test command exactly as shown — it includes a timeout. A timeout kill should be treated as a test failure.\n\n")
 	}
 
 	// Add sibling context.
@@ -292,4 +294,41 @@ func renderReviewContext(ctx context.Context, sc *SlotContext) string {
 	fmt.Fprintf(&b, "  git rebase origin/%s\n", sc.BaseBranch)
 
 	return b.String()
+}
+
+// wrapWithTimeout wraps a command with a portable timeout mechanism.
+// - Go test commands: uses -timeout flag (built-in, no external deps)
+// - Other commands: uses perl alarm (available on macOS + Linux, no coreutils needed)
+func wrapWithTimeout(cmd, timeout string) string {
+	secs := timeoutToSeconds(timeout)
+
+	// Go test: use -timeout flag directly.
+	if strings.HasPrefix(cmd, "go test") {
+		return cmd + " -timeout " + timeout
+	}
+
+	// Everything else: perl alarm is portable (macOS ships perl, Linux has it).
+	return fmt.Sprintf("perl -e 'alarm %d; exec @ARGV' -- %s", secs, cmd)
+}
+
+// timeoutToSeconds converts a Go duration string like "5m" to seconds.
+func timeoutToSeconds(timeout string) int {
+	timeout = strings.TrimSpace(timeout)
+	var n int
+	if strings.HasSuffix(timeout, "m") {
+		if _, err := fmt.Sscanf(timeout, "%dm", &n); err == nil && n > 0 {
+			return n * 60
+		}
+	}
+	if strings.HasSuffix(timeout, "s") {
+		if _, err := fmt.Sscanf(timeout, "%ds", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	if strings.HasSuffix(timeout, "h") {
+		if _, err := fmt.Sscanf(timeout, "%dh", &n); err == nil && n > 0 {
+			return n * 3600
+		}
+	}
+	return 300 // default 5 minutes
 }
