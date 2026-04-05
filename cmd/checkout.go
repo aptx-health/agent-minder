@@ -159,11 +159,12 @@ func checkoutWorktree(repoDir string, job *db.Job) error {
 		return presentWorktree(worktreePath, branch, job)
 	}
 
-	// Worktree is gone — recreate from remote branch.
+	// Worktree is gone — recreate from the branch.
 	fmt.Printf("Worktree not found, recreating from branch %s...\n", branch)
 
-	// Fetch latest.
+	// Fetch latest and prune stale worktree bookkeeping.
 	_ = gitpkg.Fetch(repoDir)
+	_ = gitpkg.WorktreePrune(repoDir)
 
 	// Create worktree path if we don't have one.
 	if worktreePath == "" {
@@ -173,10 +174,14 @@ func checkoutWorktree(repoDir string, job *db.Job) error {
 
 	_ = os.MkdirAll(filepath.Dir(worktreePath), 0755)
 
-	// Try to add worktree from remote branch.
+	// Try strategies in order:
+	// 1. Check out existing local branch into worktree.
+	// 2. If branch only exists on remote, create from origin/<branch>.
 	err := gitpkg.WorktreeAddExisting(repoDir, worktreePath, branch)
 	if err != nil {
-		// Branch might only exist on remote — try origin/<branch>.
+		// Local branch might exist but worktree add failed for other reasons.
+		// Delete the local branch and recreate from remote.
+		_ = gitpkg.DeleteBranch(repoDir, branch)
 		err = gitpkg.WorktreeAdd(repoDir, worktreePath, branch, "origin/"+branch)
 		if err != nil {
 			return fmt.Errorf("could not create worktree from branch %s: %w", branch, err)
