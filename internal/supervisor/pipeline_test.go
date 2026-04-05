@@ -768,6 +768,77 @@ func TestPipeline_DefaultStagesWithReview(t *testing.T) {
 	}
 }
 
+// TestPipeline_StageNamedReviewWithNonReviewerAgent verifies that a stage
+// named "review" but using a non-reviewer agent runs as a code stage,
+// not through the review-specific path.
+func TestPipeline_StageNamedReviewWithNonReviewerAgent(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = false // no auto-appended review
+	})
+
+	var callOrder []string
+	h.hooks.RunClaudeAgentFn = func(ctx context.Context, args []string, logFile *os.File) (int, error) {
+		agent := extractAgentArg(args)
+		h.mu.Lock()
+		callOrder = append(callOrder, agent)
+		h.stageLog = append(h.stageLog, stageCall{Agent: agent, Args: args})
+		h.mu.Unlock()
+		// Simulate some work time so timestamps differ.
+		time.Sleep(10 * time.Millisecond)
+		return 0, nil
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Agent = "quality-check"
+		j.Name = "weekly-quality"
+		j.IssueNumber = 0 // proactive
+		j.IssueTitle = sql.NullString{String: "Weekly quality review", Valid: true}
+	})
+
+	// Contract with a stage named "review" using a non-reviewer agent,
+	// followed by a "verify" stage using the actual reviewer.
+	contract := &AgentContract{
+		Name:   "quality-check",
+		Mode:   "proactive",
+		Output: "pr",
+		Stages: []StageContract{
+			{Name: "review", Agent: "quality-check", OnFailure: "bail"},
+			{Name: "verify", Agent: "reviewer", OnFailure: "skip"},
+		},
+	}
+	applyContractDefaults(contract)
+
+	// Need a PR for the reviewer stage to actually run.
+	h.hooks.DetectPRFn = func(ctx context.Context) int { return 500 }
+
+	err := h.run(context.Background(), job, contract)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	// Both stages should have called RunClaudeAgent.
+	stages := h.stages()
+	if len(stages) < 2 {
+		t.Fatalf("expected 2 agent invocations, got %d: %+v", len(stages), stages)
+	}
+
+	// Stage 1 ("review") should run quality-check as a code stage.
+	if stages[0].Agent != "quality-check" {
+		t.Errorf("stage 0: expected 'quality-check', got %q", stages[0].Agent)
+	}
+	// Stage 2 ("verify") should run reviewer as a review stage.
+	if stages[1].Agent != "reviewer" {
+		t.Errorf("stage 1: expected 'reviewer', got %q", stages[1].Agent)
+	}
+
+	// Verify sequential execution: quality-check must come before reviewer.
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(callOrder) != 2 || callOrder[0] != "quality-check" || callOrder[1] != "reviewer" {
+		t.Errorf("expected sequential execution [quality-check, reviewer], got %v", callOrder)
+	}
+}
+
 // --- Utilities ---
 
 func truncate(s string, n int) string {

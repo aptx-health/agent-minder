@@ -431,8 +431,11 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 		var result stageResult
 
-		switch stageName {
-		case "review":
+		// Route to review-specific execution only when the agent is "reviewer".
+		// Stage names are user-defined (e.g., "review", "verify", "audit") and
+		// should not affect routing — only the agent type matters.
+		switch agentName {
+		case "reviewer":
 			result = m.executeReviewStage(ctx, stage, logFile)
 			if result.assessment != nil {
 				lastReviewAssessment = result.assessment
@@ -826,10 +829,10 @@ func formatReviewFeedback(assessment *ReviewAssessment) string {
 	return b.String()
 }
 
-// hasReviewStage checks if any stage in the pipeline is named "review".
+// hasReviewStage checks if any stage uses the reviewer agent.
 func hasReviewStage(stages []StageContract) bool {
 	for _, s := range stages {
-		if s.Name == "review" {
+		if s.Agent == "reviewer" {
 			return true
 		}
 	}
