@@ -111,6 +111,15 @@ func (s *Store) GetJobs(deploymentID string) ([]*Job, error) {
 	return jobs, err
 }
 
+// GetJobsByRepo returns all jobs for a given owner/repo across all deployments,
+// most recent first.
+func (s *Store) GetJobsByRepo(owner, repo string) ([]*Job, error) {
+	var jobs []*Job
+	err := s.db.Select(&jobs,
+		"SELECT * FROM jobs WHERE owner = ? AND repo = ? ORDER BY id DESC", owner, repo)
+	return jobs, err
+}
+
 // GetJob returns a single job by ID.
 func (s *Store) GetJob(id int64) (*Job, error) {
 	var j Job
