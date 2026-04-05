@@ -55,10 +55,16 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	ghClient := s.newGHClient()
 
 	// Get existing jobs to find new issues.
+	// Key by (issue number, agent) so the same issue can be worked by different
+	// agents (e.g., spike researches, then autopilot implements).
 	existing, _ := s.store.GetJobs(s.deploy.ID)
-	knownIssues := make(map[int]bool)
+	type issueAgent struct {
+		issue int
+		agent string
+	}
+	knownJobs := make(map[issueAgent]bool)
 	for _, j := range existing {
-		knownIssues[j.IssueNumber] = true
+		knownJobs[issueAgent{j.IssueNumber, j.Agent}] = true
 	}
 
 	skipLabel := s.deploy.SkipLabel
@@ -68,12 +74,12 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	if s.deploy.WatchFilter.Valid && s.deploy.WatchFilter.String != "" {
 		issues := s.pollFilter(ctx, ghClient, s.deploy.WatchFilter.String)
 		for _, issue := range issues {
-			if knownIssues[issue.Number] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
+			agent := s.resolveAgentForIssue(issue.Labels)
+			if knownJobs[issueAgent{issue.Number, agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
-			agent := s.resolveAgentForIssue(issue.Labels)
 			if n := s.createJobForIssue(ctx, ghClient, issue, agent); n > 0 {
-				knownIssues[issue.Number] = true
+				knownJobs[issueAgent{issue.Number, agent}] = true
 				discovered += n
 			}
 		}
@@ -87,11 +93,11 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	for _, route := range routes {
 		issues := s.pollFilter(ctx, ghClient, "label:"+route.Label)
 		for _, issue := range issues {
-			if knownIssues[issue.Number] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
+			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
 			if n := s.createJobForIssue(ctx, ghClient, issue, route.Agent); n > 0 {
-				knownIssues[issue.Number] = true
+				knownJobs[issueAgent{issue.Number, route.Agent}] = true
 				discovered += n
 			}
 		}
@@ -150,7 +156,7 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 	j := &db.Job{
 		DeploymentID: s.deploy.ID,
 		Agent:        agent,
-		Name:         fmt.Sprintf("issue-%d", issue.Number),
+		Name:         fmt.Sprintf("%s-issue-%d", agent, issue.Number),
 		IssueNumber:  issue.Number,
 		IssueTitle:   sql.NullString{String: issue.Title, Valid: true},
 		IssueBody:    sql.NullString{String: body, Valid: body != ""},
