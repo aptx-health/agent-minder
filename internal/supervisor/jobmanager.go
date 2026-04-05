@@ -156,7 +156,12 @@ func (sc *SlotContext) RunClaudeAgent(ctx context.Context, args []string, logFil
 	}
 
 	cmd := exec.CommandContext(ctx, "claude", args...)
+	// Use worktree if set up, otherwise fall back to the repo directory.
+	// Non-worktree agents (output: issue, comment) run from the repo root.
 	cmd.Dir = sc.WorktreePath
+	if sc.WorktreePath == "" || !dirExists(sc.WorktreePath) {
+		cmd.Dir = sc.RepoDir
+	}
 	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+sc.GHToken)
 
@@ -900,4 +905,10 @@ func (s *Supervisor) DrainEvents() []Event {
 			return events
 		}
 	}
+}
+
+// dirExists returns true if the path exists and is a directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
