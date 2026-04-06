@@ -443,8 +443,10 @@ func (s *Store) SupersedeLesson(oldID, newID int64) error {
 	return err
 }
 
-// DeleteLesson permanently removes a lesson.
+// DeleteLesson permanently removes a lesson and its job_lessons references.
 func (s *Store) DeleteLesson(id int64) error {
+	// Delete FK references first, then the lesson itself.
+	_, _ = s.db.Exec("DELETE FROM job_lessons WHERE lesson_id = ?", id)
 	_, err := s.db.Exec("DELETE FROM lessons WHERE id = ?", id)
 	return err
 }
