@@ -451,6 +451,19 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			result = m.executeCodeStage(ctx, stage, agentName, logFile, feedbackPrompt)
 		}
 
+		// Capture lessons from non-reviewer stages that declare captures_lessons.
+		// The reviewer path handles this internally via executeReviewStage.
+		if stage.CapturesLessons && agentName != "reviewer" && result.success {
+			assessment := extractReviewAssessmentFromLog(ctx, sc.LogPath, job, sc.sup, sc.Hooks)
+			if len(assessment.Lessons) > 0 {
+				captured := captureLessonsFromAssessment(sc.Store, sc.Owner, sc.Repo, assessment)
+				if len(captured) > 0 {
+					sc.EmitEvent("info", fmt.Sprintf("Captured %d lessons from %s stage on %s",
+						len(captured), stageName, sc.JobLabel()))
+				}
+			}
+		}
+
 		// Check for user stop.
 		if sc.WasStoppedByUser() {
 			_ = sc.Store.UpdateJobStatus(job.ID, db.StatusStopped)
