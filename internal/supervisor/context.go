@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aptx-health/agent-minder/internal/lesson"
 	"github.com/aptx-health/agent-minder/internal/onboarding"
 )
 
@@ -285,6 +286,14 @@ func renderReviewContext(ctx context.Context, sc *SlotContext) string {
 	// Add sibling context.
 	b.WriteString(renderSiblingJobs(sc))
 	b.WriteString(renderDepGraph(sc))
+
+	// Include injected lessons so the reviewer can provide per-lesson feedback.
+	if sc.Store != nil {
+		injectedLessons, err := sc.Store.GetJobLessons(job.ID)
+		if err == nil && len(injectedLessons) > 0 {
+			b.WriteString(lesson.FormatForReviewContext(injectedLessons))
+		}
+	}
 
 	fmt.Fprintf(&b, "## Commands for this review\n\n")
 	fmt.Fprintf(&b, "View PR diff: gh pr diff %d -R %s/%s\n", job.PRNumber.Int64, sc.Owner, sc.Repo)

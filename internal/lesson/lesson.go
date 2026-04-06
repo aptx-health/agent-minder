@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,9 +23,39 @@ const MaxPromptTokens = 2000
 // ApproxTokensPerChar is a rough estimate for token counting.
 const ApproxTokensPerChar = 4
 
+// DecayHalfLifeDays is the half-life for exponential decay scoring.
+// A signal from 30 days ago counts at ~50% weight; 60 days at ~25%.
+const DecayHalfLifeDays = 30.0
+
+// DecayScore computes a decay-weighted effectiveness score for a lesson.
+// Recent helpful signals boost the score; recent unhelpful signals lower it.
+// Lessons with no feedback return 0.0 (neutral).
+func DecayScore(l *db.Lesson, now time.Time) float64 {
+	if l.TimesHelpful+l.TimesUnhelpful == 0 {
+		return 0.0
+	}
+
+	decayWeight := func(t sql.NullTime, fallback time.Time) float64 {
+		ts := fallback
+		if t.Valid {
+			ts = t.Time
+		}
+		days := now.Sub(ts).Hours() / 24.0
+		if days < 0 {
+			days = 0
+		}
+		return math.Pow(0.5, days/DecayHalfLifeDays)
+	}
+
+	helpfulWeight := float64(l.TimesHelpful) * decayWeight(l.LastHelpfulAt, l.CreatedAt)
+	unhelpfulWeight := float64(l.TimesUnhelpful) * decayWeight(l.LastUnhelpfulAt, l.CreatedAt)
+
+	return helpfulWeight - unhelpfulWeight
+}
+
 // SelectLessons returns relevant lessons for a task, respecting the token budget.
 // Selection tiers: pinned first, then repo-scoped, then global.
-// Within each tier, sorted by effectiveness ratio descending.
+// Within each tier, sorted by decay-weighted effectiveness score descending.
 func SelectLessons(store *db.Store, owner, repo string) ([]*db.Lesson, error) {
 	scope := owner + "/" + repo
 	lessons, err := store.GetActiveLessons(scope)
@@ -31,51 +63,54 @@ func SelectLessons(store *db.Store, owner, repo string) ([]*db.Lesson, error) {
 		return nil, err
 	}
 
+	now := time.Now().UTC()
+
+	// Partition into tiers.
+	var pinned, repoScoped, global []*db.Lesson
+	for _, l := range lessons {
+		switch {
+		case l.Pinned:
+			pinned = append(pinned, l)
+		case l.RepoScope.Valid:
+			repoScoped = append(repoScoped, l)
+		default:
+			global = append(global, l)
+		}
+	}
+
+	// Sort non-pinned tiers by decay score descending.
+	sortByDecay := func(ls []*db.Lesson) {
+		sort.Slice(ls, func(i, j int) bool {
+			return DecayScore(ls[i], now) > DecayScore(ls[j], now)
+		})
+	}
+	sortByDecay(repoScoped)
+	sortByDecay(global)
+
 	// Budget allocation: pinned ~500 tokens, repo-scoped ~1000, global ~500.
 	var selected []*db.Lesson
 	var totalChars int
 	maxChars := MaxPromptTokens * ApproxTokensPerChar
 
-	// Tier 1: Pinned lessons (always included).
-	for _, l := range lessons {
-		if !l.Pinned {
-			continue
+	addFromTier := func(tier []*db.Lesson) {
+		for _, l := range tier {
+			if totalChars+len(l.Content) > maxChars {
+				break
+			}
+			selected = append(selected, l)
+			totalChars += len(l.Content)
 		}
-		if totalChars+len(l.Content) > maxChars {
-			break
-		}
-		selected = append(selected, l)
-		totalChars += len(l.Content)
 	}
 
-	// Tier 2: Repo-scoped lessons (sorted by effectiveness).
-	for _, l := range lessons {
-		if l.Pinned || !l.RepoScope.Valid {
-			continue
-		}
-		if totalChars+len(l.Content) > maxChars {
-			break
-		}
-		selected = append(selected, l)
-		totalChars += len(l.Content)
-	}
-
-	// Tier 3: Global lessons.
-	for _, l := range lessons {
-		if l.Pinned || l.RepoScope.Valid {
-			continue
-		}
-		if totalChars+len(l.Content) > maxChars {
-			break
-		}
-		selected = append(selected, l)
-		totalChars += len(l.Content)
-	}
+	addFromTier(pinned)
+	addFromTier(repoScoped)
+	addFromTier(global)
 
 	return selected, nil
 }
 
 // FormatForPrompt renders selected lessons as a markdown section for the system prompt.
+// Each lesson is prefixed with its ID so the reviewer can reference it in feedback.
 func FormatForPrompt(lessons []*db.Lesson) string {
 	if len(lessons) == 0 {
 		return ""
@@ -85,14 +120,38 @@ func FormatForPrompt(lessons []*db.Lesson) string {
 	b.WriteString("## Lessons from Previous Work\n\n")
 	b.WriteString("Follow these lessons learned from prior agent runs in this project:\n\n")
 
-	for i, l := range lessons {
+	for _, l := range lessons {
 		source := ""
 		if l.Source == "review" {
 			source = " (from review)"
 		}
-		fmt.Fprintf(&b, "%d. %s%s\n", i+1, l.Content, source)
+		fmt.Fprintf(&b, "- [Lesson #%d] %s%s\n", l.ID, l.Content, source)
 	}
 
+	b.WriteString("\n")
+	return b.String()
+}
+
+// FormatForReviewContext renders injected lessons for the review context,
+// so the reviewer can assess each lesson's relevance and provide per-lesson feedback.
+func FormatForReviewContext(lessons []*db.Lesson) string {
+	if len(lessons) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## Injected Lessons\n\n")
+	b.WriteString("The following lessons were injected into the implementation agent's prompt.\n")
+	b.WriteString("In your assessment, evaluate whether each lesson was relevant and helpful for this task.\n")
+	b.WriteString("Reference lessons by their ID in the `lesson_feedback` field.\n\n")
+
+	for _, l := range lessons {
+		scope := "global"
+		if l.RepoScope.Valid {
+			scope = l.RepoScope.String
+		}
+		fmt.Fprintf(&b, "- **Lesson #%d** [%s]: %s\n", l.ID, scope, l.Content)
+	}
 	b.WriteString("\n")
 	return b.String()
 }

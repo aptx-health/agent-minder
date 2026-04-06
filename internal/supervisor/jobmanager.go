@@ -83,6 +83,10 @@ type SlotContext struct {
 
 	// Test hooks — nil in production, set by tests to override external calls.
 	Hooks *TestHooks
+
+	// hasReviewerFeedback tracks whether per-lesson feedback was processed.
+	// When true, binary RecordLessonOutcome is skipped (reviewer feedback is more precise).
+	hasReviewerFeedback bool
 }
 
 // EmitEvent emits a supervisor event for this job.
@@ -248,8 +252,38 @@ func (sc *SlotContext) SelectAndRecordLessons() string {
 }
 
 // RecordLessonOutcome records whether the job outcome was helpful.
+// This is the binary fallback — skipped if per-lesson reviewer feedback was already processed.
 func (sc *SlotContext) RecordLessonOutcome(success bool) {
+	if sc.hasReviewerFeedback {
+		debugLog("skipping binary lesson outcome — reviewer feedback already processed",
+			"job", sc.Job.ID)
+		return
+	}
 	_ = lesson.RecordOutcome(sc.Store, sc.Job.ID, success)
+}
+
+// processLessonFeedback applies per-lesson feedback from the reviewer.
+func processLessonFeedback(sc *SlotContext, feedback []LessonFeedback) {
+	applied := 0
+	for _, fb := range feedback {
+		if fb.ID <= 0 {
+			continue
+		}
+		if err := sc.Store.UpdateLessonFeedback(fb.ID, fb.Helpful); err != nil {
+			debugLog("lesson feedback update failed", "lesson_id", fb.ID, "error", err.Error())
+			continue
+		}
+		applied++
+		debugLog("lesson feedback recorded",
+			"lesson_id", fb.ID,
+			"helpful", fb.Helpful,
+			"reason", fb.Reason,
+		)
+	}
+	if applied > 0 {
+		sc.hasReviewerFeedback = true
+		sc.EmitEvent("info", fmt.Sprintf("Recorded reviewer feedback for %d lessons", applied))
+	}
 }
 
 // WasStoppedByUser checks if this job was stopped by user action.
@@ -756,6 +790,11 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		if len(captured) > 0 {
 			sc.EmitEvent("info", fmt.Sprintf("Captured %d lessons from review of %s", len(captured), sc.JobLabel()))
 		}
+	}
+
+	// Process per-lesson feedback from the reviewer.
+	if len(assessment.LessonFeedback) > 0 {
+		processLessonFeedback(sc, assessment.LessonFeedback)
 	}
 
 	// Determine success: low-risk or needs-testing = success, suspect = failure (retryable).

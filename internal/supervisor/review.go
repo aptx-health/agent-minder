@@ -14,10 +14,19 @@ import (
 
 // ReviewAssessment is the structured JSON output from the review extraction call.
 type ReviewAssessment struct {
-	Risk    string   `json:"risk"`    // "low-risk", "needs-testing", or "suspect"
-	Summary string   `json:"summary"` // One-line summary of the review
-	Lessons []string `json:"lessons"` // Actionable lessons for future agents
-	Issues  []string `json:"issues"`  // Specific issues found (empty if clean)
+	Risk           string           `json:"risk"`            // "low-risk", "needs-testing", or "suspect"
+	Summary        string           `json:"summary"`         // One-line summary of the review
+	Lessons        []string         `json:"lessons"`         // Actionable lessons for future agents
+	Issues         []string         `json:"issues"`          // Specific issues found (empty if clean)
+	LessonFeedback []LessonFeedback `json:"lesson_feedback"` // Per-lesson effectiveness feedback
+}
+
+// LessonFeedback is per-lesson feedback from the reviewer.
+// The reviewer reports whether each injected lesson was relevant/helpful for this task.
+type LessonFeedback struct {
+	ID      int64  `json:"id"`      // Lesson ID
+	Helpful bool   `json:"helpful"` // Was this lesson relevant and helpful?
+	Reason  string `json:"reason"`  // Brief explanation
 }
 
 var reviewAssessmentSchema = `{
@@ -41,9 +50,22 @@ var reviewAssessmentSchema = `{
 			"type": "array",
 			"items": {"type": "string"},
 			"description": "Specific issues found in the PR. Empty array if the PR is clean."
+		},
+		"lesson_feedback": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"id": {"type": "integer", "description": "The lesson ID number"},
+					"helpful": {"type": "boolean", "description": "Was this lesson relevant and helpful for this task?"},
+					"reason": {"type": "string", "description": "Brief explanation of why this lesson was or was not helpful"}
+				},
+				"required": ["id", "helpful"]
+			},
+			"description": "Feedback on each injected lesson. Reference lessons by their ID number. Empty array if no lessons were injected."
 		}
 	},
-	"required": ["risk", "summary", "lessons", "issues"]
+	"required": ["risk", "summary", "lessons", "issues", "lesson_feedback"]
 }`
 
 // extractReviewAssessment runs a cheap structured LLM call to produce a JSON assessment

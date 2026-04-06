@@ -363,17 +363,25 @@ func (s *Store) CreateLesson(l *Lesson) error {
 }
 
 // GetActiveLessons returns all active lessons, optionally filtered by repo scope.
+// Sorted by pinned first, then by recency-weighted effectiveness.
+// We do decay-weighted scoring in Go (SelectLessons) since SQLite lacks EXP().
+// Here we just sort: pinned first, then by effectiveness ratio, then by recency of feedback.
 func (s *Store) GetActiveLessons(repoScope string) ([]*Lesson, error) {
+	orderClause := `ORDER BY pinned DESC,
+		CASE WHEN times_helpful + times_unhelpful = 0 THEN 0.5
+		     ELSE CAST(times_helpful AS REAL) / (times_helpful + times_unhelpful)
+		END DESC,
+		COALESCE(last_helpful_at, last_injected_at, created_at) DESC`
+
 	var lessons []*Lesson
 	if repoScope == "" {
 		err := s.db.Select(&lessons,
-			"SELECT * FROM lessons WHERE active = 1 AND superseded_by IS NULL ORDER BY pinned DESC, times_injected ASC")
+			"SELECT * FROM lessons WHERE active = 1 AND superseded_by IS NULL "+orderClause)
 		return lessons, err
 	}
 	err := s.db.Select(&lessons,
 		`SELECT * FROM lessons WHERE active = 1 AND superseded_by IS NULL
-		 AND (repo_scope IS NULL OR repo_scope = ?)
-		 ORDER BY pinned DESC, times_injected ASC`, repoScope)
+		 AND (repo_scope IS NULL OR repo_scope = ?) `+orderClause, repoScope)
 	return lessons, err
 }
 
@@ -472,16 +480,46 @@ func (s *Store) RecordJobLessons(jobID int64, lessonIDs []int64) error {
 	return nil
 }
 
-// UpdateLessonOutcome increments helpful or unhelpful counts for lessons injected into a job.
+// UpdateLessonOutcome increments helpful or unhelpful counts for all lessons injected into a job.
+// This is the binary (job-level) fallback — used when per-lesson reviewer feedback isn't available.
 func (s *Store) UpdateLessonOutcome(jobID int64, helpful bool) error {
+	now := time.Now().UTC()
 	col := "times_helpful"
+	tsCol := "last_helpful_at"
 	if !helpful {
 		col = "times_unhelpful"
+		tsCol = "last_unhelpful_at"
 	}
-	query := fmt.Sprintf(`UPDATE lessons SET %s = %s + 1 WHERE id IN
-		(SELECT lesson_id FROM job_lessons WHERE job_id = ?)`, col, col)
-	_, err := s.db.Exec(query, jobID)
+	query := fmt.Sprintf(`UPDATE lessons SET %s = %s + 1, %s = ? WHERE id IN
+		(SELECT lesson_id FROM job_lessons WHERE job_id = ?)`, col, col, tsCol)
+	_, err := s.db.Exec(query, now, jobID)
 	return err
+}
+
+// UpdateLessonFeedback records per-lesson feedback from the reviewer.
+// This is more precise than UpdateLessonOutcome — it scores individual lessons.
+func (s *Store) UpdateLessonFeedback(lessonID int64, helpful bool) error {
+	now := time.Now().UTC()
+	if helpful {
+		_, err := s.db.Exec(
+			`UPDATE lessons SET times_helpful = times_helpful + 1, last_helpful_at = ?, updated_at = ? WHERE id = ?`,
+			now, now, lessonID)
+		return err
+	}
+	_, err := s.db.Exec(
+		`UPDATE lessons SET times_unhelpful = times_unhelpful + 1, last_unhelpful_at = ?, updated_at = ? WHERE id = ?`,
+		now, now, lessonID)
+	return err
+}
+
+// GetJobLessons returns the lessons that were injected into a specific job.
+func (s *Store) GetJobLessons(jobID int64) ([]*Lesson, error) {
+	var lessons []*Lesson
+	err := s.db.Select(&lessons,
+		`SELECT l.* FROM lessons l
+		 JOIN job_lessons jl ON l.id = jl.lesson_id
+		 WHERE jl.job_id = ?`, jobID)
+	return lessons, err
 }
 
 // StaleLessons returns active non-pinned lessons not injected in the given duration.
