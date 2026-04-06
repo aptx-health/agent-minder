@@ -275,6 +275,65 @@ func Fetch(dir string) error {
 	return err
 }
 
+// IsNetworkError returns true if the error looks like a transient network/SSH issue.
+func IsNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	patterns := []string{
+		"operation timed out",
+		"connection refused",
+		"connection reset",
+		"could not read from remote",
+		"unable to access",
+		"couldn't connect to server",
+		"network is unreachable",
+		"no route to host",
+		"connection closed by remote host",
+		"ssh_exchange_identification",
+		"kex_exchange_identification",
+		"broken pipe",
+	}
+	for _, p := range patterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// FetchWithRetry fetches from origin with retries on transient network errors.
+// Calls onRetry before each retry attempt (can be nil).
+func FetchWithRetry(dir string, maxAttempts int, onRetry func(attempt, max int, err error)) error {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	backoffs := []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+
+	var lastErr error
+	for i := range maxAttempts {
+		lastErr = Fetch(dir)
+		if lastErr == nil {
+			return nil
+		}
+		if !IsNetworkError(lastErr) {
+			return lastErr // non-network error, don't retry
+		}
+		if i < maxAttempts-1 {
+			if onRetry != nil {
+				onRetry(i+2, maxAttempts, lastErr)
+			}
+			delay := backoffs[0]
+			if i < len(backoffs) {
+				delay = backoffs[i]
+			}
+			time.Sleep(delay)
+		}
+	}
+	return lastErr
+}
+
 // BranchExists checks if a branch exists locally or as a remote tracking branch.
 func BranchExists(dir, branch string) bool {
 	// Check local branch.
