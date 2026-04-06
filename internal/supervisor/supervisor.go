@@ -450,10 +450,19 @@ func (s *Supervisor) fillCapacity(ctx context.Context) {
 		}
 	}
 
-	// Fetch once before launching.
+	// Fetch once before launching — retry on transient network errors.
 	if len(s.running) < s.maxAgents {
-		if err := gitpkg.Fetch(s.repoDir); err != nil {
-			s.emitEvent("warning", fmt.Sprintf("Fetch failed: %v", err), 0)
+		s.mu.Unlock()
+		err := gitpkg.FetchWithRetry(s.repoDir, 3, func(attempt, max int, err error) {
+			s.emitEvent("warning", fmt.Sprintf("Git fetch failed (network error) — retrying (%d/%d)", attempt, max), 0)
+		})
+		s.mu.Lock()
+		if err != nil {
+			if gitpkg.IsNetworkError(err) {
+				s.emitEvent("warning", "Git fetch failed after retries (network issue) — will try again next cycle", 0)
+			} else {
+				s.emitEvent("warning", fmt.Sprintf("Git fetch failed: %v", err), 0)
+			}
 		}
 	}
 
