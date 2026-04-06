@@ -254,6 +254,51 @@ func TestGetJobLessons(t *testing.T) {
 	}
 }
 
+func TestDeleteLesson_CascadesJobLessons(t *testing.T) {
+	store := scoringTestStore(t)
+
+	// Create deployment + job.
+	deploy := &db.Deployment{
+		ID: "test-deploy", RepoDir: "/tmp", Owner: "acme", Repo: "app",
+		Mode: "issues", MaxAgents: 1, MaxTurns: 10, MaxBudgetUSD: 5,
+		AnalyzerModel: "sonnet", BaseBranch: "main", TotalBudgetUSD: 25,
+	}
+	_ = store.CreateDeployment(deploy)
+	job := &db.Job{
+		DeploymentID: "test-deploy", Agent: "autopilot", Name: "issue-1",
+		Owner: "acme", Repo: "app", Status: "running",
+	}
+	_ = store.CreateJob(job)
+
+	// Create a lesson and link it to the job.
+	l := &db.Lesson{Content: "Lesson to delete", Source: "manual", Active: true}
+	_ = store.CreateLesson(l)
+	_ = store.RecordJobLessons(job.ID, []int64{l.ID})
+
+	// Verify the link exists.
+	linked, _ := store.GetJobLessons(job.ID)
+	if len(linked) != 1 {
+		t.Fatalf("expected 1 linked lesson, got %d", len(linked))
+	}
+
+	// Delete the lesson — should succeed despite FK reference.
+	if err := store.DeleteLesson(l.ID); err != nil {
+		t.Fatalf("DeleteLesson failed: %v", err)
+	}
+
+	// Verify lesson is gone.
+	_, err := store.GetLesson(l.ID)
+	if err == nil {
+		t.Error("expected error getting deleted lesson")
+	}
+
+	// Verify job_lessons reference is also cleaned up.
+	linked, _ = store.GetJobLessons(job.ID)
+	if len(linked) != 0 {
+		t.Errorf("expected 0 linked lessons after delete, got %d", len(linked))
+	}
+}
+
 func TestMigrationV4toV5(t *testing.T) {
 	// Verify that a fresh database has the new columns.
 	store := scoringTestStore(t)
