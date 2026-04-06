@@ -839,6 +839,117 @@ func TestPipeline_StageNamedReviewWithNonReviewerAgent(t *testing.T) {
 	}
 }
 
+// TestPipeline_CapturesLessonsFromNonReviewerStage verifies that a stage
+// with captures_lessons: true extracts and saves lessons from its output.
+func TestPipeline_CapturesLessonsFromNonReviewerStage(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = false
+	})
+
+	// The extraction hook returns lessons.
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{
+			Risk:    "low-risk",
+			Summary: "Quality check found patterns to learn from",
+			Lessons: []string{
+				"Always validate input before database writes",
+				"Use structured logging with slog, not fmt.Println",
+			},
+		}
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Agent = "quality-check"
+		j.Name = "weekly-quality"
+		j.IssueNumber = 0
+		j.IssueTitle = sql.NullString{String: "Weekly quality review", Valid: true}
+	})
+
+	contract := &AgentContract{
+		Name:   "quality-check",
+		Mode:   "proactive",
+		Output: "none",
+		Stages: []StageContract{
+			{Name: "scan", Agent: "quality-check", OnFailure: "bail", CapturesLessons: true},
+		},
+	}
+	applyContractDefaults(contract)
+
+	err := h.run(context.Background(), job, contract)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	// Verify lessons were captured.
+	scope := h.deploy.Owner + "/" + h.deploy.Repo
+	lessons, err := h.store.GetActiveLessons(scope)
+	if err != nil {
+		t.Fatalf("GetActiveLessons: %v", err)
+	}
+
+	if len(lessons) < 2 {
+		t.Fatalf("expected at least 2 lessons captured, got %d", len(lessons))
+	}
+
+	// Check lesson content.
+	found := map[string]bool{}
+	for _, l := range lessons {
+		found[l.Content] = true
+	}
+	if !found["Always validate input before database writes"] {
+		t.Error("expected lesson about input validation")
+	}
+	if !found["Use structured logging with slog, not fmt.Println"] {
+		t.Error("expected lesson about structured logging")
+	}
+}
+
+// TestPipeline_NoCaptureWithoutFlag verifies that stages without
+// captures_lessons don't extract lessons.
+func TestPipeline_NoCaptureWithoutFlag(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = false
+	})
+
+	// Even if the hook returns lessons, they should NOT be captured.
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{
+			Risk:    "low-risk",
+			Lessons: []string{"This should not be captured"},
+		}
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Agent = "quality-check"
+		j.Name = "weekly-quality-2"
+		j.IssueNumber = 0
+	})
+
+	contract := &AgentContract{
+		Name:   "quality-check",
+		Mode:   "proactive",
+		Output: "none",
+		Stages: []StageContract{
+			{Name: "scan", Agent: "quality-check", OnFailure: "bail"},
+			// No CapturesLessons flag.
+		},
+	}
+	applyContractDefaults(contract)
+
+	err := h.run(context.Background(), job, contract)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	scope := h.deploy.Owner + "/" + h.deploy.Repo
+	lessons, _ := h.store.GetActiveLessons(scope)
+	for _, l := range lessons {
+		if l.Content == "This should not be captured" {
+			t.Error("lesson was captured despite no captures_lessons flag")
+		}
+	}
+}
+
 // --- Utilities ---
 
 func truncate(s string, n int) string {

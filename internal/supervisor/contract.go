@@ -34,11 +34,12 @@ type AgentContract struct {
 
 // StageContract describes one stage in a multi-stage pipeline.
 type StageContract struct {
-	Name      string `yaml:"name"`
-	Agent     string `yaml:"agent"`      // agent name for this stage (default: parent agent)
-	Timeout   string `yaml:"timeout"`    // per-stage timeout
-	OnFailure string `yaml:"on_failure"` // "bail", "skip", "retry" (default: "bail")
-	Retries   int    `yaml:"retries"`    // number of retries if on_failure=retry
+	Name            string `yaml:"name"`
+	Agent           string `yaml:"agent"`            // agent name for this stage (default: parent agent)
+	Timeout         string `yaml:"timeout"`          // per-stage timeout
+	OnFailure       string `yaml:"on_failure"`       // "bail", "skip", "retry" (default: "bail")
+	Retries         int    `yaml:"retries"`          // number of retries if on_failure=retry
+	CapturesLessons bool   `yaml:"captures_lessons"` // extract and save lessons from this stage's output
 }
 
 // DefaultContract returns the default contract for agents that don't specify one.
