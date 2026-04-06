@@ -37,7 +37,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **Agent command:** `claude --agent <name> -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var.
 
-### DB schema (internal/db) — currently v4
+### DB schema (internal/db) — currently v5
 
 **deployments**: id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns, max_budget_usd, analyzer_model, skip_label, auto_merge, review_enabled, review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch, started_at
 
@@ -45,7 +45,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **dep_graphs**: deployment_id (PK), graph_json, option_name, reasoning, confidence, created_at
 
-**lessons**: id, repo_scope, content, source, active, pinned, times_injected, times_helpful, times_unhelpful, superseded_by, last_injected_at, created_at, updated_at
+**lessons**: id, repo_scope, content, source, active, pinned, times_injected, times_helpful, times_unhelpful, superseded_by, last_injected_at, last_helpful_at, last_unhelpful_at, created_at, updated_at
 
 **job_lessons**: job_id, lesson_id (composite PK)
 
@@ -53,7 +53,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **job_schedules**: name (PK), deployment_id, cron_expr, trigger_expr, agent, description, budget, max_turns, enabled, last_run_at, next_run_at, created_at
 
-Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents).
+Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents), v4→v5 (add last_helpful_at/last_unhelpful_at to lessons for decay-weighted scoring).
 
 ## Package map
 

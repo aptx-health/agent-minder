@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS lessons (
 	times_unhelpful INTEGER DEFAULT 0,
 	superseded_by INTEGER REFERENCES lessons(id),
 	last_injected_at DATETIME,
+	last_helpful_at DATETIME,
+	last_unhelpful_at DATETIME,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -249,6 +251,13 @@ PRAGMA foreign_keys = ON;
 UPDATE schema_version SET version = 4;
 `
 
+// migrateV4toV5 adds timestamp columns for per-lesson feedback scoring.
+const migrateV4toV5 = `
+ALTER TABLE lessons ADD COLUMN last_helpful_at DATETIME;
+ALTER TABLE lessons ADD COLUMN last_unhelpful_at DATETIME;
+UPDATE schema_version SET version = 5;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -294,6 +303,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV3toV4); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v3→v4: %w", err)
+			}
+		}
+		if version < 5 {
+			if _, err := db.Exec(migrateV4toV5); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v4→v5: %w", err)
 			}
 		}
 	} else if !hasVersion {

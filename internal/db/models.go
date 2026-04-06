@@ -132,19 +132,21 @@ type DepGraph struct {
 
 // Lesson stores a persistent piece of feedback or knowledge.
 type Lesson struct {
-	ID             int64          `db:"id"`
-	RepoScope      sql.NullString `db:"repo_scope"`
-	Content        string         `db:"content"`
-	Source         string         `db:"source"`
-	Active         bool           `db:"active"`
-	Pinned         bool           `db:"pinned"`
-	TimesInjected  int            `db:"times_injected"`
-	TimesHelpful   int            `db:"times_helpful"`
-	TimesUnhelpful int            `db:"times_unhelpful"`
-	SupersededBy   sql.NullInt64  `db:"superseded_by"`
-	LastInjectedAt sql.NullTime   `db:"last_injected_at"`
-	CreatedAt      time.Time      `db:"created_at"`
-	UpdatedAt      time.Time      `db:"updated_at"`
+	ID              int64          `db:"id"`
+	RepoScope       sql.NullString `db:"repo_scope"`
+	Content         string         `db:"content"`
+	Source          string         `db:"source"`
+	Active          bool           `db:"active"`
+	Pinned          bool           `db:"pinned"`
+	TimesInjected   int            `db:"times_injected"`
+	TimesHelpful    int            `db:"times_helpful"`
+	TimesUnhelpful  int            `db:"times_unhelpful"`
+	SupersededBy    sql.NullInt64  `db:"superseded_by"`
+	LastInjectedAt  sql.NullTime   `db:"last_injected_at"`
+	LastHelpfulAt   sql.NullTime   `db:"last_helpful_at"`
+	LastUnhelpfulAt sql.NullTime   `db:"last_unhelpful_at"`
+	CreatedAt       time.Time      `db:"created_at"`
+	UpdatedAt       time.Time      `db:"updated_at"`
 }
 
 // EffectivenessRatio returns the ratio of helpful to total outcomes.
