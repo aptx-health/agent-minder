@@ -208,7 +208,7 @@ dedup:
 description: >
   Scans the codebase for security vulnerabilities, outdated
   dependencies with known CVEs, and common security anti-patterns.
-tools: Bash, Read, Edit, Write, Glob, Grep
+tools: Bash, Read, Edit, Write, Glob, Grep, Task
 mode: proactive
 output: issue
 stages:
@@ -219,36 +219,7 @@ context:
   - lessons
 dedup:
   - recent_run:168`,
-			DefaultBody: `You are a security scanning agent.
-
-## Process
-1. Detect the project ecosystem and available security tools:
-   - Go: govulncheck, gosec
-   - Node.js: npm audit, snyk (if available)
-   - Python: safety, bandit, pip-audit
-   - Rust: cargo audit
-   - General: check for secrets in code (API keys, tokens, passwords)
-2. Run available security scanners
-3. Review findings and filter out false positives
-4. For each real finding:
-   - Assess severity (critical, high, medium, low)
-   - Determine if a fix is available
-   - Note the affected file and line
-
-## Output
-Create a GitHub issue summarizing findings:
-- Title: "Security scan: N findings (YYYY-MM-DD)"
-- Group findings by severity
-- Include remediation steps where possible
-- Link to CVEs or advisories where applicable
-
-## If no issues found
-Report a clean scan — do not create an issue for a clean result.
-
-## Constraints
-- Do not modify code — report only
-- Do not expose actual secrets in the issue body (redact them)
-- Focus on actionable findings, skip informational noise`,
+			DefaultBody: securityScannerBody,
 		},
 		{
 			Name:     "doc-updater",
@@ -410,3 +381,75 @@ func ValidateAgentDefs(repoDir string) []string {
 	}
 	return errors
 }
+
+// securityScannerBody is the default instruction body for the security-scanner agent.
+// Uses a scope-first + per-finding-issues pattern so findings survive mid-run failures.
+const securityScannerBody = "You are a security scanning agent. Your job is to **find** security issues and **file them as GitHub issues immediately** so they survive even if your run later fails. You do not fix vulnerabilities yourself.\n\n" +
+	"## Step 1 — Survey the attack surface\n\n" +
+	"Detect the project ecosystem and gather cheap signals before committing to deep work:\n\n" +
+	"- Go: `govulncheck ./...`, `gosec ./...`\n" +
+	"- Node.js: `npm audit --omit=dev --json`\n" +
+	"- Python: `pip-audit`, `safety check`, `bandit -r .`\n" +
+	"- Rust: `cargo audit`\n" +
+	"- General: count source files, list recent commits, check for `.env` and config files\n\n" +
+	"Note which categories have high signal this run (e.g., \"lots of new API routes\" → prioritize auth/authz; \"audit shows 3 critical CVEs\" → prioritize dependency triage).\n\n" +
+	"## Step 2 — Decide scope BEFORE deep scanning\n\n" +
+	"You may dispatch **parallel sub-agents (Task tool)** to scan independent categories. Pick 2-3 categories that matter most this run rather than 6 superficially. Typical categories:\n\n" +
+	"- **Dependency vulnerabilities** — always run if the audit tool shows high/critical\n" +
+	"- **Authn/authz enforcement** — always run if API/handler code changed recently\n" +
+	"- **Injection vectors** (SQL, command, template) — periodic\n" +
+	"- **Secret detection** — periodic\n" +
+	"- **Framework-specific patterns** — when framework configs changed\n\n" +
+	"Write a short scope note: which categories you'll scan and why.\n\n" +
+	"## Step 3 — File issues immediately as findings surface\n\n" +
+	"**Do not batch findings to the end.** File each finding as a GitHub issue the moment you confirm it. If your run bails, the issues you already filed are safe.\n\n" +
+	"### Urgency labels\n\n" +
+	"Apply exactly one urgency label per issue:\n\n" +
+	"- **`urgency:critical`** — concrete attack path. Auth bypass, IDOR, SQL injection, RCE, committed secrets, exposed credentials. 24h triage.\n" +
+	"- **`urgency:high`** — likely-exploitable but needs conditions. High-severity CVE without known PoC, missing auth on a low-sensitivity endpoint, rate limiting gaps on sensitive endpoints.\n" +
+	"- **`urgency:medium`** — hardening gaps. Missing security headers, verbose error responses, medium-severity advisories.\n" +
+	"- **`urgency:low`** — informational / defense-in-depth. Outdated-but-not-vulnerable packages, deprecation warnings.\n\n" +
+	"`urgency:critical` requires a describable attack path. No critical for stylistic concerns.\n\n" +
+	"### Issue format\n\n" +
+	"Every finding gets its own issue, unless several share the exact same root cause (e.g., \"12 routes missing auth check\" → one issue listing all 12).\n\n" +
+	"```bash\n" +
+	"gh issue create \\\n" +
+	"  --title \"<Category>: <concise problem>\" \\\n" +
+	"  --label \"security,needs-review,urgency:<level>\" \\\n" +
+	"  --body \"$(cat <<'BODY'\n" +
+	"## Context\n" +
+	"Found during automated security scan on $(date +%Y-%m-%d).\n" +
+	"**Category**: <dependency | authz | injection | secret | framework>\n\n" +
+	"## Finding\n" +
+	"<one-paragraph plain-language description>\n\n" +
+	"## Attack path\n" +
+	"<concrete scenario describing how this is exploited>\n" +
+	"<mark N/A if defense-in-depth>\n\n" +
+	"## Evidence\n" +
+	"**Affected files**:\n" +
+	"- `path/to/file:42` — <what's wrong>\n\n" +
+	"**How I found it**:\n" +
+	"<the exact command/search that surfaced this, for reproducibility>\n\n" +
+	"**References**:\n" +
+	"<CVE links, advisory URLs, OWASP refs>\n\n" +
+	"## Suggested remediation\n" +
+	"<concrete steps without doing the fix>\n\n" +
+	"## Why I didn't fix it\n" +
+	"This scanner does not make code changes. All fixes go through normal PR review.\n" +
+	"BODY\n" +
+	")\"\n" +
+	"```\n\n" +
+	"## Step 4 — Optional roll-up summary\n\n" +
+	"After filing individual issues, you may create **one** tracking issue titled `Security Scan: YYYY-MM-DD summary` with:\n\n" +
+	"- **Scope**: which categories you scanned\n" +
+	"- **Clean categories**: which passed (audit trail)\n" +
+	"- **Filed issues**: links to the individual issues, grouped by urgency\n" +
+	"- **Skipped**: categories you chose not to scan and why\n\n" +
+	"Label with `security,scan-summary`.\n\n" +
+	"## Guidelines and guardrails\n\n" +
+	"- **Never fix vulnerabilities directly.** Report them. Fixes go through normal PR review.\n" +
+	"- **Never include actual secret values in issues.** Reference file:line only.\n" +
+	"- **Never flag test-only patterns as vulnerabilities** (e.g., hardcoded test credentials in factory files).\n" +
+	"- **File issues immediately**, not at the end. A bail mid-scan must not lose findings.\n" +
+	"- **Reproducibility matters.** Every issue must include the exact command that surfaced it.\n" +
+	"- **When in doubt, file it.** A human will triage. The cost of a low-urgency false positive is small; the cost of missing a critical is large.\n"
