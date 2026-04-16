@@ -155,49 +155,108 @@ func findMostRecentJobForIssue(store *db.Store, owner, repo string, issueNum int
 }
 
 func checkoutWorktree(repoDir string, job *db.Job) error {
-	branch := job.Branch.String
-	if branch == "" {
-		// Construct branch from job name.
-		branch = fmt.Sprintf("agent/%s", job.Name)
-	}
-
 	worktreePath := job.WorktreePath.String
 
-	// Check if worktree exists on disk.
+	// If worktree is on disk, use the recorded branch (or our best guess) and present it.
 	if worktreePath != "" && dirExistsCheckout(worktreePath) {
+		branch := job.Branch.String
+		if branch == "" {
+			branch = candidateBranchNames(job)[0]
+		}
 		return presentWorktree(worktreePath, branch, job)
 	}
 
-	// Worktree is gone — recreate from the branch.
-	fmt.Printf("Worktree not found, recreating from branch %s...\n", branch)
+	// Worktree is gone — fetch and pick the first branch that actually exists.
+	candidates := candidateBranchNames(job)
+	fmt.Printf("Worktree not found, recreating from branch %s...\n", candidates[0])
 
-	// Fetch latest and prune stale worktree bookkeeping.
 	_ = gitpkg.Fetch(repoDir)
 	_ = gitpkg.WorktreePrune(repoDir)
 
-	// Create worktree path if we don't have one.
+	branch, err := pickExistingBranch(repoDir, candidates)
+	if err != nil {
+		return err
+	}
+
 	if worktreePath == "" {
 		home, _ := os.UserHomeDir()
 		worktreePath = filepath.Join(home, ".agent-minder", "worktrees", "checkout", job.Name)
 	}
-
 	_ = os.MkdirAll(filepath.Dir(worktreePath), 0755)
 
-	// Try strategies in order:
-	// 1. Check out existing local branch into worktree.
-	// 2. If branch only exists on remote, create from origin/<branch>.
-	err := gitpkg.WorktreeAddExisting(repoDir, worktreePath, branch)
-	if err != nil {
-		// Local branch might exist but worktree add failed for other reasons.
-		// Delete the local branch and recreate from remote.
-		_ = gitpkg.DeleteBranch(repoDir, branch)
-		err = gitpkg.WorktreeAdd(repoDir, worktreePath, branch, "origin/"+branch)
-		if err != nil {
-			return fmt.Errorf("could not create worktree from branch %s: %w", branch, err)
+	if err := createWorktreeFromBranch(repoDir, worktreePath, branch); err != nil {
+		return err
+	}
+	return presentWorktree(worktreePath, branch, job)
+}
+
+// candidateBranchNames returns branch names to try in priority order, mirroring
+// the conventions in supervisor.newSlotContext. Issue-bound jobs use
+// `agent/issue-<N>` regardless of the agent name; proactive jobs use
+// `agent/<job.Name>`.
+func candidateBranchNames(job *db.Job) []string {
+	var names []string
+	seen := map[string]bool{}
+	add := func(b string) {
+		if b == "" || seen[b] {
+			return
+		}
+		seen[b] = true
+		names = append(names, b)
+	}
+	add(job.Branch.String)
+	if job.IssueNumber > 0 {
+		add(fmt.Sprintf("agent/issue-%d", job.IssueNumber))
+	}
+	if job.Name != "" {
+		add(fmt.Sprintf("agent/%s", job.Name))
+	}
+	return names
+}
+
+// pickExistingBranch returns the first candidate that exists locally or on origin.
+func pickExistingBranch(repoDir string, candidates []string) (string, error) {
+	for _, b := range candidates {
+		if gitpkg.BranchExists(repoDir, b) {
+			return b, nil
 		}
 	}
+	return "", fmt.Errorf("no matching branch found locally or on origin (tried: %s)", strings.Join(candidates, ", "))
+}
 
-	return presentWorktree(worktreePath, branch, job)
+// candidateBranchNamesRemote is the JobResponse equivalent of candidateBranchNames.
+func candidateBranchNamesRemote(j *daemon.JobResponse) []string {
+	var names []string
+	seen := map[string]bool{}
+	add := func(b string) {
+		if b == "" || seen[b] {
+			return
+		}
+		seen[b] = true
+		names = append(names, b)
+	}
+	add(j.Branch)
+	if j.IssueNumber > 0 {
+		add(fmt.Sprintf("agent/issue-%d", j.IssueNumber))
+	}
+	if j.Name != "" {
+		add(fmt.Sprintf("agent/%s", j.Name))
+	}
+	return names
+}
+
+// createWorktreeFromBranch creates a worktree at worktreePath for the given branch,
+// preferring an existing local branch and falling back to origin/<branch>.
+func createWorktreeFromBranch(repoDir, worktreePath, branch string) error {
+	if err := gitpkg.WorktreeAddExisting(repoDir, worktreePath, branch); err == nil {
+		return nil
+	}
+	// Local branch may be missing or in a bad state; recreate from remote.
+	_ = gitpkg.DeleteBranch(repoDir, branch)
+	if err := gitpkg.WorktreeAdd(repoDir, worktreePath, branch, "origin/"+branch); err != nil {
+		return fmt.Errorf("could not create worktree from branch %s: %w", branch, err)
+	}
+	return nil
 }
 
 func presentWorktree(path, branch string, job *db.Job) error {
@@ -317,15 +376,19 @@ func runCheckoutRemote(args []string) error {
 		fmt.Printf("\nWarning: this job is currently %s — the agent is actively working.\n\n", selected.Status)
 	}
 
-	branch := selected.Branch
-	if branch == "" {
-		return fmt.Errorf("job has no branch — cannot create worktree")
+	candidates := candidateBranchNamesRemote(selected)
+	if len(candidates) == 0 {
+		return fmt.Errorf("job has no branch and no issue/name to derive one from — cannot create worktree")
 	}
 
-	// Fetch the branch from remote and create a local worktree.
-	fmt.Printf("Fetching branch %s from remote...\n", branch)
+	fmt.Printf("Fetching branch %s from remote...\n", candidates[0])
 	_ = gitpkg.Fetch(repoDir)
 	_ = gitpkg.WorktreePrune(repoDir)
+
+	branch, err := pickExistingBranch(repoDir, candidates)
+	if err != nil {
+		return err
+	}
 
 	home, _ := os.UserHomeDir()
 	worktreePath := filepath.Join(home, ".agent-minder", "worktrees", "checkout", selected.Name)
@@ -338,8 +401,7 @@ func runCheckoutRemote(args []string) error {
 
 	// Delete local branch if it exists, recreate from origin.
 	_ = gitpkg.DeleteBranch(repoDir, branch)
-	err = gitpkg.WorktreeAdd(repoDir, worktreePath, branch, "origin/"+branch)
-	if err != nil {
+	if err := gitpkg.WorktreeAdd(repoDir, worktreePath, branch, "origin/"+branch); err != nil {
 		return fmt.Errorf("could not create worktree from branch %s: %w", branch, err)
 	}
 
