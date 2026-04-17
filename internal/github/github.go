@@ -445,9 +445,15 @@ func (c *Client) ListIssuesByMilestone(ctx context.Context, owner, repo string, 
 // Uses the Issues list API instead of the Search API to avoid permission issues
 // with tokens that lack search scope.
 func (c *Client) ListIssuesByLabel(ctx context.Context, owner, repo, label string) (*SearchResult, error) {
+	return c.ListIssuesByLabels(ctx, owner, repo, []string{label})
+}
+
+// ListIssuesByLabels returns open issues that have ALL the given labels (AND logic).
+// GitHub's Issues list API natively applies AND when multiple labels are specified.
+func (c *Client) ListIssuesByLabels(ctx context.Context, owner, repo string, labels []string) (*SearchResult, error) {
 	var allItems []ItemStatus
 	opts := &github.IssueListByRepoOptions{
-		Labels:    []string{label},
+		Labels:    labels,
 		State:     "open",
 		Sort:      "created",
 		Direction: "desc",
