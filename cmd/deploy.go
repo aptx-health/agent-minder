@@ -298,8 +298,8 @@ func runForeground(deployID string) error {
 			fmt.Printf("Warning: sync schedules: %v\n", err)
 		}
 		for _, def := range cfg.Jobs {
-			if label := def.TriggerLabel(); label != "" {
-				routes = append(routes, supervisor.TriggerRoute{Label: label, Agent: def.Agent})
+			if labels := def.TriggerLabels(); len(labels) > 0 {
+				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent})
 			}
 		}
 		if len(routes) > 0 {
@@ -418,8 +418,8 @@ func runDaemon(deployID string) error {
 
 		// Extract trigger routes and cron schedules for display.
 		for _, def := range cfg.Jobs {
-			if label := def.TriggerLabel(); label != "" {
-				routes = append(routes, supervisor.TriggerRoute{Label: label, Agent: def.Agent})
+			if labels := def.TriggerLabels(); len(labels) > 0 {
+				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent})
 			}
 		}
 		if len(routes) > 0 {
@@ -518,7 +518,7 @@ func printStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute
 		fmt.Printf("  Watch: %s → autopilot\n", deploy.WatchFilter.String)
 	}
 	for _, r := range routes {
-		fmt.Printf("  Trigger: label:%s → %s\n", r.Label, r.Agent)
+		fmt.Printf("  Trigger: label:%s → %s\n", strings.Join(r.Labels, ","), r.Agent)
 	}
 	schedules, _ := store.GetEnabledSchedules(deployID)
 	for _, s := range schedules {

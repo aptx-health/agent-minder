@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -13,26 +14,34 @@ import (
 
 // WatchFilter represents a parsed watch filter.
 type WatchFilter struct {
-	Type  string // "label" or "milestone"
-	Value string
+	Type   string   // "label" or "milestone"
+	Values []string // label names (AND logic) or single milestone name
 }
 
-// TriggerRoute maps a label to an agent type.
-// When an issue has the matching label, it's routed to the specified agent
-// instead of the default autopilot.
+// TriggerRoute maps one or more labels to an agent type.
+// When an issue has ALL matching labels (AND logic), it's routed to the
+// specified agent instead of the default autopilot.
 type TriggerRoute struct {
-	Label string // GitHub label to match
-	Agent string // agent type to use
+	Labels []string // GitHub labels to match (AND logic)
+	Agent  string   // agent type to use
 }
 
 // SetTriggerRoutes configures label→agent routing from jobs.yaml triggers.
+// Routes with more labels (more specific) are sorted first so they match
+// before less specific routes.
 func (s *Supervisor) SetTriggerRoutes(routes []TriggerRoute) {
+	sorted := make([]TriggerRoute, len(routes))
+	copy(sorted, routes)
+	sort.Slice(sorted, func(i, j int) bool {
+		return len(sorted[i].Labels) > len(sorted[j].Labels)
+	})
 	s.mu.Lock()
-	s.triggerRoutes = routes
+	s.triggerRoutes = sorted
 	s.mu.Unlock()
 }
 
-// ParseWatchFilter parses a filter string like "label:ready" or "milestone:v2.0".
+// ParseWatchFilter parses a filter string like "label:ready", "label:agent-ready,ux",
+// or "milestone:v2.0". Multiple comma-separated labels use AND logic.
 func ParseWatchFilter(filter string) (*WatchFilter, error) {
 	parts := strings.SplitN(filter, ":", 2)
 	if len(parts) != 2 || parts[1] == "" {
@@ -42,11 +51,26 @@ func ParseWatchFilter(filter string) (*WatchFilter, error) {
 	if typ != "label" && typ != "milestone" {
 		return nil, fmt.Errorf("unsupported filter type %q (expected label or milestone)", typ)
 	}
-	value := parts[1]
-	if !isValidFilterValue(value) {
-		return nil, fmt.Errorf("invalid watch filter value %q (must contain only alphanumeric, hyphen, underscore, dot, or space characters)", value)
+
+	values := splitFilterValues(typ, parts[1])
+	for _, v := range values {
+		if v == "" {
+			return nil, fmt.Errorf("invalid watch filter %q: empty label in comma-separated list", filter)
+		}
+		if !isValidFilterValue(v) {
+			return nil, fmt.Errorf("invalid watch filter value %q (must contain only alphanumeric, hyphen, underscore, dot, or space characters)", v)
+		}
 	}
-	return &WatchFilter{Type: typ, Value: value}, nil
+	return &WatchFilter{Type: typ, Values: values}, nil
+}
+
+// splitFilterValues splits on comma for labels (AND logic) but keeps
+// milestone values intact (commas not meaningful for milestones).
+func splitFilterValues(typ, raw string) []string {
+	if typ == "label" && strings.Contains(raw, ",") {
+		return strings.Split(raw, ",")
+	}
+	return []string{raw}
 }
 
 // watchPoll queries GitHub for issues matching the watch filter and trigger routes,
@@ -91,7 +115,7 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	s.mu.Unlock()
 
 	for _, route := range routes {
-		issues := s.pollFilter(ctx, ghClient, "label:"+route.Label)
+		issues := s.pollFilter(ctx, ghClient, "label:"+strings.Join(route.Labels, ","))
 		for _, issue := range issues {
 			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
@@ -116,9 +140,9 @@ func (s *Supervisor) pollFilter(ctx context.Context, ghClient *ghpkg.Client, fil
 	var searchResult *ghpkg.SearchResult
 	switch filter.Type {
 	case "label":
-		searchResult, err = ghClient.ListIssuesByLabel(ctx, s.owner, s.repo, filter.Value)
+		searchResult, err = ghClient.ListIssuesByLabels(ctx, s.owner, s.repo, filter.Values)
 	case "milestone":
-		msNum, msErr := ghClient.FindMilestoneNumber(ctx, s.owner, s.repo, filter.Value)
+		msNum, msErr := ghClient.FindMilestoneNumber(ctx, s.owner, s.repo, filter.Values[0])
 		if msErr != nil {
 			return nil
 		}
@@ -132,17 +156,28 @@ func (s *Supervisor) pollFilter(ctx context.Context, ghClient *ghpkg.Client, fil
 
 // resolveAgentForIssue checks the issue's labels against trigger routes.
 // Returns the matching agent, or "autopilot" as default.
+// Routes with more labels are checked first so specific routes take priority.
 func (s *Supervisor) resolveAgentForIssue(labels []string) string {
 	s.mu.Lock()
 	routes := s.triggerRoutes
 	s.mu.Unlock()
 
 	for _, route := range routes {
-		if hasLabel(labels, route.Label) {
+		if hasAllLabels(labels, route.Labels) {
 			return route.Agent
 		}
 	}
 	return "autopilot"
+}
+
+// hasAllLabels returns true if issueLabels contains every label in required (case-insensitive).
+func hasAllLabels(issueLabels []string, required []string) bool {
+	for _, req := range required {
+		if !hasLabel(issueLabels, req) {
+			return false
+		}
+	}
+	return len(required) > 0
 }
 
 // createJobForIssue fetches issue content and inserts a job row.

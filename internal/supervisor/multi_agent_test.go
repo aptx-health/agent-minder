@@ -150,16 +150,16 @@ func TestWatchPollDedupByAgentAndIssue(t *testing.T) {
 	}
 }
 
-func TestTriggerLabelLookup(t *testing.T) {
-	// Verify TriggerLabel() finds the right label for an agent.
+func TestTriggerLabelsLookup(t *testing.T) {
+	// Verify TriggerLabels() finds the right labels for an agent.
 	store := testStoreForMultiAgent(t)
 	deploy := testDeployForMultiAgent(t, store)
 
 	sup := NewTestSupervisor(store, deploy, "/tmp/repo")
 	sup.SetTriggerRoutes([]TriggerRoute{
-		{Label: "spike", Agent: "spike"},
-		{Label: "bug", Agent: "bug-fixer"},
-		{Label: "agent-ready", Agent: "autopilot"},
+		{Labels: []string{"spike"}, Agent: "spike"},
+		{Labels: []string{"bug"}, Agent: "bug-fixer"},
+		{Labels: []string{"agent-ready"}, Agent: "autopilot"},
 	})
 
 	spikeJob := &db.Job{
@@ -179,8 +179,8 @@ func TestTriggerLabelLookup(t *testing.T) {
 		Owner: "acme", Repo: "widgets", sup: sup,
 	}
 
-	if label := sc.TriggerLabel(); label != "spike" {
-		t.Errorf("TriggerLabel() = %q, want %q", label, "spike")
+	if labels := sc.TriggerLabels(); len(labels) != 1 || labels[0] != "spike" {
+		t.Errorf("TriggerLabels() = %v, want [spike]", labels)
 	}
 
 	// Test with autopilot.
@@ -200,8 +200,8 @@ func TestTriggerLabelLookup(t *testing.T) {
 		Owner: "acme", Repo: "widgets", sup: sup,
 	}
 
-	if label := sc2.TriggerLabel(); label != "agent-ready" {
-		t.Errorf("TriggerLabel() = %q, want %q", label, "agent-ready")
+	if labels := sc2.TriggerLabels(); len(labels) != 1 || labels[0] != "agent-ready" {
+		t.Errorf("TriggerLabels() = %v, want [agent-ready]", labels)
 	}
 
 	// Agent with no trigger route should return empty.
@@ -220,7 +220,7 @@ func TestTriggerLabelLookup(t *testing.T) {
 		Owner: "acme", Repo: "widgets", sup: sup,
 	}
 
-	if label := sc3.TriggerLabel(); label != "" {
-		t.Errorf("TriggerLabel() for reviewer = %q, want empty", label)
+	if labels := sc3.TriggerLabels(); len(labels) != 0 {
+		t.Errorf("TriggerLabels() for reviewer = %v, want nil", labels)
 	}
 }
