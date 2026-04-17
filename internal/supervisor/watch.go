@@ -117,6 +117,10 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	for _, route := range routes {
 		issues := s.pollFilter(ctx, ghClient, "label:"+strings.Join(route.Labels, ","))
 		for _, issue := range issues {
+			// Skip if a more-specific route should handle this issue.
+			if s.resolveAgentForIssue(issue.Labels) != route.Agent {
+				continue
+			}
 			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
