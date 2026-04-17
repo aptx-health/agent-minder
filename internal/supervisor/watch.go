@@ -32,7 +32,7 @@ type TriggerRoute struct {
 func (s *Supervisor) SetTriggerRoutes(routes []TriggerRoute) {
 	sorted := make([]TriggerRoute, len(routes))
 	copy(sorted, routes)
-	sort.Slice(sorted, func(i, j int) bool {
+	sort.SliceStable(sorted, func(i, j int) bool {
 		return len(sorted[i].Labels) > len(sorted[j].Labels)
 	})
 	s.mu.Lock()
