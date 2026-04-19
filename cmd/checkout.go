@@ -29,7 +29,9 @@ If the worktree no longer exists on disk, it is recreated from the remote branch
 Examples:
   minder checkout              # interactive picker
   minder checkout #42          # most recent job for issue 42
-  minder checkout --job 7      # by job ID`,
+  minder checkout --job 7      # by job ID
+  minder checkout -g spike     # filter to spike jobs
+  minder checkout -g 529       # find issue #529 or PR #529`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCheckout,
 }
@@ -39,6 +41,7 @@ var (
 	flagCheckoutJob    int64
 	flagCheckoutRemote string
 	flagCheckoutKey    string
+	flagCheckoutGrep   string
 )
 
 func init() {
@@ -47,6 +50,7 @@ func init() {
 	checkoutCmd.Flags().Int64Var(&flagCheckoutJob, "job", 0, "Job ID (skip picker)")
 	checkoutCmd.Flags().StringVar(&flagCheckoutRemote, "remote", "", "Remote daemon address (host:port)")
 	checkoutCmd.Flags().StringVar(&flagCheckoutKey, "api-key", "", "API key for remote access")
+	checkoutCmd.Flags().StringVarP(&flagCheckoutGrep, "grep", "g", "", "Filter jobs by substring (matches issue, agent, title, PR, status)")
 }
 
 func runCheckout(cmd *cobra.Command, args []string) error {
@@ -109,8 +113,10 @@ func runCheckout(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		candidates = picker.FilterJobs(candidates, flagCheckoutGrep)
+
 		if len(candidates) == 0 {
-			fmt.Println("No completed jobs found for this repository.")
+			fmt.Println("No matching jobs found for this repository.")
 			return nil
 		}
 
@@ -362,8 +368,9 @@ func runCheckoutRemote(args []string) error {
 				candidates = append(candidates, j)
 			}
 		}
+		candidates = picker.FilterRemoteJobs(candidates, flagCheckoutGrep)
 		if len(candidates) == 0 {
-			fmt.Println("No jobs found on remote daemon.")
+			fmt.Println("No matching jobs found on remote daemon.")
 			return nil
 		}
 		selected, err = picker.PickRemoteJob(candidates, "Select a job")
