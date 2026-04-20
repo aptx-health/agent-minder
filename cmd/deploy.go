@@ -170,6 +170,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	}
 	store := db.NewStore(conn)
 
+	detectRepoRename(store, repoDir, owner, repo)
+
 	if err := store.CreateDeployment(deploy); err != nil {
 		_ = store.Close()
 		return fmt.Errorf("create deployment: %w", err)

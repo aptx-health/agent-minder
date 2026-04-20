@@ -443,6 +443,69 @@ INSERT INTO tasks (deployment_id, issue_number, owner, repo, status) VALUES ('d1
 	}
 }
 
+func TestRenameRepo(t *testing.T) {
+	s := testStore(t)
+
+	d := &Deployment{
+		ID: "rename-test", RepoDir: "/tmp/myrepo",
+		Owner: "acme", Repo: "old-name",
+		Mode: "issues", MaxAgents: 2, MaxTurns: 50, MaxBudgetUSD: 5,
+	}
+	if err := s.CreateDeployment(d); err != nil {
+		t.Fatal(err)
+	}
+
+	j := &Job{
+		DeploymentID: "rename-test", Agent: "autopilot", Name: "issue-1",
+		IssueNumber: 1, Owner: "acme", Repo: "old-name", Status: StatusQueued,
+	}
+	if err := s.CreateJob(j); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rename.
+	n, err := s.RenameRepo("acme", "old-name", "acme", "new-name")
+	if err != nil {
+		t.Fatalf("RenameRepo: %v", err)
+	}
+	if n != 2 { // 1 deployment + 1 job
+		t.Errorf("RenameRepo affected %d rows, want 2", n)
+	}
+
+	// Verify deployment.
+	deploys, _ := s.ListDeployments()
+	if deploys[0].Repo != "new-name" {
+		t.Errorf("deployment repo = %q, want new-name", deploys[0].Repo)
+	}
+
+	// Verify job.
+	jobs, _ := s.GetJobsByRepo("acme", "new-name")
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job under new-name, got %d", len(jobs))
+	}
+
+	// Old name should find nothing.
+	old, _ := s.GetJobsByRepo("acme", "old-name")
+	if len(old) != 0 {
+		t.Errorf("expected 0 jobs under old-name, got %d", len(old))
+	}
+
+	// HasRepo.
+	has, _ := s.HasRepo("acme", "new-name")
+	if !has {
+		t.Error("HasRepo(new-name) = false, want true")
+	}
+
+	// FindRepoByDir.
+	owner, repo, err := s.FindRepoByDir("/tmp/myrepo")
+	if err != nil {
+		t.Fatalf("FindRepoByDir: %v", err)
+	}
+	if owner != "acme" || repo != "new-name" {
+		t.Errorf("FindRepoByDir = %s/%s, want acme/new-name", owner, repo)
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }

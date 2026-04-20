@@ -74,6 +74,8 @@ func runCheckout(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve owner/repo: %w", err)
 	}
 
+	detectRepoRename(store, repoDir, owner, repo)
+
 	var job *db.Job
 
 	// Direct job ID.
