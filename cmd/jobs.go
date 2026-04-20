@@ -24,10 +24,13 @@ var jobsListCmd = &cobra.Command{
 
 var jobsRunCmd = &cobra.Command{
 	Use:   "run [name]",
-	Short: "Manually trigger a job from jobs.yaml",
-	Long: `Manually trigger a job defined in jobs.yaml.
+	Short: "Manually trigger a scheduled job",
+	Long: `Manually trigger a scheduled (cron) job from jobs.yaml.
 
-If no name is given, presents an interactive picker of all configured jobs.
+Only proactive/scheduled jobs are shown — reactive trigger-based jobs
+(label:*, milestone:*) fire automatically and cannot be triggered manually.
+
+If no name is given, presents an interactive picker.
 
 Examples:
   minder jobs run                # interactive picker
@@ -130,33 +133,37 @@ func runJobsRun(cmd *cobra.Command, args []string) error {
 	var name string
 	if len(args) > 0 {
 		name = args[0]
-		if _, ok := cfg.Jobs[name]; !ok {
+		def, ok := cfg.Jobs[name]
+		if !ok {
 			return fmt.Errorf("job %q not found in jobs.yaml", name)
 		}
+		if def.IsTrigger() {
+			return fmt.Errorf("job %q is a reactive trigger — it fires automatically when issues match its label filter", name)
+		}
 	} else {
-		// Interactive picker.
+		// Interactive picker — only scheduled (proactive) jobs.
 		var labels []string
 		for n, def := range cfg.Jobs {
-			kind := "cron"
-			expr := def.Schedule
 			if def.IsTrigger() {
-				kind = "trigger"
-				expr = def.Trigger
+				continue
 			}
-			label := fmt.Sprintf("%-20s  %-8s  %-25s  agent=%s", n, kind, expr, def.Agent)
+			label := fmt.Sprintf("%-20s  %-25s  agent=%s", n, def.Schedule, def.Agent)
 			if def.Description != "" {
 				label += "  " + truncateStr(def.Description, 40)
 			}
 			labels = append(labels, label)
 		}
-		// Sort for stable ordering.
+		if len(labels) == 0 {
+			fmt.Println("No scheduled jobs found in jobs.yaml (only reactive triggers).")
+			return nil
+		}
 		sort.Strings(labels)
 
-		selected, err := picker.PickFromList(labels, "Select a job to trigger")
+		selected, err := picker.PickFromList(labels, "Manually trigger a scheduled job")
 		if err != nil {
 			return err
 		}
-		// Extract name from the formatted label (first field).
+		// Extract name from the formatted label (first field, trimmed).
 		for n := range cfg.Jobs {
 			if len(selected) >= len(n) && selected[:len(n)] == n {
 				name = n
