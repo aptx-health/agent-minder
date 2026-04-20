@@ -617,3 +617,44 @@ func (s *Store) DeleteSchedule(name string) error {
 	_, err := s.db.Exec("DELETE FROM job_schedules WHERE name = ?", name)
 	return err
 }
+
+// RenameRepo updates all references from oldOwner/oldRepo to newOwner/newRepo
+// across deployments, jobs, and onboarding tables. Returns the total number of
+// rows updated.
+func (s *Store) RenameRepo(oldOwner, oldRepo, newOwner, newRepo string) (int64, error) {
+	var total int64
+	tables := []string{"deployments", "jobs", "repo_onboarding"}
+	for _, table := range tables {
+		res, err := s.db.Exec(
+			fmt.Sprintf("UPDATE %s SET owner = ?, repo = ? WHERE owner = ? AND repo = ?", table),
+			newOwner, newRepo, oldOwner, oldRepo)
+		if err != nil {
+			return total, fmt.Errorf("rename %s: %w", table, err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
+}
+
+// HasRepo returns true if any deployments or jobs exist for the given owner/repo.
+func (s *Store) HasRepo(owner, repo string) (bool, error) {
+	var count int
+	err := s.db.Get(&count,
+		"SELECT COUNT(*) FROM deployments WHERE owner = ? AND repo = ?", owner, repo)
+	return count > 0, err
+}
+
+// FindRepoByDir returns the owner/repo stored for a given repo_dir, if any.
+func (s *Store) FindRepoByDir(repoDir string) (string, string, error) {
+	var d struct {
+		Owner string `db:"owner"`
+		Repo  string `db:"repo"`
+	}
+	err := s.db.Get(&d,
+		"SELECT owner, repo FROM deployments WHERE repo_dir = ? ORDER BY started_at DESC LIMIT 1", repoDir)
+	if err != nil {
+		return "", "", err
+	}
+	return d.Owner, d.Repo, nil
+}
