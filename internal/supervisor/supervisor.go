@@ -620,15 +620,35 @@ func detectPRFromLog(logPath, owner, repo string) int {
 	if err != nil {
 		return 0
 	}
-	target := fmt.Sprintf("github.com/%s/%s/pull/", owner, repo)
 	content := string(data)
-	idx := strings.LastIndex(content, target)
+
+	// Try exact owner/repo match first.
+	target := fmt.Sprintf("github.com/%s/%s/pull/", owner, repo)
+	if num := lastPRNumberAfter(content, target); num > 0 {
+		return num
+	}
+
+	// Fall back to any "/pull/<number>" in the log. This handles renamed repos
+	// where GitHub redirects the URL (e.g., eternal-fitness → ripit-fitness)
+	// but the deployment record still has the old name.
+	if num := lastPRNumberAfter(content, "/pull/"); num > 0 {
+		return num
+	}
+
+	return 0
+}
+
+func lastPRNumberAfter(content, marker string) int {
+	idx := strings.LastIndex(content, marker)
 	if idx < 0 {
 		return 0
 	}
-	rest := content[idx+len(target):]
+	rest := content[idx+len(marker):]
 	end := strings.IndexFunc(rest, func(r rune) bool { return r < '0' || r > '9' })
-	if end <= 0 {
+	if end < 0 {
+		end = len(rest) // number runs to end of string
+	}
+	if end == 0 {
 		return 0
 	}
 	num, _ := strconv.Atoi(rest[:end])
