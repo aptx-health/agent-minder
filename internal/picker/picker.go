@@ -1,4 +1,4 @@
-// Package picker provides a shared interactive job selector using huh.
+// Package picker provides interactive job selection using bubbles/list.
 package picker
 
 import (
@@ -6,7 +6,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/aptx-health/agent-minder/internal/daemon"
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -21,111 +24,169 @@ const (
 	ActionLogs     Action = "logs"
 )
 
-// PickAction presents an action menu after job selection.
-func PickAction(job *db.Job) (Action, error) {
-	options := []huh.Option[Action]{
-		huh.NewOption("Checkout worktree", ActionCheckout),
-		huh.NewOption("Resume with Claude (gather context, launch claude)", ActionResume),
-		huh.NewOption("View logs", ActionLogs),
+// --- Job items ---
+
+type jobItem struct {
+	job *db.Job
+}
+
+func (i jobItem) Title() string       { return formatJobLine(i.job) }
+func (i jobItem) Description() string { return "" }
+func (i jobItem) FilterValue() string { return jobSearchString(i.job) }
+
+type remoteJobItem struct {
+	job *daemon.JobResponse
+}
+
+func (i remoteJobItem) Title() string       { return formatRemoteJobLine(i.job) }
+func (i remoteJobItem) Description() string { return "" }
+func (i remoteJobItem) FilterValue() string { return remoteJobSearchString(i.job) }
+
+// --- Action items ---
+
+type actionItem struct {
+	label  string
+	action Action
+}
+
+func (i actionItem) Title() string       { return i.label }
+func (i actionItem) Description() string { return "" }
+func (i actionItem) FilterValue() string { return i.label }
+
+// --- Picker model ---
+
+type pickerModel struct {
+	list     list.Model
+	choice   list.Item
+	quitting bool
+}
+
+func (m pickerModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if msg, ok := msg.(tea.KeyMsg); ok {
+		if key.Matches(msg, m.list.KeyMap.Quit) && m.list.FilterState() == list.Unfiltered {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		if msg.String() == "enter" && m.list.FilterState() != list.Filtering {
+			item := m.list.SelectedItem()
+			if item != nil {
+				m.choice = item
+			}
+			return m, tea.Quit
+		}
+	}
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m pickerModel) View() string {
+	return m.list.View()
+}
+
+// newPicker creates a picker model from list items.
+func newPicker(items []list.Item, title string, filtering bool) pickerModel {
+	// Single-line delegate (no description).
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false
+	delegate.SetSpacing(0)
+
+	height := len(items) + 6 // items + title + filter + help + padding
+	if height > 30 {
+		height = 30
 	}
 
-	title := fmt.Sprintf("#%d [%s] %s", job.IssueNumber, job.Agent, truncate(job.IssueTitle.String, 40))
-	if job.IssueNumber == 0 {
-		title = fmt.Sprintf("[%s] %s", job.Agent, truncate(job.Name, 40))
+	l := list.New(items, delegate, 100, height)
+	l.Title = title
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(filtering)
+	l.SetShowHelp(true)
+	l.Styles.Title = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+
+	// Disable q-to-quit when filtering is on (conflicts with typing 'q').
+	if filtering {
+		l.KeyMap.Quit = key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit"))
 	}
 
-	var selected Action
-	err := huh.NewSelect[Action]().
-		Title(title).
-		Options(options...).
-		Value(&selected).
-		Run()
+	return pickerModel{list: l}
+}
+
+func runPicker(m pickerModel) (list.Item, error) {
+	p := tea.NewProgram(m)
+	result, err := p.Run()
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("picker: %w", err)
 	}
-	return selected, nil
+	final := result.(pickerModel)
+	if final.quitting || final.choice == nil {
+		return nil, fmt.Errorf("cancelled")
+	}
+	return final.choice, nil
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-3] + "..."
-}
+// --- Public API ---
 
-// PickJob presents an interactive select list of jobs and returns the chosen one.
-// Jobs are displayed with issue number, agent, title, status, PR, and cost.
+// PickJob presents an interactive list of jobs and returns the chosen one.
 func PickJob(jobs []*db.Job, title string) (*db.Job, error) {
 	if len(jobs) == 0 {
 		return nil, fmt.Errorf("no jobs to select from")
 	}
 
-	options := make([]huh.Option[*db.Job], len(jobs))
+	items := make([]list.Item, len(jobs))
 	for i, j := range jobs {
-		options[i] = huh.NewOption(formatJobLine(j), j)
+		items[i] = jobItem{job: j}
 	}
 
-	var selected *db.Job
-	err := huh.NewSelect[*db.Job]().
-		Title(title).
-		Options(options...).
-		Filtering(true).
-		Value(&selected).
-		Run()
+	choice, err := runPicker(newPicker(items, title, true))
 	if err != nil {
 		return nil, err
 	}
-
-	return selected, nil
+	return choice.(jobItem).job, nil
 }
 
-func formatJobLine(j *db.Job) string {
-	// Issue or job name.
-	var label string
-	if j.IssueNumber > 0 {
-		label = fmt.Sprintf("#%-4d", j.IssueNumber)
-	} else {
-		name := j.Name
-		if len(name) > 20 {
-			name = name[:17] + "..."
-		}
-		label = fmt.Sprintf("%-5s", name)
+// PickRemoteJob presents an interactive list of remote API jobs.
+func PickRemoteJob(jobs []daemon.JobResponse, title string) (*daemon.JobResponse, error) {
+	if len(jobs) == 0 {
+		return nil, fmt.Errorf("no jobs to select from")
 	}
 
-	// Agent type.
-	agent := j.Agent
-	if len(agent) > 12 {
-		agent = agent[:12]
+	items := make([]list.Item, len(jobs))
+	for i := range jobs {
+		items[i] = remoteJobItem{job: &jobs[i]}
 	}
 
-	// Title.
-	title := j.IssueTitle.String
-	if title == "" {
-		title = j.Name
+	choice, err := runPicker(newPicker(items, title, true))
+	if err != nil {
+		return nil, err
 	}
-	if len(title) > 35 {
-		title = title[:32] + "..."
-	}
-
-	// PR.
-	pr := "      "
-	if j.PRNumber.Valid && j.PRNumber.Int64 > 0 {
-		pr = fmt.Sprintf("PR#%-3d", j.PRNumber.Int64)
-	}
-
-	// Cost.
-	cost := ""
-	if j.CostUSD > 0 {
-		cost = fmt.Sprintf("$%.2f", j.CostUSD)
-	}
-
-	return fmt.Sprintf("%s  [%-12s]  %-35s  %-10s  %s  %s",
-		label, agent, title, j.Status, pr, cost)
+	return choice.(remoteJobItem).job, nil
 }
 
-// FilterJobs returns only the jobs whose fields match the filter string
-// (case-insensitive substring match across issue number, agent, title,
-// status, PR number, and cost).
+// PickAction presents an action menu after job selection.
+func PickAction(job *db.Job) (Action, error) {
+	title := fmt.Sprintf("#%d [%s] %s", job.IssueNumber, job.Agent, truncate(job.IssueTitle.String, 40))
+	if job.IssueNumber == 0 {
+		title = fmt.Sprintf("[%s] %s", job.Agent, truncate(job.Name, 40))
+	}
+
+	items := []list.Item{
+		actionItem{"Checkout worktree", ActionCheckout},
+		actionItem{"Resume with Claude", ActionResume},
+		actionItem{"View logs", ActionLogs},
+	}
+
+	choice, err := runPicker(newPicker(items, title, false))
+	if err != nil {
+		return "", err
+	}
+	return choice.(actionItem).action, nil
+}
+
+// FilterJobs returns only the jobs whose fields match the filter string.
 func FilterJobs(jobs []*db.Job, filter string) []*db.Job {
 	if filter == "" {
 		return jobs
@@ -138,23 +199,6 @@ func FilterJobs(jobs []*db.Job, filter string) []*db.Job {
 		}
 	}
 	return out
-}
-
-func jobSearchString(j *db.Job) string {
-	parts := []string{
-		j.Agent, j.Name, j.Status,
-		j.IssueTitle.String,
-	}
-	if j.IssueNumber > 0 {
-		parts = append(parts, strconv.Itoa(j.IssueNumber))
-	}
-	if j.PRNumber.Valid && j.PRNumber.Int64 > 0 {
-		parts = append(parts, strconv.FormatInt(j.PRNumber.Int64, 10))
-	}
-	if j.CostUSD > 0 {
-		parts = append(parts, fmt.Sprintf("%.2f", j.CostUSD))
-	}
-	return strings.Join(parts, " ")
 }
 
 // FilterRemoteJobs returns only the remote jobs whose fields match the filter.
@@ -172,45 +216,52 @@ func FilterRemoteJobs(jobs []daemon.JobResponse, filter string) []daemon.JobResp
 	return out
 }
 
-func remoteJobSearchString(j *daemon.JobResponse) string {
-	parts := []string{
-		j.Agent, j.Name, j.Status, j.Title,
+// --- Formatting helpers ---
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
 	}
-	if j.IssueNumber > 0 {
-		parts = append(parts, strconv.Itoa(j.IssueNumber))
-	}
-	if j.PRNumber > 0 {
-		parts = append(parts, strconv.Itoa(j.PRNumber))
-	}
-	if j.CostUSD > 0 {
-		parts = append(parts, fmt.Sprintf("%.2f", j.CostUSD))
-	}
-	return strings.Join(parts, " ")
+	return s[:max-3] + "..."
 }
 
-// PickRemoteJob presents an interactive select list of remote API jobs.
-func PickRemoteJob(jobs []daemon.JobResponse, title string) (*daemon.JobResponse, error) {
-	if len(jobs) == 0 {
-		return nil, fmt.Errorf("no jobs to select from")
+func formatJobLine(j *db.Job) string {
+	var label string
+	if j.IssueNumber > 0 {
+		label = fmt.Sprintf("#%-4d", j.IssueNumber)
+	} else {
+		name := j.Name
+		if len(name) > 20 {
+			name = name[:17] + "..."
+		}
+		label = fmt.Sprintf("%-5s", name)
 	}
 
-	options := make([]huh.Option[*daemon.JobResponse], len(jobs))
-	for i := range jobs {
-		options[i] = huh.NewOption(formatRemoteJobLine(&jobs[i]), &jobs[i])
+	agent := j.Agent
+	if len(agent) > 12 {
+		agent = agent[:12]
 	}
 
-	var selected *daemon.JobResponse
-	err := huh.NewSelect[*daemon.JobResponse]().
-		Title(title).
-		Options(options...).
-		Filtering(true).
-		Value(&selected).
-		Run()
-	if err != nil {
-		return nil, err
+	title := j.IssueTitle.String
+	if title == "" {
+		title = j.Name
+	}
+	if len(title) > 35 {
+		title = title[:32] + "..."
 	}
 
-	return selected, nil
+	pr := "      "
+	if j.PRNumber.Valid && j.PRNumber.Int64 > 0 {
+		pr = fmt.Sprintf("PR#%-3d", j.PRNumber.Int64)
+	}
+
+	cost := ""
+	if j.CostUSD > 0 {
+		cost = fmt.Sprintf("$%.2f", j.CostUSD)
+	}
+
+	return fmt.Sprintf("%s  [%-12s]  %-35s  %-10s  %s  %s",
+		label, agent, title, j.Status, pr, cost)
 }
 
 func formatRemoteJobLine(j *daemon.JobResponse) string {
@@ -251,3 +302,38 @@ func formatRemoteJobLine(j *daemon.JobResponse) string {
 	return fmt.Sprintf("%s  [%-12s]  %-35s  %-10s  %s  %s",
 		label, agent, title, j.Status, pr, cost)
 }
+
+func jobSearchString(j *db.Job) string {
+	parts := []string{j.Agent, j.Name, j.Status, j.IssueTitle.String}
+	if j.IssueNumber > 0 {
+		parts = append(parts, strconv.Itoa(j.IssueNumber))
+	}
+	if j.PRNumber.Valid && j.PRNumber.Int64 > 0 {
+		parts = append(parts, strconv.FormatInt(j.PRNumber.Int64, 10))
+	}
+	if j.CostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("%.2f", j.CostUSD))
+	}
+	return strings.Join(parts, " ")
+}
+
+func remoteJobSearchString(j *daemon.JobResponse) string {
+	parts := []string{j.Agent, j.Name, j.Status, j.Title}
+	if j.IssueNumber > 0 {
+		parts = append(parts, strconv.Itoa(j.IssueNumber))
+	}
+	if j.PRNumber > 0 {
+		parts = append(parts, strconv.Itoa(j.PRNumber))
+	}
+	if j.CostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("%.2f", j.CostUSD))
+	}
+	return strings.Join(parts, " ")
+}
+
+// Ensure interfaces are satisfied.
+var (
+	_ list.DefaultItem = jobItem{}
+	_ list.DefaultItem = remoteJobItem{}
+	_ list.DefaultItem = actionItem{}
+)
