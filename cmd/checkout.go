@@ -18,18 +18,19 @@ import (
 
 var checkoutCmd = &cobra.Command{
 	Use:   "checkout [issue-or-job-id]",
-	Short: "Check out an agent's worktree for review",
-	Long: `Opens an agent's worktree so you can review and test its work.
+	Short: "Interact with an agent's work",
+	Long: `Select a job and choose what to do: checkout the worktree, resume with
+Claude, or view logs.
 
 If no argument is given, presents an interactive picker of completed jobs
-for the current repository.
-
-If the worktree no longer exists on disk, it is recreated from the remote branch.
+for the current repository, then an action menu.
 
 Examples:
-  minder checkout              # interactive picker
+  minder checkout              # interactive picker → action menu
   minder checkout #42          # most recent job for issue 42
-  minder checkout --job 7      # by job ID`,
+  minder checkout --job 7      # by job ID
+  minder checkout -g spike     # filter to spike jobs
+  minder checkout -g 529       # find issue #529 or PR #529`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runCheckout,
 }
@@ -125,7 +126,41 @@ func runCheckout(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n⚠ Warning: this job is currently %s — the agent is actively working.\n\n", job.Status)
 	}
 
-	return checkoutWorktree(repoDir, job)
+	// Action menu.
+	action, err := picker.PickAction(job)
+	if err != nil {
+		return err
+	}
+
+	return executeAction(action, repoDir, job)
+}
+
+func executeAction(action picker.Action, repoDir string, job *db.Job) error {
+	switch action {
+	case picker.ActionCheckout:
+		return checkoutWorktree(repoDir, job)
+
+	case picker.ActionResume:
+		worktreePath, _, err := ensureWorktree(repoDir, job)
+		if err != nil {
+			return err
+		}
+		prompt := buildResumePrompt(job)
+		return launchClaude(worktreePath, prompt)
+
+	case picker.ActionLogs:
+		logPath := resolveLogPath(job)
+		if logPath == "" {
+			return fmt.Errorf("log not found for job %s (deploy %s)", job.Name, job.DeploymentID)
+		}
+		f, err := os.Open(logPath)
+		if err != nil {
+			return fmt.Errorf("open log: %w", err)
+		}
+		defer func() { _ = f.Close() }()
+		return streamLog(f, false)
+	}
+	return nil
 }
 
 func findMostRecentJobForIssue(store *db.Store, owner, repo string, issueNum int) (*db.Job, error) {

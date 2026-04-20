@@ -10,6 +10,47 @@ import (
 	"github.com/aptx-health/agent-minder/internal/db"
 )
 
+// Action represents what the user wants to do with a selected job.
+type Action string
+
+const (
+	ActionCheckout Action = "checkout"
+	ActionResume   Action = "resume"
+	ActionLogs     Action = "logs"
+)
+
+// PickAction presents an action menu after job selection.
+func PickAction(job *db.Job) (Action, error) {
+	options := []huh.Option[Action]{
+		huh.NewOption("Checkout worktree", ActionCheckout),
+		huh.NewOption("Resume with Claude (gather context, launch claude)", ActionResume),
+		huh.NewOption("View logs", ActionLogs),
+	}
+
+	title := fmt.Sprintf("#%d [%s] %s", job.IssueNumber, job.Agent, truncate(job.IssueTitle.String, 40))
+	if job.IssueNumber == 0 {
+		title = fmt.Sprintf("[%s] %s", job.Agent, truncate(job.Name, 40))
+	}
+
+	var selected Action
+	err := huh.NewSelect[Action]().
+		Title(title).
+		Options(options...).
+		Value(&selected).
+		Run()
+	if err != nil {
+		return "", err
+	}
+	return selected, nil
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}
+
 // PickJob presents an interactive select list of jobs and returns the chosen one.
 // Jobs are displayed with issue number, agent, title, status, PR, and cost.
 func PickJob(jobs []*db.Job, title string) (*db.Job, error) {
