@@ -186,6 +186,25 @@ func PickAction(job *db.Job) (Action, error) {
 	return choice.(actionItem).action, nil
 }
 
+// PickFromList presents an interactive list of labeled items and returns
+// the selected label. Useful for picking from a set of named options.
+func PickFromList(labels []string, title string) (string, error) {
+	if len(labels) == 0 {
+		return "", fmt.Errorf("no items to select from")
+	}
+
+	items := make([]list.Item, len(labels))
+	for i, l := range labels {
+		items[i] = actionItem{label: l, action: Action(l)}
+	}
+
+	choice, err := runPicker(newPicker(items, title, len(labels) > 5))
+	if err != nil {
+		return "", err
+	}
+	return string(choice.(actionItem).action), nil
+}
+
 // FilterJobs returns only the jobs whose fields match the filter string.
 func FilterJobs(jobs []*db.Job, filter string) []*db.Job {
 	if filter == "" {

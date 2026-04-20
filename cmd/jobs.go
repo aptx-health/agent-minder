@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
+	"github.com/aptx-health/agent-minder/internal/picker"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/spf13/cobra"
 )
@@ -21,10 +23,17 @@ var jobsListCmd = &cobra.Command{
 }
 
 var jobsRunCmd = &cobra.Command{
-	Use:   "run <name>",
-	Short: "Manually trigger a scheduled job",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runJobsRun,
+	Use:   "run [name]",
+	Short: "Manually trigger a job from jobs.yaml",
+	Long: `Manually trigger a job defined in jobs.yaml.
+
+If no name is given, presents an interactive picker of all configured jobs.
+
+Examples:
+  minder jobs run                # interactive picker
+  minder jobs run weekly-deps    # trigger by name`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runJobsRun,
 }
 
 var flagJobsRepo string
@@ -101,8 +110,6 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 }
 
 func runJobsRun(cmd *cobra.Command, args []string) error {
-	name := args[0]
-
 	repoDir, err := resolveRepoDir(flagJobsRepo)
 	if err != nil {
 		return err
@@ -120,8 +127,45 @@ func runJobsRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load jobs.yaml: %w", err)
 	}
 
-	if _, ok := cfg.Jobs[name]; !ok {
-		return fmt.Errorf("job %q not found in jobs.yaml", name)
+	var name string
+	if len(args) > 0 {
+		name = args[0]
+		if _, ok := cfg.Jobs[name]; !ok {
+			return fmt.Errorf("job %q not found in jobs.yaml", name)
+		}
+	} else {
+		// Interactive picker.
+		var labels []string
+		for n, def := range cfg.Jobs {
+			kind := "cron"
+			expr := def.Schedule
+			if def.IsTrigger() {
+				kind = "trigger"
+				expr = def.Trigger
+			}
+			label := fmt.Sprintf("%-20s  %-8s  %-25s  agent=%s", n, kind, expr, def.Agent)
+			if def.Description != "" {
+				label += "  " + truncateStr(def.Description, 40)
+			}
+			labels = append(labels, label)
+		}
+		// Sort for stable ordering.
+		sort.Strings(labels)
+
+		selected, err := picker.PickFromList(labels, "Select a job to trigger")
+		if err != nil {
+			return err
+		}
+		// Extract name from the formatted label (first field).
+		for n := range cfg.Jobs {
+			if len(selected) >= len(n) && selected[:len(n)] == n {
+				name = n
+				break
+			}
+		}
+		if name == "" {
+			return fmt.Errorf("could not resolve selected job")
+		}
 	}
 
 	// Open DB and find active deployment.
