@@ -3,6 +3,8 @@ package picker
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/charmbracelet/huh"
 
@@ -67,6 +69,7 @@ func PickJob(jobs []*db.Job, title string) (*db.Job, error) {
 	err := huh.NewSelect[*db.Job]().
 		Title(title).
 		Options(options...).
+		Filtering(true).
 		Value(&selected).
 		Run()
 	if err != nil {
@@ -120,6 +123,71 @@ func formatJobLine(j *db.Job) string {
 		label, agent, title, j.Status, pr, cost)
 }
 
+// FilterJobs returns only the jobs whose fields match the filter string
+// (case-insensitive substring match across issue number, agent, title,
+// status, PR number, and cost).
+func FilterJobs(jobs []*db.Job, filter string) []*db.Job {
+	if filter == "" {
+		return jobs
+	}
+	f := strings.ToLower(filter)
+	var out []*db.Job
+	for _, j := range jobs {
+		if strings.Contains(strings.ToLower(jobSearchString(j)), f) {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
+func jobSearchString(j *db.Job) string {
+	parts := []string{
+		j.Agent, j.Name, j.Status,
+		j.IssueTitle.String,
+	}
+	if j.IssueNumber > 0 {
+		parts = append(parts, strconv.Itoa(j.IssueNumber))
+	}
+	if j.PRNumber.Valid && j.PRNumber.Int64 > 0 {
+		parts = append(parts, strconv.FormatInt(j.PRNumber.Int64, 10))
+	}
+	if j.CostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("%.2f", j.CostUSD))
+	}
+	return strings.Join(parts, " ")
+}
+
+// FilterRemoteJobs returns only the remote jobs whose fields match the filter.
+func FilterRemoteJobs(jobs []daemon.JobResponse, filter string) []daemon.JobResponse {
+	if filter == "" {
+		return jobs
+	}
+	f := strings.ToLower(filter)
+	var out []daemon.JobResponse
+	for _, j := range jobs {
+		if strings.Contains(strings.ToLower(remoteJobSearchString(&j)), f) {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
+func remoteJobSearchString(j *daemon.JobResponse) string {
+	parts := []string{
+		j.Agent, j.Name, j.Status, j.Title,
+	}
+	if j.IssueNumber > 0 {
+		parts = append(parts, strconv.Itoa(j.IssueNumber))
+	}
+	if j.PRNumber > 0 {
+		parts = append(parts, strconv.Itoa(j.PRNumber))
+	}
+	if j.CostUSD > 0 {
+		parts = append(parts, fmt.Sprintf("%.2f", j.CostUSD))
+	}
+	return strings.Join(parts, " ")
+}
+
 // PickRemoteJob presents an interactive select list of remote API jobs.
 func PickRemoteJob(jobs []daemon.JobResponse, title string) (*daemon.JobResponse, error) {
 	if len(jobs) == 0 {
@@ -135,6 +203,7 @@ func PickRemoteJob(jobs []daemon.JobResponse, title string) (*daemon.JobResponse
 	err := huh.NewSelect[*daemon.JobResponse]().
 		Title(title).
 		Options(options...).
+		Filtering(true).
 		Value(&selected).
 		Run()
 	if err != nil {

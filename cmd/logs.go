@@ -31,6 +31,8 @@ Examples:
   minder logs #42              # most recent job for issue 42
   minder logs --job 7          # by job ID
   minder logs --follow         # tail a running job
+  minder logs -g spike         # filter to spike jobs
+  minder logs -g 529           # find issue #529 or PR #529
   minder logs --remote :7749   # stream from remote daemon`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runLogs,
@@ -43,6 +45,7 @@ var (
 	flagLogsRemote string
 	flagLogsKey    string
 	flagLogsRaw    bool
+	flagLogsGrep   string
 )
 
 func init() {
@@ -53,6 +56,7 @@ func init() {
 	logsCmd.Flags().StringVar(&flagLogsRemote, "remote", "", "Remote daemon address (host:port)")
 	logsCmd.Flags().StringVar(&flagLogsKey, "api-key", "", "API key for remote access")
 	logsCmd.Flags().BoolVar(&flagLogsRaw, "raw", false, "Output raw stream-json (no formatting)")
+	logsCmd.Flags().StringVarP(&flagLogsGrep, "grep", "g", "", "Filter jobs by substring (matches issue, agent, title, PR, status)")
 }
 
 func runLogs(cmd *cobra.Command, args []string) error {
@@ -131,8 +135,10 @@ func runLogsLocal(args []string) error {
 			}
 		}
 
+		candidates = picker.FilterJobs(candidates, flagLogsGrep)
+
 		if len(candidates) == 0 {
-			fmt.Println("No jobs with logs found for this repository.")
+			fmt.Println("No matching jobs found for this repository.")
 			return nil
 		}
 
@@ -236,8 +242,9 @@ func runLogsRemote(args []string) error {
 		if err != nil {
 			return fmt.Errorf("fetch jobs: %w", err)
 		}
+		jobs = picker.FilterRemoteJobs(jobs, flagLogsGrep)
 		if len(jobs) == 0 {
-			fmt.Println("No jobs found.")
+			fmt.Println("No matching jobs found.")
 			return nil
 		}
 		selected, err := picker.PickRemoteJob(jobs, "Select a job")
