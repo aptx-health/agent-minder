@@ -255,13 +255,13 @@ func TestLessonCRUD(t *testing.T) {
 	}
 	_ = s.CreateLesson(l2)
 
-	// Get active lessons for repo scope.
+	// Get active lessons for repo scope — only repo-scoped, not global.
 	lessons, err := s.GetActiveLessons("aptx-health/agent-minder")
 	if err != nil {
 		t.Fatalf("GetActiveLessons: %v", err)
 	}
-	if len(lessons) != 2 {
-		t.Errorf("got %d lessons, want 2 (global + repo-scoped)", len(lessons))
+	if len(lessons) != 1 {
+		t.Errorf("got %d lessons, want 1 (repo-scoped only, no global)", len(lessons))
 	}
 
 	// Pinned should come first.

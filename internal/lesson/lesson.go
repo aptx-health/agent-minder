@@ -54,8 +54,9 @@ func DecayScore(l *db.Lesson, now time.Time) float64 {
 }
 
 // SelectLessons returns relevant lessons for a task, respecting the token budget.
-// Selection tiers: pinned first, then repo-scoped, then global.
-// Within each tier, sorted by decay-weighted effectiveness score descending.
+// Selection tiers: pinned first, then repo-scoped by decay score.
+// Only repo-scoped lessons are included — global (unscoped) lessons are excluded
+// to prevent cross-repo leakage (e.g., Go lint lessons injected into JS projects).
 func SelectLessons(store *db.Store, owner, repo string) ([]*db.Lesson, error) {
 	scope := owner + "/" + repo
 	lessons, err := store.GetActiveLessons(scope)
@@ -66,28 +67,21 @@ func SelectLessons(store *db.Store, owner, repo string) ([]*db.Lesson, error) {
 	now := time.Now().UTC()
 
 	// Partition into tiers.
-	var pinned, repoScoped, global []*db.Lesson
+	var pinned, repoScoped []*db.Lesson
 	for _, l := range lessons {
 		switch {
 		case l.Pinned:
 			pinned = append(pinned, l)
-		case l.RepoScope.Valid:
-			repoScoped = append(repoScoped, l)
 		default:
-			global = append(global, l)
+			repoScoped = append(repoScoped, l)
 		}
 	}
 
-	// Sort non-pinned tiers by decay score descending.
-	sortByDecay := func(ls []*db.Lesson) {
-		sort.Slice(ls, func(i, j int) bool {
-			return DecayScore(ls[i], now) > DecayScore(ls[j], now)
-		})
-	}
-	sortByDecay(repoScoped)
-	sortByDecay(global)
+	// Sort by decay score descending.
+	sort.Slice(repoScoped, func(i, j int) bool {
+		return DecayScore(repoScoped[i], now) > DecayScore(repoScoped[j], now)
+	})
 
-	// Budget allocation: pinned ~500 tokens, repo-scoped ~1000, global ~500.
 	var selected []*db.Lesson
 	var totalChars int
 	maxChars := MaxPromptTokens * ApproxTokensPerChar
@@ -104,7 +98,6 @@ func SelectLessons(store *db.Store, owner, repo string) ([]*db.Lesson, error) {
 
 	addFromTier(pinned)
 	addFromTier(repoScoped)
-	addFromTier(global)
 
 	return selected, nil
 }
