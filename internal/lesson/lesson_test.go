@@ -22,7 +22,7 @@ func testStore(t *testing.T) *db.Store {
 func TestSelectLessons(t *testing.T) {
 	store := testStore(t)
 
-	// Create a global lesson.
+	// Create a global lesson — should NOT appear in repo-scoped queries.
 	_ = store.CreateLesson(&db.Lesson{Content: "Always run tests", Source: "manual", Active: true})
 
 	// Create a repo-scoped lesson.
@@ -33,8 +33,14 @@ func TestSelectLessons(t *testing.T) {
 		Active:    true,
 	})
 
-	// Create a pinned lesson.
-	_ = store.CreateLesson(&db.Lesson{Content: "Never skip linting", Source: "manual", Active: true, Pinned: true})
+	// Create a pinned repo-scoped lesson.
+	_ = store.CreateLesson(&db.Lesson{
+		RepoScope: sql.NullString{String: "acme/app", Valid: true},
+		Content:   "Never skip linting",
+		Source:    "manual",
+		Active:    true,
+		Pinned:    true,
+	})
 
 	// Create a lesson for a different repo.
 	_ = store.CreateLesson(&db.Lesson{
@@ -49,9 +55,9 @@ func TestSelectLessons(t *testing.T) {
 		t.Fatalf("SelectLessons: %v", err)
 	}
 
-	// Should get pinned + global + repo-scoped (3), not the other/repo lesson.
-	if len(lessons) != 3 {
-		t.Errorf("got %d lessons, want 3", len(lessons))
+	// Should get pinned + repo-scoped (2), not the global or other/repo lessons.
+	if len(lessons) != 2 {
+		t.Errorf("got %d lessons, want 2", len(lessons))
 		for _, l := range lessons {
 			t.Logf("  lesson: %s (pinned=%v scope=%v)", l.Content, l.Pinned, l.RepoScope)
 		}

@@ -379,9 +379,12 @@ func (s *Store) GetActiveLessons(repoScope string) ([]*Lesson, error) {
 			"SELECT * FROM lessons WHERE active = 1 AND superseded_by IS NULL "+orderClause)
 		return lessons, err
 	}
+	// Only return lessons scoped to this specific repo. Global (unscoped) lessons
+	// are excluded to prevent cross-repo leakage (e.g., Go lint lessons injected
+	// into JS projects).
 	err := s.db.Select(&lessons,
 		`SELECT * FROM lessons WHERE active = 1 AND superseded_by IS NULL
-		 AND (repo_scope IS NULL OR repo_scope = ?) `+orderClause, repoScope)
+		 AND repo_scope = ? `+orderClause, repoScope)
 	return lessons, err
 }
 
@@ -634,6 +637,18 @@ func (s *Store) RenameRepo(oldOwner, oldRepo, newOwner, newRepo string) (int64, 
 		n, _ := res.RowsAffected()
 		total += n
 	}
+
+	// Also update lesson repo_scope.
+	oldScope := oldOwner + "/" + oldRepo
+	newScope := newOwner + "/" + newRepo
+	res, err := s.db.Exec(
+		"UPDATE lessons SET repo_scope = ? WHERE repo_scope = ?", newScope, oldScope)
+	if err != nil {
+		return total, fmt.Errorf("rename lessons: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	total += n
+
 	return total, nil
 }
 
