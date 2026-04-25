@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -165,8 +166,21 @@ func executeAction(action picker.Action, repoDir string, job *db.Job) error {
 		}
 		defer func() { _ = f.Close() }()
 		return streamLog(f, false)
+
+	case picker.ActionOpenIssue:
+		url := fmt.Sprintf("https://github.com/%s/%s/issues/%d", job.Owner, job.Repo, job.IssueNumber)
+		return openBrowser(url)
+
+	case picker.ActionOpenPR:
+		url := fmt.Sprintf("https://github.com/%s/%s/pull/%d", job.Owner, job.Repo, job.PRNumber.Int64)
+		return openBrowser(url)
 	}
 	return nil
+}
+
+func openBrowser(url string) error {
+	fmt.Println(url)
+	return exec.Command("open", url).Start()
 }
 
 func findMostRecentJobForIssue(store *db.Store, owner, repo string, issueNum int) (*db.Job, error) {
