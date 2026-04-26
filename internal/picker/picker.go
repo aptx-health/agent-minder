@@ -19,9 +19,11 @@ import (
 type Action string
 
 const (
-	ActionCheckout Action = "checkout"
-	ActionResume   Action = "resume"
-	ActionLogs     Action = "logs"
+	ActionCheckout  Action = "checkout"
+	ActionResume    Action = "resume"
+	ActionLogs      Action = "logs"
+	ActionOpenIssue Action = "open_issue"
+	ActionOpenPR    Action = "open_pr"
 )
 
 // --- Job items ---
@@ -177,6 +179,16 @@ func PickAction(job *db.Job) (Action, error) {
 		actionItem{"Checkout worktree", ActionCheckout},
 		actionItem{"Resume with Claude", ActionResume},
 		actionItem{"View logs", ActionLogs},
+	}
+	if job.IssueNumber > 0 {
+		items = append(items, actionItem{
+			fmt.Sprintf("Open issue #%d in browser", job.IssueNumber), ActionOpenIssue,
+		})
+	}
+	if job.PRNumber.Valid && job.PRNumber.Int64 > 0 {
+		items = append(items, actionItem{
+			fmt.Sprintf("Open PR #%d in browser", job.PRNumber.Int64), ActionOpenPR,
+		})
 	}
 
 	choice, err := runPicker(newPicker(items, title, false))
