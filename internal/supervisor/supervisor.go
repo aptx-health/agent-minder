@@ -103,6 +103,8 @@ type Supervisor struct {
 	budgetPaused       bool
 	budgetWarned       bool
 	waitingHintEmitted bool
+	lastGHError        time.Time // throttle GitHub API error reporting
+	ghPollSucceeded    bool      // true after first successful poll
 	events             chan Event
 	parentCtx          context.Context
 	cancel             context.CancelFunc

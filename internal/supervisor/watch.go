@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -93,10 +94,12 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 
 	skipLabel := s.deploy.SkipLabel
 	discovered := 0
+	totalPolled := 0
 
 	// 1. Poll the --watch filter (routes to default agent).
 	if s.deploy.WatchFilter.Valid && s.deploy.WatchFilter.String != "" {
 		issues := s.pollFilter(ctx, ghClient, s.deploy.WatchFilter.String)
+		totalPolled += len(issues)
 		for _, issue := range issues {
 			agent := s.resolveAgentForIssue(issue.Labels)
 			if knownJobs[issueAgent{issue.Number, agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
@@ -116,6 +119,7 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 
 	for _, route := range routes {
 		issues := s.pollFilter(ctx, ghClient, "label:"+strings.Join(route.Labels, ","))
+		totalPolled += len(issues)
 		for _, issue := range issues {
 			// Skip if a more-specific route should handle this issue.
 			if s.resolveAgentForIssue(issue.Labels) != route.Agent {
@@ -129,6 +133,16 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 				discovered += n
 			}
 		}
+	}
+
+	// Report first successful poll with 0 results — helps diagnose API issues
+	// like GitHub outages that return 200 with empty arrays.
+	s.mu.Lock()
+	firstPoll := !s.ghPollSucceeded
+	s.ghPollSucceeded = true
+	s.mu.Unlock()
+	if firstPoll && totalPolled == 0 && len(routes) > 0 {
+		s.emitEvent("info", fmt.Sprintf("Watch poll: 0 issues found across %d trigger routes — if unexpected, check GitHub status", len(routes)), 0)
 	}
 
 	return discovered
@@ -148,14 +162,32 @@ func (s *Supervisor) pollFilter(ctx context.Context, ghClient *ghpkg.Client, fil
 	case "milestone":
 		msNum, msErr := ghClient.FindMilestoneNumber(ctx, s.owner, s.repo, filter.Values[0])
 		if msErr != nil {
+			s.reportGHError(fmt.Sprintf("GitHub API error (milestone %q): %v", filter.Values[0], msErr))
 			return nil
 		}
 		searchResult, err = ghClient.ListIssuesByMilestone(ctx, s.owner, s.repo, msNum)
 	}
-	if err != nil || searchResult == nil {
+	if err != nil {
+		s.reportGHError(fmt.Sprintf("GitHub API error (filter %s): %v", filterStr, err))
+		return nil
+	}
+	if searchResult == nil {
 		return nil
 	}
 	return searchResult.Items
+}
+
+// reportGHError emits a GitHub API error event, throttled to avoid spamming
+// during sustained outages (at most once per 10 minutes per unique message prefix).
+func (s *Supervisor) reportGHError(msg string) {
+	s.mu.Lock()
+	if s.lastGHError.IsZero() || time.Since(s.lastGHError) > 10*time.Minute {
+		s.lastGHError = time.Now()
+		s.mu.Unlock()
+		s.emitEvent("error", msg, 0)
+	} else {
+		s.mu.Unlock()
+	}
 }
 
 // resolveAgentForIssue checks the issue's labels against trigger routes.
