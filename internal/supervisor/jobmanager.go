@@ -695,9 +695,15 @@ func isUsageLimitError(result *AgentResult) bool {
 	if result == nil {
 		return false
 	}
+
+	// Only check error results — successful completions that mention "rate limit"
+	// in their content (e.g., an agent fixing rate limiting code) are not errors.
+	if !result.IsError {
+		return false
+	}
+
 	text := strings.ToLower(result.Result)
-	// Match patterns from Claude Code: "hit your limit", "session limit",
-	// "usage limit", "rate limit reached"
+	// Match patterns from Claude Code error messages.
 	for _, pattern := range []string{
 		"hit your limit",
 		"session limit",
