@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Watch polling for TUI autopilot**: Optional `--watch-milestone` / `--watch-label` flags on the `start` command enable continuous GitHub issue discovery during autopilot sessions. New issues matching the filter are created as `pending` tasks and automatically ingested with incremental dep analysis. TUI shows a "watching" indicator when active. (#337)
 
 ### Fixed
+- **Picker column display**: `minder checkout` job picker now uses fixed-width columns for label/agent/status/PR and right-aligned full-value cost; the title column expands to fill the detected terminal width so cost no longer truncates to `$1...` and `PR#XXX` lines up consistently across rows. Agent column caps at 9 chars with ellipsis (so a single long agent name no longer pushes every row wide), and a persistent `ISSUE / AGENT / TITLE / STATUS / PR / COST` header now sits above the list (#476)
 - **Scheduler SQLite contention and UNIQUE constraint**: Fixed SQLITE_BUSY errors from concurrent scheduler/supervisor DB access; handle UNIQUE constraint violations when reinserting schedules; improved error logging (#431)
 - **Daemon exiting on scheduler-only deploys**: Fixed daemon exiting immediately when running with only scheduled jobs and no issue arguments (#427)
 - **Enroll validation**: Use minder CLI for YAML validation instead of Python/Ruby YAML parsers (#422)
