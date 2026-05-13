@@ -8,7 +8,8 @@ import (
 )
 
 // Version is the current version of agent-minder.
-const Version = "0.2.1-dev"
+// Overridden at release time via -ldflags "-X github.com/aptx-health/agent-minder/cmd.Version=..."
+var Version = "0.2.1-dev"
 
 var rootCmd = &cobra.Command{
 	Use:     "minder",
