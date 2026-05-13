@@ -1,23 +1,31 @@
 # minder
 
-A self-hosted agent orchestration tool. Dispatches Claude Code agents to work on GitHub issues in parallel, reviews their output, learns from results, and manages the full lifecycle from issue to merged PR.
+[![CI](https://github.com/aptx-health/agent-minder/actions/workflows/ci.yml/badge.svg)](https://github.com/aptx-health/agent-minder/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/aptx-health/agent-minder)](go.mod)
 
-## What it does
+A self-hosted orchestration layer for Claude Code. Automatically dispatch the right agent for the job, whether that's a scheduled cron task (dependency updates, security scans, doc syncs) or a reactive trigger from a GitHub label. Tag an issue with `bug` and a bug-fixer agent reproduces it, writes a regression test, and opens a PR. Runs in the foreground for inspection or as a background daemon.
 
-```bash
-minder deploy 42 55 60 --repo . --foreground     # work on specific issues
-minder deploy --watch label:agent-ready           # auto-pick up labeled issues
-minder deploy --serve :7749 --auto-merge          # daemon with API + auto-merge
-minder deploy --agent security-scanner            # run a proactive agent
-```
+Need to check in on a more complex job? Run `minder checkout` for follow-up options: view logs, restore the worktree for manual testing, resume with a fresh Claude session that has the agent's context preloaded, or jump straight to the PR.
 
-Minder takes GitHub issues and runs them through a pipeline:
+![minder checkout — follow-up options for any agent's work](docs/screenshots/checkout-menu.png)
 
-```
-Issues → Dependency graph → Parallel agents → Code review → Lesson capture → PR
-```
+Powers automated development on [ripit.fit](https://ripit.fit).
 
-Each agent runs in an isolated git worktree with its own branch. The supervisor manages concurrency, budget limits, and the review pipeline. Everything is tracked in SQLite.
+![minder checkout — months of agent work across one repo](docs/screenshots/checkout.png)
+
+## Why minder?
+
+If you want to dispatch Claude Code interactively, `claude agents` is great. minder is for the headless half: work that should happen without you typing a prompt.
+
+A few things that make it useful as a devops-minded layer:
+
+- The unit of work is a GitHub issue. Tag one with `bug` or `agent-ready` from anywhere — your phone, an admin panel, a Slack action, a teammate's laptop — and the right agent picks it up. No local CLI required to dispatch.
+- Configuration lives in `.agent-minder/jobs.yaml`, checked into the repo. You can grep it, diff it, code-review it, and version it alongside the agent definitions in `.claude/agents/`.
+- Custom agents per task type: a `spike` posts research findings as a comment, `autopilot` opens a PR, `bug-fixer` writes a regression test before fixing the code. You tag once; the routing is done.
+- Multi-stage pipelines with conditional routing. After an agent opens a PR, a `reviewer` agent grades it (low-risk, needs-testing, or suspect). Low-risk PRs can auto-merge once CI passes.
+- `minder enroll` scans the repo, researches its stack and conventions, and generates tailored Claude Code agent definitions in `.claude/agents/`. The generated agents are standard subagents, usable inside or outside minder.
+- Self-hosted and open source (MIT). Runs on your laptop in the foreground or as a daemon on a server with a remote client (`minder status --remote host:port`).
 
 ## Quick start
 
@@ -37,17 +45,67 @@ minder enroll /path/to/repo
 # Deploy on issues
 minder deploy 42 --repo /path/to/repo --foreground
 
+# For ongoing use: current dir, expose API, foreground visibility, generous budget
+minder deploy --repo . --serve :7749 --foreground --max-turns 150 --budget 10 --total-budget 35
+
 # Check status
 minder status
 ```
 
+`--serve :7749` exposes the HTTP API so `minder checkout` and `minder status` can reach the daemon. The budget flags (`--max-turns 150 --budget 10 --total-budget 35`) leave headroom for complex jobs and work well if you're on Claude Max.
+
+## How it works
+
+```
+Issues -> Dependency graph -> Parallel agents -> Code review -> Lesson capture -> PR
+```
+
+Each agent runs in an isolated git worktree with its own branch. The supervisor manages concurrency, budget limits, and the review pipeline. Lessons from reviewer feedback get folded back into future agent prompts. Everything is tracked in SQLite at `~/.agent-minder/v2.db`.
+
 ## Features
 
-### Multi-agent orchestration
-- LLM-built dependency graphs determine execution order
-- Up to N concurrent agents (configurable with `--max-agents`)
-- Slot backfill: as agents finish, new ones start automatically
-- Budget ceiling with 80% warning and automatic pause
+### Job scheduler
+Define recurring jobs and label triggers in `.agent-minder/jobs.yaml`, similar to a CI/CD workflow file but for autonomous coding work. Reactive triggers (label-based) and scheduled jobs (cron) sit in one file, versioned with the repo:
+
+```yaml
+jobs:
+  weekly-deps:
+    schedule: "0 9 * * 1"          # cron expression
+    agent: dependency-updater
+    description: "Check for outdated dependencies"
+    budget: 3.0
+
+  bug-triage:
+    trigger: "label:bug"           # label trigger -> agent
+    agent: bug-fixer
+
+  spike:
+    trigger: "label:spike"
+    agent: spike
+    description: "Research and discovery"
+    budget: 5.0
+```
+
+The trigger map prints at startup so you can see exactly what's wired up:
+
+![minder deploy — trigger map and live dispatch on startup](docs/screenshots/triggers.png)
+
+```bash
+minder jobs list                   # show schedules
+minder jobs run weekly-deps        # manual trigger
+```
+
+### Built-in agent types
+
+| Agent | Mode | Output | Default trigger | Description |
+|-------|------|--------|-----------------|-------------|
+| **autopilot** | reactive | pr | `label:agent-ready` | Implements GitHub issues end-to-end |
+| **reviewer** | reactive | pr | (auto) | Reviews PRs, assesses risk, makes fixes |
+| **bug-fixer** | reactive | pr | `label:bug` | Reproduces bugs, writes regression tests, fixes |
+| **spike** | reactive | issue | `label:spike` | Research and discovery; investigates questions and posts findings |
+| **dependency-updater** | proactive | pr | cron | Scans and updates outdated dependencies |
+| **security-scanner** | proactive | issue | cron | Runs security audits, reports findings |
+| **doc-updater** | proactive | pr | cron | Syncs documentation with code changes |
 
 ### Agent contracts
 Agents declare their behavior in YAML frontmatter in `.claude/agents/*.md`:
@@ -80,20 +138,7 @@ You are a dependency update agent...
 
 Contract fields: `mode` (reactive/proactive), `output` (pr/issue/comment/none), `context` (providers), `dedup` (strategies), `stages` (multi-step pipeline), `timeout`.
 
-### Built-in agent types
-
-| Agent | Mode | Output | Trigger | Description |
-|-------|------|--------|---------|-------------|
-| **autopilot** | reactive | pr | `label:agent-ready` | Implements GitHub issues end-to-end |
-| **reviewer** | reactive | pr | (auto) | Reviews PRs, assesses risk, makes fixes |
-| **bug-fixer** | reactive | pr | `label:bug` | Reproduces bugs, writes regression tests, fixes |
-| **spike** | reactive | issue | `label:spike` | Research and discovery — investigates questions, posts findings |
-| **dependency-updater** | proactive | pr | cron | Scans and updates outdated dependencies |
-| **security-scanner** | proactive | issue | cron | Runs security audits, reports findings |
-| **doc-updater** | proactive | pr | cron | Syncs documentation with code changes |
-
-### Agent-specific stage names
-Each agent type declares meaningful pipeline stage names: autopilot→implement, bug-fixer→fix, dependency-updater→scan, security-scanner→audit, doc-updater→update, spike→research. The default fallback for agents without explicit stages is "run".
+Each agent type also declares meaningful pipeline stage names (e.g., autopilot's stage is `implement`, bug-fixer's is `fix`, spike's is `research`). Agents without explicit stages fall back to `run`.
 
 ### Context providers
 Agents get context assembled from declared providers:
@@ -108,11 +153,17 @@ Agents get context assembled from declared providers:
 | `sibling_jobs` | Other jobs in the same deployment |
 | `dep_graph` | Dependency graph for the deployment |
 
+### Multi-agent orchestration
+- LLM-built dependency graphs determine execution order
+- Up to N concurrent agents (configurable with `--max-agents`)
+- Slot backfill: as agents finish, new ones start automatically
+- Budget ceiling with 80% warning and automatic pause
+
 ### Automated review
 After an agent opens a PR, a review agent assesses it:
-- **low-risk**: Clean, well-tested. Auto-merge eligible.
-- **needs-testing**: Looks correct but needs human verification.
-- **suspect**: Has issues requiring human review.
+- `low-risk`: clean, well-tested. Auto-merge eligible.
+- `needs-testing`: looks correct but needs human verification.
+- `suspect`: has issues requiring human review.
 
 Review produces structured JSON with risk level, summary, lessons, and specific issues found. The extraction call has a 2-minute timeout to prevent hanging on concurrent reviews.
 
@@ -120,41 +171,14 @@ Review produces structured JSON with risk level, summary, lessons, and specific 
 Minder learns from agent outcomes:
 - Lessons captured automatically from review findings
 - Injected into future agent prompts (~2000 token budget)
-- Effectiveness tracking: helpful/unhelpful counts per lesson
-- Per-scope: repo-specific or global lessons
-- Grooming: stale/ineffective auto-deactivation, LLM-assisted consolidation
+- Tracks helpful/unhelpful counts per lesson
+- Scoped per repo or globally
+- Grooming auto-deactivates stale lessons; LLM consolidation merges overlapping ones
 
 ```bash
 minder lesson list                        # show all lessons
 minder lesson add "Always run tests"      # add manually
 minder lesson groom --dry-run             # preview consolidation
-```
-
-### Job scheduler
-Define recurring jobs and label triggers in `.agent-minder/jobs.yaml`:
-
-```yaml
-jobs:
-  weekly-deps:
-    schedule: "0 9 * * 1"          # cron expression
-    agent: dependency-updater
-    description: "Check for outdated dependencies"
-    budget: 3.0
-
-  bug-triage:
-    trigger: "label:bug"           # label trigger → agent
-    agent: bug-fixer
-
-  spike:
-    trigger: "label:spike"
-    agent: spike
-    description: "Research and discovery"
-    budget: 5.0
-```
-
-```bash
-minder jobs list                   # show schedules
-minder jobs run weekly-deps        # manual trigger
 ```
 
 ### Dedup engine
@@ -165,19 +189,6 @@ Stackable strategies prevent duplicate work:
 - `recent_run:<hours>` — skip if same agent ran recently
 
 Reactive PR agents automatically get `open_pr` dedup to prevent re-running issues across daemon restarts. Unlike `branch_exists`, this allows retries when the agent was interrupted (usage limit, crash) before opening a PR.
-
-### Usage limit recovery
-When an agent hits a Claude Code session/usage limit, minder automatically:
-1. Detects the limit (via stream events or error text patterns)
-2. Sets job status to `waiting`
-3. Sleeps with backoff (1h, 2h, 3h)
-4. Resumes the session using `--resume <session_id>`
-5. Up to 3 retry attempts before bailing
-
-No human intervention needed.
-
-### Command timeout wrappers
-Test and build commands injected into agent context include `timeout` wrappers (default 5m for tests, 3m for builds). Configurable via `test_timeout` and `build_timeout` in `onboarding.yaml`. Prevents agents from burning turns waiting on hung processes.
 
 ### Watch mode
 Continuously poll GitHub for new issues matching a filter:
@@ -201,8 +212,22 @@ minder stop <deploy-id>                  # stop daemon
 
 Endpoints: `/status`, `/jobs`, `/jobs/{id}`, `/jobs/{id}/log`, `/dep-graph`, `/metrics`, `/lessons`, `/stop`, `/resume`.
 
-### SwiftBar menu bar plugin
-macOS menu bar widget shows agent status at a glance. Supports all job statuses including `waiting` (usage limit recovery). See `xbar/minder.5s.sh`.
+### Usage limit recovery
+When an agent hits a Claude Code session/usage limit, minder automatically:
+1. Detects the limit (via stream events or error text patterns)
+2. Sets job status to `waiting`
+3. Sleeps with backoff (1h, 2h, 3h)
+4. Resumes the session using `--resume <session_id>`
+5. Up to 3 retry attempts before bailing
+
+No human intervention needed.
+
+### Command timeout wrappers
+Test and build commands injected into agent context include `timeout` wrappers (default 5m for tests, 3m for builds). Configurable via `test_timeout` and `build_timeout` in `onboarding.yaml`. Prevents agents from burning turns waiting on hung processes.
+
+## SwiftBar menu bar plugin
+
+A macOS menu bar widget that shows agent status at a glance. Supports all job statuses including `waiting` (usage limit recovery). See `xbar/minder.5s.sh`.
 
 ## Commands
 
@@ -247,6 +272,52 @@ macOS menu bar widget shows agent status at a glance. Supports all job statuses 
 | **`GITHUB_TOKEN`** | GitHub API access (via env var or `minder auth login`) |
 | **[gh CLI](https://cli.github.com/)** | Agents use `gh` for PR creation and issue management |
 
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GITHUB_TOKEN` | — | GitHub API token (or use `minder auth login`) |
+| `MINDER_DB` | `~/.agent-minder/v2.db` | Database path |
+| `MINDER_LOG` | `~/.agent-minder/debug.log` | Debug log path |
+| `MINDER_DEBUG` | — | Enable structured JSON debug logging |
+| `MINDER_API_KEY` | — | API key for remote daemon access |
+
+## Development
+
+### Testing
+
+```bash
+go test ./...                              # all tests
+go test ./internal/db/... -v               # DB + migrations
+go test ./internal/supervisor/... -v       # supervisor, contracts, context, dedup
+go test ./internal/scheduler/... -v        # cron parser, config, scheduler
+go test ./internal/daemon/... -v           # HTTP API endpoints
+```
+
+### Debug logging
+
+```bash
+MINDER_DEBUG=1 minder deploy 42 --foreground
+
+# Watch in another terminal
+tail -f ~/.agent-minder/debug.log | jq '{time, msg, agent, issue}'
+```
+
+### Agent logs
+
+Each agent run produces a stream-json log:
+
+```bash
+# List logs
+ls ~/.agent-minder/agents/
+
+# Watch a running agent
+tail -f ~/.agent-minder/agents/<deploy-id>-issue-<N>.log | \
+  jq -r 'if .type == "assistant" then (.message.content[]? |
+    if .type == "tool_use" then "🔧 \(.name)" else empty end)
+  else empty end'
+```
+
 ## Architecture
 
 ```
@@ -283,47 +354,3 @@ SQLite at `~/.agent-minder/v2.db` (WAL mode, foreign keys, single-writer via `Se
 | `lessons` | Persistent feedback with effectiveness tracking |
 | `job_lessons` | Which lessons were injected into which jobs |
 | `repo_onboarding` | Cached repo scanning results |
-
-## Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GITHUB_TOKEN` | — | GitHub API token (or use `minder auth login`) |
-| `MINDER_DB` | `~/.agent-minder/v2.db` | Database path |
-| `MINDER_LOG` | `~/.agent-minder/debug.log` | Debug log path |
-| `MINDER_DEBUG` | — | Enable structured JSON debug logging |
-| `MINDER_API_KEY` | — | API key for remote daemon access |
-
-## Testing
-
-```bash
-go test ./...                              # all tests
-go test ./internal/db/... -v               # DB + migrations
-go test ./internal/supervisor/... -v       # supervisor, contracts, context, dedup
-go test ./internal/scheduler/... -v        # cron parser, config, scheduler
-go test ./internal/daemon/... -v           # HTTP API endpoints
-```
-
-## Debug logging
-
-```bash
-MINDER_DEBUG=1 minder deploy 42 --foreground
-
-# Watch in another terminal
-tail -f ~/.agent-minder/debug.log | jq '{time, msg, agent, issue}'
-```
-
-## Agent logs
-
-Each agent run produces a stream-json log:
-
-```bash
-# List logs
-ls ~/.agent-minder/agents/
-
-# Watch a running agent
-tail -f ~/.agent-minder/agents/<deploy-id>-issue-<N>.log | \
-  jq -r 'if .type == "assistant" then (.message.content[]? |
-    if .type == "tool_use" then "🔧 \(.name)" else empty end)
-  else empty end'
-```
