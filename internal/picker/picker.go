@@ -28,16 +28,16 @@ const (
 	ActionOpenPR    Action = "open_pr"
 )
 
-// Column widths for formatted job rows. Chosen to fit the longest built-in
-// values without truncation:
+// Column widths for formatted job rows.
 //   - labelWidth: "#12345" or short job name
-//   - agentWidth: "dependency-updater" (18 chars, longest built-in agent)
+//   - agentWidth: fits "autopilot"/"bug-fixer" (9 chars); longer names get
+//     ellipsized so a single overlong agent name can't push every row wide
 //   - statusWidth: "reviewing" (9 chars; 10 leaves a buffer)
 //   - prWidth: "PR#1234"
 //   - costWidth: "$1234.45" right-aligned
 const (
 	labelWidth  = 6
-	agentWidth  = 18
+	agentWidth  = 9
 	statusWidth = 10
 	prWidth     = 7
 	costWidth   = 8
@@ -96,6 +96,7 @@ func (i actionItem) FilterValue() string { return i.label }
 
 type pickerModel struct {
 	list     list.Model
+	header   string // optional column-header line shown above items
 	choice   list.Item
 	quitting bool
 }
@@ -123,8 +124,22 @@ func (m pickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// headerStyle styles the column-header row. Indented by 2 spaces so it
+// aligns with the list delegate's left padding for item rows.
+var headerStyle = lipgloss.NewStyle().Bold(true).Padding(0, 0, 0, 2)
+
 func (m pickerModel) View() string {
-	return m.list.View()
+	listView := m.list.View()
+	if m.header == "" {
+		return listView
+	}
+	// Inject the header line after the first row of the list view (which
+	// is the title or, in filter mode, the filter input).
+	nl := strings.Index(listView, "\n")
+	if nl < 0 {
+		return listView
+	}
+	return listView[:nl+1] + headerStyle.Render(m.header) + "\n" + listView[nl+1:]
 }
 
 // newPicker creates a picker model from list items.
@@ -187,7 +202,9 @@ func PickJob(jobs []*db.Job, title string) (*db.Job, error) {
 		items[i] = jobItem{job: j, line: formatJobLine(j, tw)}
 	}
 
-	choice, err := runPicker(newPicker(items, title, true, termWidth))
+	m := newPicker(items, title, true, termWidth)
+	m.header = renderHeader(tw)
+	choice, err := runPicker(m)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +225,9 @@ func PickRemoteJob(jobs []daemon.JobResponse, title string) (*daemon.JobResponse
 		items[i] = remoteJobItem{job: &jobs[i], line: formatRemoteJobLine(&jobs[i], tw)}
 	}
 
-	choice, err := runPicker(newPicker(items, title, true, termWidth))
+	m := newPicker(items, title, true, termWidth)
+	m.header = renderHeader(tw)
+	choice, err := runPicker(m)
 	if err != nil {
 		return nil, err
 	}
@@ -382,6 +401,20 @@ func renderRow(c jobColumns, titleWidth int) string {
 		padRight(c.status, statusWidth),
 		padRight(c.pr, prWidth),
 		padLeft(c.cost, costWidth),
+	)
+}
+
+// renderHeader returns the column-header row whose offsets match those
+// produced by renderRow. The bracket positions around the agent column are
+// rendered as spaces so the header lines up with the agent text below.
+func renderHeader(titleWidth int) string {
+	return fmt.Sprintf("%s   %s   %s  %s  %s  %s",
+		padRight("ISSUE", labelWidth),
+		padRight("AGENT", agentWidth),
+		padRight("TITLE", titleWidth),
+		padRight("STATUS", statusWidth),
+		padRight("PR", prWidth),
+		padLeft("COST", costWidth),
 	)
 }
 

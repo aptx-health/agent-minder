@@ -203,16 +203,16 @@ func TestFormatJobLineColumns(t *testing.T) {
 		lines[i] = formatJobLine(j, titleWidth)
 	}
 
-	// Expected layout:
-	//   label(6)  [agent(18)]  title(N)  status(10)  pr(7)  cost(8)
-	// → fixed offsets:
-	//   label start  = 0
-	//   agent start  = 6 + 2 + 1 = 9
-	//   title start  = 9 + 18 + 1 + 2 = 30
-	//   status start = 30 + titleWidth + 2 = 30 + 35 + 2 = 67
-	//   pr start     = 67 + 10 + 2 = 79
-	//   cost start   = 79 + 7 + 2 = 88
-	// → total length = 88 + 8 = 96
+	// Layout: label(6)  [agent(9)]  title(N)  status(10)  pr(7)  cost(8)
+	// Derived offsets:
+	agentBracketOff := labelWidth + 2          // 8
+	agentStart := agentBracketOff + 1          // 9
+	agentCloseOff := agentStart + agentWidth   // 18
+	titleStart := agentCloseOff + 1 + 2        // 21
+	statusStart := titleStart + titleWidth + 2 // 58
+	prStart := statusStart + statusWidth + 2   // 70
+	costStart := prStart + prWidth + 2         // 79
+
 	expectedLen := fixedColumnWidth + titleWidth
 	for i, line := range lines {
 		if len(line) != expectedLen {
@@ -220,29 +220,20 @@ func TestFormatJobLineColumns(t *testing.T) {
 		}
 	}
 
-	// Every line must have the same column offsets so PR#XXX, status and
-	// cost columns line up vertically.
-	for i := 1; i < len(lines); i++ {
-		for _, off := range []int{0, 9, 30, 67, 79, 88} {
-			if lines[i][off] == lines[0][off] {
-				continue
-			}
-			// Differing chars at column boundaries are fine; we mainly
-			// care that lengths match (covered above) and that fixed
-			// markers like "[" and "]" sit at the same positions.
+	// Bracket positions must be identical on every row so the agent column
+	// stays vertically aligned.
+	for i := range lines {
+		if lines[i][agentBracketOff] != '[' {
+			t.Errorf("row %d: expected '[' at offset %d, got %q (line=%q)", i, agentBracketOff, lines[i][agentBracketOff], lines[i])
 		}
-		// "[" should always be at position 8 and "]" at position 8 + 1 + 18 = 27.
-		if lines[i][8] != '[' {
-			t.Errorf("row %d: expected '[' at offset 8, got %q (line=%q)", i, lines[i][8], lines[i])
-		}
-		if lines[i][27] != ']' {
-			t.Errorf("row %d: expected ']' at offset 27, got %q (line=%q)", i, lines[i][27], lines[i])
+		if lines[i][agentCloseOff] != ']' {
+			t.Errorf("row %d: expected ']' at offset %d, got %q (line=%q)", i, agentCloseOff, lines[i][agentCloseOff], lines[i])
 		}
 	}
 
 	// Cost column on the $1.45 row must be fully rendered (not "$1...").
 	costLine := lines[2]
-	costField := costLine[88 : 88+costWidth]
+	costField := costLine[costStart : costStart+costWidth]
 	if !strings.Contains(costField, "$1.45") {
 		t.Errorf("expected $1.45 in cost field, got %q (full=%q)", costField, costLine)
 	}
@@ -251,53 +242,100 @@ func TestFormatJobLineColumns(t *testing.T) {
 	}
 
 	// Status column on the "reviewing" row must contain "reviewing" in full.
-	statusField := costLine[67 : 67+statusWidth]
+	statusField := costLine[statusStart : statusStart+statusWidth]
 	if !strings.HasPrefix(statusField, "reviewing") {
-		t.Errorf("expected status 'reviewing' at offset 67, got %q (line=%q)", statusField, costLine)
+		t.Errorf("expected status 'reviewing' at offset %d, got %q (line=%q)", statusStart, statusField, costLine)
 	}
 
 	// PR field for the "reviewing" row must start at the same offset on
 	// every row that has a PR.
-	prField := costLine[79 : 79+prWidth]
+	prField := costLine[prStart : prStart+prWidth]
 	if !strings.HasPrefix(prField, "PR#1240") {
-		t.Errorf("expected PR#1240 at offset 79, got %q (line=%q)", prField, costLine)
+		t.Errorf("expected PR#1240 at offset %d, got %q (line=%q)", prStart, prField, costLine)
 	}
 	// Cheap row with no PR must have a blank PR field at the same offset.
 	noPRRow := lines[0]
-	noPRField := noPRRow[79 : 79+prWidth]
+	noPRField := noPRRow[prStart : prStart+prWidth]
 	if strings.TrimSpace(noPRField) != "" {
 		t.Errorf("expected empty PR field for no-PR row, got %q (line=%q)", noPRField, noPRRow)
 	}
 
 	// Overflow agent must be truncated to fit agentWidth.
 	overflowRow := lines[4]
-	agentField := overflowRow[9 : 9+agentWidth]
+	agentField := overflowRow[agentStart : agentStart+agentWidth]
 	if len(agentField) != agentWidth {
 		t.Errorf("agent field width %d, want %d", len(agentField), agentWidth)
 	}
 	if !strings.HasSuffix(strings.TrimRight(agentField, " "), "...") {
 		t.Errorf("expected overflow agent to be truncated with '...', got %q", agentField)
 	}
-	// Longest built-in agent ("dependency-updater" = 18 chars) must fit
-	// without truncation.
+
+	// dependency-updater (18 chars) exceeds agentWidth and must be
+	// ellipsized, not allowed to push the column wider.
 	builtinRow := lines[3]
-	builtinAgent := builtinRow[9 : 9+agentWidth]
-	if strings.Contains(builtinAgent, "...") {
-		t.Errorf("dependency-updater should fit without truncation, got %q", builtinAgent)
+	builtinAgent := builtinRow[agentStart : agentStart+agentWidth]
+	if !strings.HasSuffix(strings.TrimRight(builtinAgent, " "), "...") {
+		t.Errorf("expected dependency-updater to be truncated with '...', got %q", builtinAgent)
 	}
-	if !strings.Contains(builtinAgent, "dependency-updater") {
-		t.Errorf("expected full 'dependency-updater' in agent field, got %q", builtinAgent)
+
+	// 9-char agent names (autopilot, bug-fixer) must fit without truncation.
+	autopilotRow := lines[2]
+	autopilotAgent := autopilotRow[agentStart : agentStart+agentWidth]
+	if strings.Contains(autopilotAgent, "...") {
+		t.Errorf("autopilot should fit without truncation at width %d, got %q", agentWidth, autopilotAgent)
+	}
+	if strings.TrimSpace(autopilotAgent) != "autopilot" {
+		t.Errorf("expected agent 'autopilot', got %q", autopilotAgent)
 	}
 
 	// Big cost ($12.34) row must render fully right-aligned.
 	bigCostRow := lines[5]
-	bigCostField := bigCostRow[88 : 88+costWidth]
+	bigCostField := bigCostRow[costStart : costStart+costWidth]
 	if !strings.Contains(bigCostField, "$12.34") {
 		t.Errorf("expected $12.34 in cost field, got %q", bigCostField)
 	}
 	// Right-aligned: cost should end with the last char of the number.
 	if bigCostField[costWidth-1] != '4' {
 		t.Errorf("cost field should be right-aligned (last char '4'), got %q", bigCostField)
+	}
+}
+
+func TestRenderHeader(t *testing.T) {
+	titleWidth := 35
+	header := renderHeader(titleWidth)
+	row := renderRow(jobColumns{
+		label: "#123", agent: "autopilot", title: "demo",
+		status: "queued", pr: "PR#1", cost: "$1.00",
+	}, titleWidth)
+
+	if len(header) != len(row) {
+		t.Fatalf("header length %d != row length %d\nheader=%q\nrow   =%q", len(header), len(row), header, row)
+	}
+
+	// Column labels must sit at the same byte offsets as the row's column
+	// content so the header lines up with what's below it.
+	cases := []struct {
+		label string
+		off   int
+	}{
+		{"ISSUE", 0},
+		{"AGENT", labelWidth + 2 + 1}, // 9
+		{"TITLE", labelWidth + 2 + 1 + agentWidth + 1 + 2},                                 // 21
+		{"STATUS", labelWidth + 2 + 1 + agentWidth + 1 + 2 + titleWidth + 2},               // 58
+		{"PR", labelWidth + 2 + 1 + agentWidth + 1 + 2 + titleWidth + 2 + statusWidth + 2}, // 70
+	}
+	for _, c := range cases {
+		got := header[c.off : c.off+len(c.label)]
+		if got != c.label {
+			t.Errorf("header[%d:%d] = %q, want %q (full header=%q)", c.off, c.off+len(c.label), got, c.label, header)
+		}
+	}
+
+	// COST is right-aligned in the cost column.
+	costEnd := len(header)
+	costField := header[costEnd-costWidth : costEnd]
+	if strings.TrimLeft(costField, " ") != "COST" {
+		t.Errorf("expected right-aligned 'COST' in last %d chars, got %q", costWidth, costField)
 	}
 }
 
