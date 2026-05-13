@@ -8,7 +8,11 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -16,14 +20,22 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build
-        run: go build ./...
+      - name: Build minder binary
+        run: go build -o minder ./cmd/minder
 
       - name: Test
         run: go test ./...
 
       - name: Vet
         run: go vet ./...
+
+      - name: Upload minder binary
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: minder-${{ matrix.os }}
+          path: minder
+          retention-days: 14
 
   lint:
     runs-on: ubuntu-latest
