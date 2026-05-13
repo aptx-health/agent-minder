@@ -154,7 +154,6 @@ Agents get context assembled from declared providers:
 | `dep_graph` | Dependency graph for the deployment |
 
 ### Multi-agent orchestration
-- LLM-built dependency graphs determine execution order
 - Up to N concurrent agents (configurable with `--max-agents`)
 - Slot backfill: as agents finish, new ones start automatically
 - Budget ceiling with 80% warning and automatic pause
