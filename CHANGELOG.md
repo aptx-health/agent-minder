@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **PR build artifacts in CI**: CI workflow now builds the `minder` binary on `ubuntu-latest` and `macos-latest`, uploading per-OS artifacts on pull request builds via `actions/upload-artifact@v4` so reviewers can download a binary without compiling locally. Retention is 14 days. (#477)
 - **Weekly cron schedules for proactive agents**: Built-in agent definitions now include default cron schedules (weekly dependency checks, security scans, doc updates) (#431)
 - **Repo-level agent defs and overnight cron jobs**: Agent definitions can be stored in repos at `.claude/agents/` and discovered at deploy time; overnight cron scheduling for proactive agents (#375)
 - **Built-in agents**: `dependency-updater`, `security-scanner`, and `doc-updater` agents ship as built-in agent definitions alongside `autopilot`, `reviewer`, `designer`, and `onboarding` (#402, #404)
