@@ -224,6 +224,15 @@ No human intervention needed.
 ### Command timeout wrappers
 Test and build commands injected into agent context include `timeout` wrappers (default 5m for tests, 3m for builds). Configurable via `test_timeout` and `build_timeout` in `onboarding.yaml`. Prevents agents from burning turns waiting on hung processes.
 
+### Orphan process reaper
+Agent runs occasionally leave detached descendants alive in the worktree — `npm start`, `next dev`, `overmind` and similar processes call `setsid` and escape their parent's process group, so they survive the agent that spawned them. The supervisor sweeps every worktree for these orphans and kills them (SIGTERM, then SIGKILL after a 2-second grace) at three points:
+
+- after every agent process exits (scoped to that one worktree)
+- at supervisor startup (across all worktrees whose jobs are not currently running)
+- on a 5-minute ticker while the supervisor is running
+
+Each kill emits one event line in foreground mode (e.g. `[reaper] job#265 issue-699: killed pid=39076 ppid=1 cmd=next-server age=20m sig=KILL`) and a structured `component=reaper` record in `debug.log`. Active agents' processes are never touched — the sweep skips any job in `running` state. For manual cleanup or testing: `minder reaper sweep <worktree-path>`.
+
 ## SwiftBar menu bar plugin
 
 A macOS menu bar widget that shows agent status at a glance. Supports all job statuses including `waiting` (usage limit recovery). See `xbar/minder.5s.sh`.
