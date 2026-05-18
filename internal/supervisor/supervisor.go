@@ -17,6 +17,7 @@ import (
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
+	"github.com/aptx-health/agent-minder/internal/reaper"
 )
 
 // debugLogger is a structured JSON logger for supervisor tracing.
@@ -311,6 +312,10 @@ func (s *Supervisor) Launch(ctx context.Context) {
 
 	go func() {
 		defer close(s.done)
+
+		// Startup sweep: reap anything left from prior daemon runs.
+		s.sweepAllInactiveWorktrees()
+
 		s.fillCapacity(ctx)
 
 		reviewTicker := time.NewTicker(30 * time.Second)
@@ -321,6 +326,9 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		if s.addWatchTickerToLoop() {
 			s.WatchTick(ctx)
 		}
+
+		reaperTicker := time.NewTicker(5 * time.Minute)
+		defer reaperTicker.Stop()
 
 		for {
 			select {
@@ -341,6 +349,9 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				if s.hasCapacity() {
 					s.fillCapacity(ctx)
 				}
+
+			case <-reaperTicker.C:
+				s.sweepAllInactiveWorktrees()
 
 			default:
 				if s.hasCapacity() {
@@ -527,6 +538,7 @@ func (s *Supervisor) runJobManager(ctx context.Context, job *db.Job) {
 		s.mu.Lock()
 		delete(s.running, job.ID)
 		s.mu.Unlock()
+		s.sweepJobWorktree(job)
 		s.fillCapacity(s.parentCtx)
 	}()
 
@@ -655,4 +667,63 @@ func lastPRNumberAfter(content, marker string) int {
 	}
 	num, _ := strconv.Atoi(rest[:end])
 	return num
+}
+
+// sweepJobWorktree reaps any orphaned processes left in a single job's
+// worktree. Safe to call after the job's agent process has exited.
+func (s *Supervisor) sweepJobWorktree(job *db.Job) {
+	if job == nil || !job.WorktreePath.Valid || job.WorktreePath.String == "" {
+		return
+	}
+	reaped, err := reaper.Sweep(job.WorktreePath.String)
+	if err != nil {
+		debugLog("reaper error", "job", job.ID, "worktree", job.WorktreePath.String, "error", err.Error())
+		return
+	}
+	s.reportReaped(reaped, job.ID, job.IssueNumber)
+}
+
+// sweepAllInactiveWorktrees finds every worktree whose job is NOT currently
+// running and reaps stragglers. Used at startup and on a periodic ticker.
+func (s *Supervisor) sweepAllInactiveWorktrees() {
+	jobs, err := s.store.GetJobs(s.deploy.ID)
+	if err != nil {
+		return
+	}
+
+	s.mu.Lock()
+	running := make(map[int64]bool, len(s.running))
+	for id := range s.running {
+		running[id] = true
+	}
+	s.mu.Unlock()
+
+	for _, j := range jobs {
+		if running[j.ID] {
+			continue // active agent; do not touch
+		}
+		if j.Status == db.StatusRunning {
+			continue // crash-recovery / stale row; skip to be safe
+		}
+		if !j.WorktreePath.Valid || j.WorktreePath.String == "" {
+			continue
+		}
+		reaped, err := reaper.Sweep(j.WorktreePath.String)
+		if err != nil {
+			continue
+		}
+		s.reportReaped(reaped, j.ID, j.IssueNumber)
+	}
+}
+
+// reportReaped emits one event per killed process so the foreground CLI and
+// TUI both surface what the reaper did.
+func (s *Supervisor) reportReaped(reaped []reaper.Reaped, jobID int64, issueNum int) {
+	for _, r := range reaped {
+		msg := fmt.Sprintf("[reaper] job#%d issue-%d: killed %s", jobID, issueNum, r)
+		s.emitEvent("reaped", msg, jobID)
+		debugLog("reaper killed", "job", jobID, "issue", issueNum,
+			"pid", r.PID, "ppid", r.PPID, "command", r.Command,
+			"age_seconds", r.Age.Seconds(), "cpu_percent", r.CPU, "signal", r.Signal)
+	}
 }
