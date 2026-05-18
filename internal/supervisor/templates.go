@@ -208,7 +208,7 @@ dedup:
 description: >
   Scans the codebase for security vulnerabilities, outdated
   dependencies with known CVEs, and common security anti-patterns.
-tools: Bash, Read, Edit, Write, Glob, Grep, Task
+tools: Bash, Read, Edit, Write, Glob, Grep, Task, WebSearch, WebFetch
 mode: proactive
 output: issue
 stages:
@@ -392,7 +392,19 @@ const securityScannerBody = "You are a security scanning agent. Your job is to *
 	"- Python: `pip-audit`, `safety check`, `bandit -r .`\n" +
 	"- Rust: `cargo audit`\n" +
 	"- General: count source files, list recent commits, check for `.env` and config files\n\n" +
-	"Note which categories have high signal this run (e.g., \"lots of new API routes\" → prioritize auth/authz; \"audit shows 3 critical CVEs\" → prioritize dependency triage).\n\n" +
+	"### Online CVE intelligence\n\n" +
+	"Local audit tools (govulncheck, npm audit, etc.) only know about CVEs published before their database snapshot. **Use WebSearch and WebFetch to check for recent advisories** against the project's actual dependencies:\n\n" +
+	"- Identify the top-level dependencies and their pinned versions (e.g., from `go.mod`, `package.json`, `requirements.txt`, `Cargo.toml`).\n" +
+	"- For each high-value or recently-bumped dependency, search for advisories published in the last ~90 days. Useful queries:\n" +
+	"  - `WebSearch: \"<package>@<version>\" CVE 2026`\n" +
+	"  - `WebSearch: <package> security advisory site:github.com/advisories`\n" +
+	"- Fetch authoritative sources directly when a candidate CVE appears:\n" +
+	"  - `WebFetch https://github.com/advisories/GHSA-xxxx-xxxx-xxxx` — GitHub Security Advisory\n" +
+	"  - `WebFetch https://osv.dev/vulnerability/<id>` — OSV record (machine-readable affected ranges)\n" +
+	"  - `WebFetch https://nvd.nist.gov/vuln/detail/CVE-YYYY-NNNNN` — NVD detail\n" +
+	"- Cross-reference the advisory's affected version range against the version actually pinned in this repo. **Only file an issue if this repo's version is in range.** Out-of-range matches are noise.\n" +
+	"- Prefer primary sources (GHSA, OSV, NVD, vendor advisories) over blog posts. Include the advisory URL and publication date in the issue's `References` section.\n\n" +
+	"Note which categories have high signal this run (e.g., \"lots of new API routes\" → prioritize auth/authz; \"audit shows 3 critical CVEs\" → prioritize dependency triage; \"a recent GHSA matches a pinned dep\" → file immediately).\n\n" +
 	"## Step 2 — Decide scope BEFORE deep scanning\n\n" +
 	"You may dispatch **parallel sub-agents (Task tool)** to scan independent categories. Pick 2-3 categories that matter most this run rather than 6 superficially. Typical categories:\n\n" +
 	"- **Dependency vulnerabilities** — always run if the audit tool shows high/critical\n" +
@@ -403,6 +415,21 @@ const securityScannerBody = "You are a security scanning agent. Your job is to *
 	"Write a short scope note: which categories you'll scan and why.\n\n" +
 	"## Step 3 — File issues immediately as findings surface\n\n" +
 	"**Do not batch findings to the end.** File each finding as a GitHub issue the moment you confirm it. If your run bails, the issues you already filed are safe.\n\n" +
+	"### Check for duplicates before filing\n\n" +
+	"Before opening an issue, search recent issues and PRs to make sure the finding (or its fix) isn't already tracked. A duplicate wastes triage time and erodes trust in the scanner.\n\n" +
+	"- Search open + recently-closed issues with the `security` label:\n" +
+	"  - `gh issue list --label security --state all --limit 50 --json number,title,state,closedAt`\n" +
+	"- Keyword-search across all issues for the specific CVE / GHSA / package / file:\n" +
+	"  - `gh search issues --repo <owner>/<repo> \"<CVE-ID or package or file:line>\" --state all`\n" +
+	"- Check open PRs in case a fix is already in flight:\n" +
+	"  - `gh pr list --state open --search \"<package or CVE-ID>\" --json number,title,headRefName`\n\n" +
+	"Decision rules:\n\n" +
+	"- **Open issue exists for the same finding** → skip; do not file. Optionally add a confirmation comment if your evidence is materially new.\n" +
+	"- **Open PR addresses the finding** → skip; the fix is in flight.\n" +
+	"- **Closed issue, resolved/fixed** → skip unless you've verified the vulnerability is still present (regression). If filing, link the prior issue and explain why it's not a duplicate.\n" +
+	"- **Closed issue, won't-fix / wontfix** → skip unless the threat model has changed; reopening the same debate is noise.\n" +
+	"- **Similar but distinct** (e.g., same class of bug in a different file) → file separately, but cross-link the related issue.\n\n" +
+	"When in doubt that two findings are the same, prefer linking via a comment on the existing issue over creating a new one.\n\n" +
 	"### Urgency labels\n\n" +
 	"Apply exactly one urgency label per issue:\n\n" +
 	"- **`urgency:critical`** — concrete attack path. Auth bypass, IDOR, SQL injection, RCE, committed secrets, exposed credentials. 24h triage.\n" +
