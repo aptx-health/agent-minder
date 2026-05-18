@@ -520,14 +520,14 @@ func (s *Supervisor) tryFetch() {
 			s.offline = false
 			s.offlineBackoffIdx = 0
 			s.nextProbeAt = time.Time{}
-			go s.emitEvent("info", fmt.Sprintf("Network online (offline for %s) — resuming", downFor), 0)
+			s.emitEvent("info", fmt.Sprintf("Network online (offline for %s) — resuming", downFor), 0)
 		}
 		return
 	}
 
 	if !gitpkg.IsNetworkError(err) {
 		// Non-network error: surface immediately, don't enter offline state.
-		go s.emitEvent("warning", fmt.Sprintf("Git fetch failed: %v", err), 0)
+		s.emitEvent("warning", fmt.Sprintf("Git fetch failed: %v", err), 0)
 		return
 	}
 
@@ -535,7 +535,7 @@ func (s *Supervisor) tryFetch() {
 		s.offline = true
 		s.offlineSince = time.Now()
 		s.offlineBackoffIdx = 0
-		go s.emitEvent("warning", "Network offline (git fetch failed) — backing off, will retry quietly", 0)
+		s.emitEvent("warning", "Network offline (git fetch failed) — backing off, will retry quietly", 0)
 	} else if s.offlineBackoffIdx < len(offlineBackoffSchedule)-1 {
 		s.offlineBackoffIdx++
 	}
