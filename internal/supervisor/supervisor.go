@@ -106,11 +106,16 @@ type Supervisor struct {
 	waitingHintEmitted bool
 	lastGHError        time.Time // throttle GitHub API error reporting
 	ghPollSucceeded    bool      // true after first successful poll
+	offline            bool
+	offlineSince       time.Time
+	offlineBackoffIdx  int
+	nextProbeAt        time.Time
 	events             chan Event
 	parentCtx          context.Context
 	cancel             context.CancelFunc
 	done               chan struct{}
 	ghClientFactory    func(token string) *ghpkg.Client
+	fetchFn            func() error // overridable for tests
 }
 
 // New creates a new Supervisor.
@@ -119,7 +124,7 @@ func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken s
 	if maxAgents < 1 {
 		maxAgents = 3
 	}
-	return &Supervisor{
+	s := &Supervisor{
 		store:     store,
 		deploy:    deploy,
 		repoDir:   repoDir,
@@ -130,6 +135,8 @@ func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken s
 		maxAgents: maxAgents,
 		events:    make(chan Event, 64),
 	}
+	s.fetchFn = func() error { return gitpkg.Fetch(s.repoDir) }
+	return s
 }
 
 func (s *Supervisor) newGHClient() *ghpkg.Client {
@@ -463,20 +470,11 @@ func (s *Supervisor) fillCapacity(ctx context.Context) {
 		}
 	}
 
-	// Fetch once before launching — retry on transient network errors.
+	// Fetch once before launching, with offline-aware backoff.
 	if len(s.running) < s.maxAgents {
 		s.mu.Unlock()
-		err := gitpkg.FetchWithRetry(s.repoDir, 3, func(attempt, max int, err error) {
-			s.emitEvent("warning", fmt.Sprintf("Git fetch failed (network error) — retrying (%d/%d)", attempt, max), 0)
-		})
+		s.tryFetch()
 		s.mu.Lock()
-		if err != nil {
-			if gitpkg.IsNetworkError(err) {
-				s.emitEvent("warning", "Git fetch failed after retries (network issue) — will try again next cycle", 0)
-			} else {
-				s.emitEvent("warning", fmt.Sprintf("Git fetch failed: %v", err), 0)
-			}
-		}
 	}
 
 	for len(s.running) < s.maxAgents {
@@ -486,6 +484,69 @@ func (s *Supervisor) fillCapacity(ctx context.Context) {
 		}
 		s.launchJob(ctx, jobs[0])
 	}
+}
+
+// offlineBackoffSchedule is the delay-until-next-probe sequence while offline.
+// Index advances on each consecutive failure and caps at the last entry.
+var offlineBackoffSchedule = []time.Duration{
+	30 * time.Second,
+	1 * time.Minute,
+	2 * time.Minute,
+	5 * time.Minute,
+	10 * time.Minute,
+	15 * time.Minute,
+}
+
+// tryFetch attempts a git fetch with offline-aware backoff.
+// While offline, it skips entirely until nextProbeAt; on the probe attempt
+// it does a single fetch. Logs only on offline↔online transitions or on
+// non-network errors.
+func (s *Supervisor) tryFetch() {
+	s.mu.Lock()
+	if s.offline && time.Now().Before(s.nextProbeAt) {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+
+	err := s.fetchFn()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err == nil {
+		if s.offline {
+			downFor := time.Since(s.offlineSince).Round(time.Second)
+			s.offline = false
+			s.offlineBackoffIdx = 0
+			s.nextProbeAt = time.Time{}
+			go s.emitEvent("info", fmt.Sprintf("Network online (offline for %s) — resuming", downFor), 0)
+		}
+		return
+	}
+
+	if !gitpkg.IsNetworkError(err) {
+		// Non-network error: surface immediately, don't enter offline state.
+		go s.emitEvent("warning", fmt.Sprintf("Git fetch failed: %v", err), 0)
+		return
+	}
+
+	if !s.offline {
+		s.offline = true
+		s.offlineSince = time.Now()
+		s.offlineBackoffIdx = 0
+		go s.emitEvent("warning", "Network offline (git fetch failed) — backing off, will retry quietly", 0)
+	} else if s.offlineBackoffIdx < len(offlineBackoffSchedule)-1 {
+		s.offlineBackoffIdx++
+	}
+	s.nextProbeAt = time.Now().Add(offlineBackoffSchedule[s.offlineBackoffIdx])
+}
+
+// isOnline reports whether the supervisor considers the network up.
+func (s *Supervisor) isOnline() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.offline
 }
 
 func (s *Supervisor) checkBudgetCeiling() bool {
@@ -569,7 +630,11 @@ func (s *Supervisor) runJobManager(ctx context.Context, job *db.Job) {
 }
 
 // checkMergedPRs checks if any review/reviewed jobs had their PRs merged.
+// Skipped while offline to avoid hammering the GitHub API during outages.
 func (s *Supervisor) checkMergedPRs(ctx context.Context) {
+	if !s.isOnline() {
+		return
+	}
 	jobs, err := s.store.GetJobs(s.deploy.ID)
 	if err != nil {
 		return
