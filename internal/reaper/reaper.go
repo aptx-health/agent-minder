@@ -5,6 +5,7 @@ package reaper
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,20 @@ import (
 	"syscall"
 	"time"
 )
+
+// HoldFileName is the sentinel filename that, when present at the root of a
+// worktree, makes Sweep a no-op. Use `touch <worktree>/.minder-hold` before
+// manual testing to protect long-lived dev servers from the periodic reaper.
+const HoldFileName = ".minder-hold"
+
+// IsHeld reports whether worktreePath contains the hold sentinel file.
+func IsHeld(worktreePath string) bool {
+	if worktreePath == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(worktreePath, HoldFileName))
+	return err == nil
+}
 
 // Reaped describes a single process the reaper killed.
 type Reaped struct {
@@ -33,6 +48,9 @@ func (r Reaped) String() string {
 // Returns the list of processes that were reaped.
 func Sweep(worktreePath string) ([]Reaped, error) {
 	if worktreePath == "" {
+		return nil, nil
+	}
+	if IsHeld(worktreePath) {
 		return nil, nil
 	}
 	pids, err := findPIDsInPath(worktreePath)
