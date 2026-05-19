@@ -129,17 +129,65 @@ Based on the description, determine:
 - For **reactive** agents: ask which GitHub label triggers it
 - For **proactive** agents: ask what schedule (suggest sensible defaults based on the task)
 
-### 4. Run a research sub-agent
+### 4. Skill survey (do this BEFORE the research sub-agent)
+
+Claude Code "skills" are reusable instruction packs the agent can invoke.
+
+**4a. Suggest high-value external skills.** Based on the agent's purpose and the
+repo's stack, propose up to 3 well-maintained, high-quality skills the user may
+want to install. Sourcing rules — MUST follow:
+- Only suggest skills from anthropic-official sources (github.com/anthropics/skills),
+  established marketplaces (Claude Code plugin marketplace), or repos with clear
+  signs of active maintenance.
+- Do NOT invent skill names. If you cannot verify a skill exists, don't suggest it.
+- Each suggestion: name, one-line purpose, source URL, one-line fit reason.
+- If nothing meets the bar, say "no external skills recommended" and move on.
+
+For each suggestion, ask install / skip / defer. On install, ask the user to
+confirm the exact install command before running it.
+
+**4b. Inventory locally-available skills.** List every SKILL.md under:
+- .claude/skills/*/SKILL.md
+- ~/.claude/skills/*/SKILL.md
+- .claude/plugins/*/skills/*/SKILL.md
+
+Capture name + description from each. If none are found and none were installed,
+record "no skills available" and continue.
+
+### 5. Run a research sub-agent
 Before writing the agent definition, run a research agent to analyze the codebase:
 
-  claude -p --model sonnet "Research this codebase for writing an optimized <agent-name> agent definition that <description>. Focus on: relevant code patterns, tools, commands, and conventions. Output ONLY the instruction body markdown — no frontmatter, no preamble."
+  claude -p --model sonnet "Research this codebase for writing an optimized <agent-name> agent definition that <description>. Focus on: relevant code patterns, tools, commands, and conventions. Available skills the agent can invoke: <skill-name>: <description>; ... (omit if none). Recommend which of these skills fit this agent's job. Output ONLY the instruction body markdown — no frontmatter, no preamble."
 
 Read the output and use it as the foundation for the instruction body.
 
-### 5. Create the agent definition
+### 6. Create the agent definition
 Write the file to .claude/agents/<name>.md with:
 - YAML frontmatter with the correct contract fields
+- Optionally a "skills:" list in the frontmatter (see skill attachment below)
 - Instruction body based on the research + user's requirements
+
+**Skill attachment (two layers, both required if any skills are attached):**
+
+Ask the user which skills from the step-4 inventory + research recommendation to
+attach to this agent (skip if no skills are available).
+
+Layer 1 — frontmatter. Add a "skills:" list at the end of the frontmatter:
+
+    skills:
+      - <skill-name>
+
+Layer 2 — body. For each attached skill, add a "[REQUIRED]" workflow step with
+MUST language and a mandatory line in a final-report section:
+
+    ## Workflow
+    - [REQUIRED] Invoke the the named skill with <args>. If it returns
+      zero findings, record "no findings" — do not omit the line.
+
+    ## Final report (every line required)
+    - <skill-name>: <N findings> | "no findings" | "skipped — <reason>"
+
+Descriptive phrasing gets silently skipped — use MUST / [REQUIRED] / numbered steps.
 
 Use existing agent templates as reference for the frontmatter structure:
 %s
@@ -153,7 +201,7 @@ Key frontmatter fields:
 - context (list of providers: issue, repo_info, file_list, recent_commits:<days>, lessons, sibling_jobs, dep_graph)
 - dedup (for proactive: branch_exists, open_pr_with_label:<label>, recent_run:<hours>)
 
-### 6. Update jobs.yaml
+### 7. Update jobs.yaml
 Read the existing .agent-minder/jobs.yaml (if it exists) and add an entry for the new agent.
 
 For reactive agents:
@@ -170,14 +218,14 @@ For proactive agents:
     description: "<description>"
     budget: 3.0
 
-### 7. Validate
+### 8. Validate
 - Run: minder agents list --repo .
 - Run: minder jobs list --repo .
   If minder is not on PATH, use go run ./cmd/minder.
   Do NOT use Python or Ruby YAML parsers.
 - If validation fails, fix and re-validate.
 
-### 8. Summary
+### 9. Summary
 Print a summary of what was created:
 - Agent definition file path
 - Mode and trigger/schedule

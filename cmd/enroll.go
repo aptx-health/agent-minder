@@ -176,6 +176,40 @@ Languages: %v
 
 ## Your goals (in order)
 
+### 0. Skill survey + suggestions (do this FIRST, before anything else)
+
+Claude Code "skills" are reusable instruction packs that agents can invoke. Surfacing
+relevant skills before agent research means research can factor them in rather than
+duplicating their logic.
+
+**0a. Suggest high-value skills to install.** Based on the repo's languages and
+frameworks, propose a SHORT list (max 5) of well-maintained, high-quality skills
+the user may want to install. Sourcing rules — MUST follow:
+- Only suggest skills from anthropic-official sources (github.com/anthropics/skills),
+  established marketplaces (Claude Code plugin marketplace), or repos with clear
+  signs of active maintenance (recent commits, > a handful of stars, README).
+- Do NOT invent skill names. If you cannot verify a skill exists via WebFetch or
+  by checking a known directory, do not suggest it.
+- Each suggestion must include: name, one-line purpose, source URL, and a one-line
+  reason it fits THIS repo.
+- If nothing meets the bar, say "no external skills recommended" and move on.
+
+Present the list. For each, ask the user: install / skip / defer. For each "install",
+clone or copy the SKILL.md into .claude/skills/<name>/SKILL.md (ask the user to
+confirm the exact install command before running it).
+
+**0b. Inventory locally-available skills.** After install decisions, list every
+SKILL.md found under:
+- .claude/skills/*/SKILL.md (repo-level)
+- ~/.claude/skills/*/SKILL.md (user-level)
+- .claude/plugins/*/skills/*/SKILL.md (plugin-level)
+
+For each, read the frontmatter and capture: name, description. Keep this list
+in your working memory — you will use it in steps 3 and 4.
+
+If no skills are found locally and none are installed, record "no skills available"
+and continue. Skills are optional; never block onboarding on their absence.
+
 ### 1. Onboarding configuration
 - Ask about the test command (verify it works by running it)
 - Ask about the build command
@@ -205,7 +239,7 @@ Required agents (autopilot, reviewer) are always installed. Optional agents:
 For EACH agent the user wants installed (including required agents), spawn a research
 sub-agent using the Bash tool to run:
 
-  claude -p --model sonnet "Research this codebase for writing an optimized <agent-name> agent definition. Focus on: <focus areas>. Output ONLY the instruction body markdown — no frontmatter, no preamble."
+  claude -p --model sonnet "Research this codebase for writing an optimized <agent-name> agent definition. Focus on: <focus areas>. Available skills the agent can invoke: <skill-name>: <description>; ... (omit if none). The research should consider which of these skills naturally fit this agent's job and recommend which to attach. Output ONLY the instruction body markdown — no frontmatter, no preamble."
 
 Run ALL research sub-agents in parallel (use & and wait) to save time:
 
@@ -238,13 +272,44 @@ Agent definition files go in .claude/agents/<name>.md. Each file has YAML frontm
 between --- markers, followed by instruction text.
 
 CRITICAL RULES:
-- The YAML frontmatter (between the --- markers) must NOT be modified. It contains
-  contract fields that the orchestrator parses. Changing it will break the agent.
-- You may ONLY customize the instruction text BELOW the closing --- marker.
+- The YAML frontmatter (between the --- markers) must NOT be modified EXCEPT to
+  add a "skills:" list (see below). All other contract fields are orchestrator-parsed
+  — changing them will break the agent.
+- You may customize the instruction text BELOW the closing --- marker freely.
 - Use the research sub-agent output as the foundation for each instruction body.
   Refine it: ensure it references actual commands, directories, and conventions
   found in THIS repo. Remove any generic filler that doesn't add value.
 - Keep instructions concise and actionable.
+
+**Skills attachment (two layers, both required):**
+
+For each agent, look at the skill inventory from step 0 + research recommendations
+and ask the user which skills to attach (skip if no skills are available).
+
+Layer 1 — frontmatter. Add a "skills:" list under the closing of the existing
+frontmatter fields (before the closing ---):
+
+    skills:
+      - <skill-name-1>
+      - <skill-name-2>
+
+Without this, Claude Code's description-based skill discovery is unreliable in
+autonomous runs.
+
+Layer 2 — imperative invocation in the body. For each attached skill, add a
+"[REQUIRED]" step in the agent's workflow with explicit MUST language and a
+mandatory line in the final-report section so a skipped skill is visibly absent.
+Pattern:
+
+    ## Workflow
+    - [REQUIRED] Invoke the the named skill with <args>. If it returns
+      zero findings, record "no findings" — do not omit the line.
+
+    ## Final report (every line required)
+    - <skill-name>: <N findings> | "no findings" | "skipped — <reason>"
+
+Descriptive phrasing like "consider using the skill" gets silently skipped.
+Use MUST / [REQUIRED] / numbered steps.
 
 Reference frontmatter for each agent type (use these EXACTLY):
 %s

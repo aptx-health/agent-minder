@@ -28,6 +28,10 @@ type AgentContract struct {
 	// Available: issue, repo_info, recent_commits:<days>, file_list, lessons, sibling_jobs, dep_graph
 	Context []string `yaml:"context"`
 
+	// Skills to preload when Claude Code invokes this agent. Claude Code reads
+	// this frontmatter directly; agent-minder just round-trips it.
+	Skills []string `yaml:"skills"`
+
 	// Pipeline stages (optional — default is single-stage: just run the agent).
 	Stages []StageContract `yaml:"stages"`
 }
