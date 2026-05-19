@@ -120,6 +120,40 @@ func TestSweepIgnoresProcessOutsideWorktree(t *testing.T) {
 	}
 }
 
+// TestSweepRespectsHoldFile confirms a worktree with .minder-hold is spared.
+func TestSweepRespectsHoldFile(t *testing.T) {
+	if _, err := exec.LookPath("lsof"); err != nil {
+		t.Skip("lsof not available")
+	}
+	worktree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(worktree, HoldFileName), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("sleep", "30")
+	cmd.Dir = worktree
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	reaped, err := Sweep(worktree)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(reaped) != 0 {
+		t.Errorf("expected hold file to spare worktree, got %d reaps", len(reaped))
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Errorf("held pid %d unexpectedly dead: %v", pid, err)
+	}
+}
+
 // TestSweepEmptyPath returns no error and no reaps.
 func TestSweepEmptyPath(t *testing.T) {
 	r, err := Sweep("")

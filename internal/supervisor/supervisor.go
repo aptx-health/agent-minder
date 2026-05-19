@@ -115,7 +115,8 @@ type Supervisor struct {
 	cancel             context.CancelFunc
 	done               chan struct{}
 	ghClientFactory    func(token string) *ghpkg.Client
-	fetchFn            func() error // overridable for tests
+	fetchFn            func() error        // overridable for tests
+	sparedLogAt        map[int64]time.Time // throttle "spared by reaper" events per job
 }
 
 // New creates a new Supervisor.
@@ -125,15 +126,16 @@ func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken s
 		maxAgents = 3
 	}
 	s := &Supervisor{
-		store:     store,
-		deploy:    deploy,
-		repoDir:   repoDir,
-		owner:     owner,
-		repo:      repo,
-		ghToken:   ghToken,
-		running:   make(map[int64]*runState),
-		maxAgents: maxAgents,
-		events:    make(chan Event, 64),
+		store:       store,
+		deploy:      deploy,
+		repoDir:     repoDir,
+		owner:       owner,
+		repo:        repo,
+		ghToken:     ghToken,
+		running:     make(map[int64]*runState),
+		maxAgents:   maxAgents,
+		events:      make(chan Event, 64),
+		sparedLogAt: make(map[int64]time.Time),
 	}
 	s.fetchFn = func() error { return gitpkg.Fetch(s.repoDir) }
 	return s
@@ -763,6 +765,7 @@ func (s *Supervisor) sweepAllInactiveWorktrees() {
 	}
 	s.mu.Unlock()
 
+	const completionGrace = time.Hour
 	for _, j := range jobs {
 		if running[j.ID] {
 			continue // active agent; do not touch
@@ -773,12 +776,49 @@ func (s *Supervisor) sweepAllInactiveWorktrees() {
 		if !j.WorktreePath.Valid || j.WorktreePath.String == "" {
 			continue
 		}
+		// Spare recently-completed jobs so manual testing in the worktree
+		// (dev servers etc.) isn't nuked. Held worktrees are spared in Sweep itself.
+		var sparedReason string
+		switch {
+		case reaper.IsHeld(j.WorktreePath.String):
+			sparedReason = "hold-file"
+		case j.CompletedAt.Valid && time.Since(j.CompletedAt.Time) < completionGrace:
+			sparedReason = "grace"
+		}
+		if sparedReason != "" {
+			s.reportSpared(j, sparedReason)
+			continue
+		}
 		reaped, err := reaper.Sweep(j.WorktreePath.String)
 		if err != nil {
 			continue
 		}
 		s.reportReaped(reaped, j.ID, j.IssueNumber)
 	}
+}
+
+// reportSpared emits one event per ticker pass (throttled to once an hour
+// per job) when the reaper skips a worktree so users can see accumulating
+// held/recently-completed worktrees in the event stream.
+func (s *Supervisor) reportSpared(j *db.Job, reason string) {
+	s.mu.Lock()
+	last := s.sparedLogAt[j.ID]
+	if time.Since(last) < time.Hour {
+		s.mu.Unlock()
+		return
+	}
+	s.sparedLogAt[j.ID] = time.Now()
+	s.mu.Unlock()
+
+	age := ""
+	if j.CompletedAt.Valid {
+		age = fmt.Sprintf(" age=%s", time.Since(j.CompletedAt.Time).Truncate(time.Minute))
+	}
+	msg := fmt.Sprintf("[reaper] spared job#%d issue-%d reason=%s%s worktree=%s",
+		j.ID, j.IssueNumber, reason, age, j.WorktreePath.String)
+	s.emitEvent("spared", msg, j.ID)
+	debugLog("reaper spared", "job", j.ID, "issue", j.IssueNumber,
+		"reason", reason, "worktree", j.WorktreePath.String)
 }
 
 // reportReaped emits one event per killed process so the foreground CLI and
