@@ -52,6 +52,7 @@ type stageResult struct {
 // under test alongside the surrounding pipeline logic.
 type TestHooks struct {
 	RunStageFn                func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (exitCode int, result *runtimepkg.Result, usageLimit bool, err error)
+	ResumeFn                  func(ctx context.Context, sessionID string, logFile *os.File) (result *runtimepkg.Result, usageLimit bool, err error)
 	DetectPRFn                func(ctx context.Context) int
 	SetupWorktreeFn           func() error
 	EnsureAgentDefFn          func(name AgentName) (AgentDefSource, error)
@@ -475,21 +476,19 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 				// Resume the same session with the runtime; on ErrNotSupported
 				// (or when no session ID is available) fall back to a fresh
 				// stage run.
-				rt := sc.sup.Runtime()
-				if result.sessionID == "" || rt == nil {
+				if result.sessionID == "" {
 					result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
 					continue
 				}
-				sink := newLiveStatusSink(sc.sup, sc.Job.ID)
-				if _, err := rt.Resume(ctx, result.sessionID, sink, logFile); err == runtimepkg.ErrNotSupported {
+				resumeResult, resumeUsageLimit, err := sc.resumeThroughRuntime(ctx, result.sessionID, logFile)
+				if err == runtimepkg.ErrNotSupported {
 					result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
 					continue
 				}
 
 				// Re-check: did the resumed session also hit a limit?
-				resumeResult, _ := rt.ParseResult(sc.LogPath)
 				adapted := adaptRuntimeResult(resumeResult)
-				if sc.HitUsageLimit() || isUsageLimitError(adapted) {
+				if resumeUsageLimit || sc.HitUsageLimit() || isUsageLimitError(adapted) {
 					sessionID := ""
 					if resumeResult != nil {
 						sessionID = resumeResult.SessionID
@@ -640,8 +639,10 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	}
 }
 
-// usageLimitWaitDuration is how long to sleep before retrying after a usage limit.
-const usageLimitWaitDuration = 1 * time.Hour
+// usageLimitWaitDuration is how long to sleep before retrying after a usage
+// limit. Declared as a var (not const) so tests that exercise the resume loop
+// can override it; production never mutates it.
+var usageLimitWaitDuration = 1 * time.Hour
 
 // maxUsageLimitRetries is the maximum number of usage limit recovery attempts per stage.
 const maxUsageLimitRetries = 3

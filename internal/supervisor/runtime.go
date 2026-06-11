@@ -164,3 +164,34 @@ func (sc *SlotContext) runStageThroughRuntime(
 	result, _ := rt.ParseResult(sc.LogPath)
 	return exit, result, sink, err
 }
+
+// resumeThroughRuntime drives the runtime's session-resume path during usage-
+// limit recovery. Returns the parsed result, whether the resumed session also
+// hit a limit, and an error (ErrNotSupported when the runtime cannot resume).
+//
+// Tests may inject SlotContext.Hooks.ResumeFn to skip the actual runtime call
+// and supply a synthetic result.
+func (sc *SlotContext) resumeThroughRuntime(
+	ctx context.Context,
+	sessionID string,
+	logFile io.Writer,
+) (*runtimepkg.Result, bool, error) {
+	if sc.Hooks != nil && sc.Hooks.ResumeFn != nil {
+		f, ok := logFile.(*os.File)
+		if !ok {
+			f = nil
+		}
+		result, usageLimit, err := sc.Hooks.ResumeFn(ctx, sessionID, f)
+		return result, usageLimit, err
+	}
+	rt := sc.sup.Runtime()
+	if rt == nil {
+		return nil, false, runtimepkg.ErrNotSupported
+	}
+	sink := newLiveStatusSink(sc.sup, sc.Job.ID)
+	if _, err := rt.Resume(ctx, sessionID, sink, logFile); err != nil {
+		return nil, sink.usageLimit, err
+	}
+	result, _ := rt.ParseResult(sc.LogPath)
+	return result, sink.usageLimit, nil
+}
