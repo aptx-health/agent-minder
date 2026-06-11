@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`--runtime` flag on `deploy`**: Operators can select the doer runtime (defaults to `claude-code`, the only implemented runtime today). Unknown runtimes fail early with a clear error, and the selection is propagated through daemon re-exec so foreground and daemon modes stay consistent. New `internal/runtime` registry (`Validate`, `KnownNames`, `DefaultName`) gates accepted values. (#504)
 - **PR build artifacts in CI**: CI workflow now builds the `minder` binary on `ubuntu-latest` and `macos-latest`, uploading per-OS artifacts on pull request builds via `actions/upload-artifact@v4` so reviewers can download a binary without compiling locally. Retention is 14 days. (#477)
 - **Weekly cron schedules for proactive agents**: Built-in agent definitions now include default cron schedules (weekly dependency checks, security scans, doc updates) (#431)
 - **Repo-level agent defs and overnight cron jobs**: Agent definitions can be stored in repos at `.claude/agents/` and discovered at deploy time; overnight cron scheduling for proactive agents (#375)

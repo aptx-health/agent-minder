@@ -15,6 +15,7 @@ import (
 	"github.com/aptx-health/agent-minder/internal/daemon"
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
+	"github.com/aptx-health/agent-minder/internal/runtime"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 	"github.com/google/uuid"
@@ -50,6 +51,7 @@ var (
 	flagBaseBranch  string
 	flagSkipLabel   string
 	flagAgent       string
+	flagRuntime     string
 	flagDaemon      bool
 	flagDeployID    string
 )
@@ -71,6 +73,8 @@ func init() {
 	deployCmd.Flags().StringVar(&flagBaseBranch, "base-branch", "", "Base branch (default: auto-detect)")
 	deployCmd.Flags().StringVar(&flagSkipLabel, "skip-label", "no-agent", "Label to skip issues")
 	deployCmd.Flags().StringVar(&flagAgent, "agent", "autopilot", "Agent type to use")
+	deployCmd.Flags().StringVar(&flagRuntime, "runtime", runtime.DefaultName,
+		fmt.Sprintf("Doer runtime (one of %v)", runtime.KnownNames()))
 
 	// Hidden flags for daemon re-exec.
 	deployCmd.Flags().BoolVar(&flagDaemon, "daemon", false, "")
@@ -80,6 +84,13 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	// Validate runtime selection up-front so a typo fails before we touch the
+	// filesystem, the DB, or GitHub. The daemon re-exec path also runs through
+	// this check because it re-parses the same flag.
+	if err := runtime.Validate(flagRuntime); err != nil {
+		return err
+	}
+
 	// If this is a daemon re-exec, run the daemon directly.
 	if flagDaemon && flagDeployID != "" {
 		return runDaemon(flagDeployID)
@@ -245,6 +256,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	daemonArgs = append(daemonArgs, "--total-budget", fmt.Sprintf("%.2f", flagTotalBudget))
 	daemonArgs = append(daemonArgs, "--model", flagModel)
 	daemonArgs = append(daemonArgs, "--agent", flagAgent)
+	daemonArgs = append(daemonArgs, "--runtime", flagRuntime)
 	daemonArgs = append(daemonArgs, "--base-branch", baseBranch)
 	if flagAutoMerge {
 		daemonArgs = append(daemonArgs, "--auto-merge")
