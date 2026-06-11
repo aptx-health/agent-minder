@@ -16,6 +16,7 @@ import (
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	"github.com/aptx-health/agent-minder/internal/runtime"
+	"github.com/aptx-health/agent-minder/internal/runtime/claudecode"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 	"github.com/google/uuid"
@@ -301,6 +302,11 @@ func runForeground(deployID string) error {
 
 	// Create supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
+	if rt, err := selectRuntime(flagRuntime); err != nil {
+		return err
+	} else if rt != nil {
+		sup.SetRuntime(rt)
+	}
 
 	// Load jobs.yaml scheduler and trigger routes.
 	var sched *scheduler.Scheduler
@@ -419,6 +425,11 @@ func runDaemon(deployID string) error {
 	}
 
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
+	if rt, err := selectRuntime(flagRuntime); err != nil {
+		return err
+	} else if rt != nil {
+		sup.SetRuntime(rt)
+	}
 
 	// Load jobs.yaml scheduler if available.
 	var sched *scheduler.Scheduler
@@ -546,5 +557,24 @@ func printStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute
 	}
 	if len(routes) == 0 && len(schedules) == 0 && (!deploy.WatchFilter.Valid || deploy.WatchFilter.String == "") {
 		fmt.Println("  (none)")
+	}
+}
+
+// selectRuntime returns a concrete AgentRuntime for the given --runtime value.
+// The default "claude-code" maps to claudecode.New(); unknown values return
+// an error (Validate is also called earlier at flag-parse time, but keep this
+// defensive in case selectRuntime is reached via a future config path).
+func selectRuntime(name string) (runtime.AgentRuntime, error) {
+	if name == "" {
+		name = runtime.DefaultName
+	}
+	if err := runtime.Validate(name); err != nil {
+		return nil, err
+	}
+	switch name {
+	case runtime.NameClaudeCode:
+		return claudecode.New(), nil
+	default:
+		return nil, fmt.Errorf("runtime %q is not yet implemented", name)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
 	"github.com/aptx-health/agent-minder/internal/reaper"
+	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
 )
 
 // debugLogger is a structured JSON logger for supervisor tracing.
@@ -117,6 +118,24 @@ type Supervisor struct {
 	ghClientFactory    func(token string) *ghpkg.Client
 	fetchFn            func() error        // overridable for tests
 	sparedLogAt        map[int64]time.Time // throttle "spared by reaper" events per job
+	runtime            runtimepkg.AgentRuntime
+}
+
+// SetRuntime selects the AgentRuntime that DefaultJobManager uses to execute
+// stages. Passing nil reverts to the legacy Claude Code in-process exec path,
+// which is what tests rely on. Production callers (cmd/deploy) inject a
+// concrete runtime (typically claudecode.New()).
+func (s *Supervisor) SetRuntime(rt runtimepkg.AgentRuntime) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runtime = rt
+}
+
+// Runtime returns the configured AgentRuntime, or nil if none was set.
+func (s *Supervisor) Runtime() runtimepkg.AgentRuntime {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runtime
 }
 
 // New creates a new Supervisor.
