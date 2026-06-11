@@ -14,6 +14,7 @@ import (
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
 	"github.com/aptx-health/agent-minder/internal/lesson"
+	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
 )
 
 // JobManager is the interface that all agent types implement.
@@ -524,11 +525,22 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 				// Resume the same session with --resume.
 				if result.sessionID != "" {
-					resumeArgs := []string{"--resume", result.sessionID, "--output-format", "stream-json"}
-					if sc.Deploy.MaxTurns > 0 {
-						resumeArgs = append(resumeArgs, "--max-turns", fmt.Sprintf("%d", sc.Deploy.MaxTurns))
+					if rt := sc.sup.Runtime(); rt != nil {
+						sink := newLiveStatusSink(sc.sup, sc.Job.ID)
+						_, err := rt.Resume(ctx, result.sessionID, sink, logFile)
+						if err == runtimepkg.ErrNotSupported {
+							// Runtime does not support session resume — fall
+							// back to a fresh stage run.
+							result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
+							continue
+						}
+					} else {
+						resumeArgs := []string{"--resume", result.sessionID, "--output-format", "stream-json"}
+						if sc.Deploy.MaxTurns > 0 {
+							resumeArgs = append(resumeArgs, "--max-turns", fmt.Sprintf("%d", sc.Deploy.MaxTurns))
+						}
+						_, _ = sc.RunClaudeAgent(ctx, resumeArgs, logFile)
 					}
-					_, _ = sc.RunClaudeAgent(ctx, resumeArgs, logFile)
 				} else {
 					// No session ID — re-run the full stage.
 					result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
@@ -622,6 +634,12 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 }
 
 // executeCodeStage runs a code/generic agent and detects PR outcome.
+//
+// When a runtime is configured on the supervisor, the stage is dispatched
+// through AgentRuntime.Run + ParseResult so live status, classification, and
+// bail extraction all flow through the runtime contract. Otherwise the
+// legacy Claude Code in-process exec path is used (preserved for the
+// existing test harness which stubs RunClaudeAgentFn).
 func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageContract, agentName string, logFile *os.File, feedbackPrompt string) stageResult {
 	sc := m.sc
 	job := sc.Job
@@ -632,20 +650,37 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 		prompt += "\n\n" + feedbackPrompt
 	}
 	lessonsPrompt := sc.SelectAndRecordLessons()
-	args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, lessonsPrompt)
 
 	debugLog("stage execute", "stage", stage.Name, "agent", agentName, "label", sc.JobLabel())
 
-	exitCode, _ := sc.RunClaudeAgent(ctx, args, logFile)
+	var (
+		exitCode   int
+		result     *AgentResult
+		usageLimit bool
+		sessionID  string
+	)
 
-	// Check for usage limit — detected by scanner from stream events,
-	// or from the result/error text after process exit.
-	result, _ := parseAgentLog(sc.LogPath)
-	if sc.HitUsageLimit() || isUsageLimitError(result) {
-		sessionID := ""
+	if rt := sc.sup.Runtime(); rt != nil {
+		inv := runtimeInvocationFor(sc, agentName, prompt, lessonsPrompt)
+		exit, runResult, sink, _ := sc.runStageThroughRuntime(ctx, inv, logFile)
+		exitCode = exit
+		result = adaptRuntimeResult(runResult)
+		usageLimit = sink.usageLimit || sc.HitUsageLimit() || isUsageLimitError(result)
+		if runResult != nil {
+			sessionID = runResult.SessionID
+		}
+	} else {
+		args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, lessonsPrompt)
+		exit, _ := sc.RunClaudeAgent(ctx, args, logFile)
+		exitCode = exit
+		result, _ = parseAgentLog(sc.LogPath)
+		usageLimit = sc.HitUsageLimit() || isUsageLimitError(result)
 		if result != nil {
 			sessionID = result.SessionID
 		}
+	}
+
+	if usageLimit {
 		return stageResult{usageLimit: true, sessionID: sessionID}
 	}
 
@@ -771,9 +806,13 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
 	prompt := renderReviewContext(ctx, sc)
-	args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, "")
-
-	_, _ = sc.RunClaudeAgent(ctx, args, logFile)
+	if rt := sc.sup.Runtime(); rt != nil {
+		inv := runtimeInvocationFor(sc, agentName, prompt, "")
+		_, _, _, _ = sc.runStageThroughRuntime(ctx, inv, logFile)
+	} else {
+		args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, "")
+		_, _ = sc.RunClaudeAgent(ctx, args, logFile)
+	}
 
 	// Extract structured assessment.
 	assessment := extractReviewAssessmentFromLog(ctx, sc.LogPath, job, sc.sup, sc.Hooks)
