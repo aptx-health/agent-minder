@@ -16,7 +16,9 @@ import (
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	"github.com/aptx-health/agent-minder/internal/runtime"
-	"github.com/aptx-health/agent-minder/internal/runtime/claudecode"
+	// Side-effect import: register the claude-code runtime factory in the
+	// runtime registry so runtime.Lookup("claude-code") resolves.
+	_ "github.com/aptx-health/agent-minder/internal/runtime/claudecode"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 	"github.com/google/uuid"
@@ -561,20 +563,11 @@ func printStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute
 }
 
 // selectRuntime returns a concrete AgentRuntime for the given --runtime value.
-// The default "claude-code" maps to claudecode.New(); unknown values return
-// an error (Validate is also called earlier at flag-parse time, but keep this
-// defensive in case selectRuntime is reached via a future config path).
+// Delegates to the runtime registry; Validate is also called at flag-parse
+// time, so this path is defensive against future config-driven selection.
 func selectRuntime(name string) (runtime.AgentRuntime, error) {
 	if name == "" {
 		name = runtime.DefaultName
 	}
-	if err := runtime.Validate(name); err != nil {
-		return nil, err
-	}
-	switch name {
-	case runtime.NameClaudeCode:
-		return claudecode.New(), nil
-	default:
-		return nil, fmt.Errorf("runtime %q is not yet implemented", name)
-	}
+	return runtime.Lookup(name)
 }

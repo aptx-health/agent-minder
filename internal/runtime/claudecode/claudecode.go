@@ -38,6 +38,10 @@ type ClaudeRuntime struct {
 // New constructs a ClaudeRuntime with default settings.
 func New() *ClaudeRuntime { return &ClaudeRuntime{} }
 
+func init() {
+	runtime.Register(Name, func() runtime.AgentRuntime { return New() })
+}
+
 // Name returns the runtime identifier.
 func (c *ClaudeRuntime) Name() string { return Name }
 

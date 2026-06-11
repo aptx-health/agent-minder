@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -46,10 +45,13 @@ type stageResult struct {
 }
 
 // TestHooks allows tests to override SlotContext methods that call external
-// systems (Claude CLI, git, GitHub API). When a hook is non-nil, the
-// corresponding method uses it instead of the real implementation.
+// systems (git, GitHub API, review extraction, runtime execution). Hooks are
+// nil in production. Tests substitute the runtime execution with RunStageFn
+// rather than overriding individual claude-CLI plumbing — this keeps the
+// supervisor-side translation layer (invocation building, adapter, live status)
+// under test alongside the surrounding pipeline logic.
 type TestHooks struct {
-	RunClaudeAgentFn          func(ctx context.Context, args []string, logFile *os.File) (int, error)
+	RunStageFn                func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (exitCode int, result *runtimepkg.Result, usageLimit bool, err error)
 	DetectPRFn                func(ctx context.Context) int
 	SetupWorktreeFn           func() error
 	EnsureAgentDefFn          func(name AgentName) (AgentDefSource, error)
@@ -151,59 +153,6 @@ func (sc *SlotContext) OpenLogFile(appendMode bool) (*os.File, error) {
 		return os.OpenFile(sc.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	}
 	return os.Create(sc.LogPath)
-}
-
-// RunClaudeAgent executes a claude agent process and streams output.
-// Returns the exit code and any error.
-func (sc *SlotContext) RunClaudeAgent(ctx context.Context, args []string, logFile *os.File) (int, error) {
-	if sc.Hooks != nil && sc.Hooks.RunClaudeAgentFn != nil {
-		return sc.Hooks.RunClaudeAgentFn(ctx, args, logFile)
-	}
-
-	cmd := exec.CommandContext(ctx, "claude", args...)
-	// Use worktree if set up, otherwise fall back to the repo directory.
-	// Non-worktree agents (output: issue, comment) run from the repo root.
-	cmd.Dir = sc.WorktreePath
-	if sc.WorktreePath == "" || !dirExists(sc.WorktreePath) {
-		cmd.Dir = sc.RepoDir
-	}
-	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(), "GITHUB_TOKEN="+sc.GHToken)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return 0, fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	// Register cmd for cancellation.
-	sc.sup.mu.Lock()
-	if rs, ok := sc.sup.running[sc.Job.ID]; ok {
-		rs.cmd = cmd
-	}
-	sc.sup.mu.Unlock()
-
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("start: %w", err)
-	}
-
-	// Scanner goroutine for live status.
-	scanDone := make(chan struct{})
-	go func() {
-		defer close(scanDone)
-		scanStream(stdout, logFile, sc.Job.ID, sc.sup)
-	}()
-
-	err = cmd.Wait()
-	<-scanDone
-
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
-
-	return exitCode, nil
 }
 
 // DetectPR looks for a PR in the log or via GitHub API.
@@ -523,33 +472,24 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 				sc.EmitEvent("info", fmt.Sprintf("Resuming %s after usage limit wait (session: %s)",
 					sc.JobLabel(), result.sessionID))
 
-				// Resume the same session with --resume.
-				if result.sessionID != "" {
-					if rt := sc.sup.Runtime(); rt != nil {
-						sink := newLiveStatusSink(sc.sup, sc.Job.ID)
-						_, err := rt.Resume(ctx, result.sessionID, sink, logFile)
-						if err == runtimepkg.ErrNotSupported {
-							// Runtime does not support session resume — fall
-							// back to a fresh stage run.
-							result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
-							continue
-						}
-					} else {
-						resumeArgs := []string{"--resume", result.sessionID, "--output-format", "stream-json"}
-						if sc.Deploy.MaxTurns > 0 {
-							resumeArgs = append(resumeArgs, "--max-turns", fmt.Sprintf("%d", sc.Deploy.MaxTurns))
-						}
-						_, _ = sc.RunClaudeAgent(ctx, resumeArgs, logFile)
-					}
-				} else {
-					// No session ID — re-run the full stage.
+				// Resume the same session with the runtime; on ErrNotSupported
+				// (or when no session ID is available) fall back to a fresh
+				// stage run.
+				rt := sc.sup.Runtime()
+				if result.sessionID == "" || rt == nil {
+					result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
+					continue
+				}
+				sink := newLiveStatusSink(sc.sup, sc.Job.ID)
+				if _, err := rt.Resume(ctx, result.sessionID, sink, logFile); err == runtimepkg.ErrNotSupported {
 					result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
 					continue
 				}
 
 				// Re-check: did the resumed session also hit a limit?
-				resumeResult, _ := parseAgentLog(sc.LogPath)
-				if sc.HitUsageLimit() || isUsageLimitError(resumeResult) {
+				resumeResult, _ := rt.ParseResult(sc.LogPath)
+				adapted := adaptRuntimeResult(resumeResult)
+				if sc.HitUsageLimit() || isUsageLimitError(adapted) {
 					sessionID := ""
 					if resumeResult != nil {
 						sessionID = resumeResult.SessionID
@@ -633,13 +573,10 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	return m.finalizePipeline(ctx, lastReviewRisk)
 }
 
-// executeCodeStage runs a code/generic agent and detects PR outcome.
-//
-// When a runtime is configured on the supervisor, the stage is dispatched
-// through AgentRuntime.Run + ParseResult so live status, classification, and
-// bail extraction all flow through the runtime contract. Otherwise the
-// legacy Claude Code in-process exec path is used (preserved for the
-// existing test harness which stubs RunClaudeAgentFn).
+// executeCodeStage runs a code/generic agent through the configured runtime
+// and detects the PR outcome. The runtime owns process execution, stream
+// parsing, classification, and bail extraction; the supervisor only adapts
+// results to its legacy structs and routes the stageResult.
 func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageContract, agentName string, logFile *os.File, feedbackPrompt string) stageResult {
 	sc := m.sc
 	job := sc.Job
@@ -653,31 +590,20 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 
 	debugLog("stage execute", "stage", stage.Name, "agent", agentName, "label", sc.JobLabel())
 
-	var (
-		exitCode   int
-		result     *AgentResult
-		usageLimit bool
-		sessionID  string
-	)
+	rt := sc.sup.Runtime()
+	runtimeAvailable := rt != nil || (sc.Hooks != nil && sc.Hooks.RunStageFn != nil)
+	if !runtimeAvailable {
+		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for %s — bailing", sc.JobLabel()))
+		return stageResult{success: false, bailed: true}
+	}
 
-	if rt := sc.sup.Runtime(); rt != nil {
-		inv := runtimeInvocationFor(sc, agentName, prompt, lessonsPrompt)
-		exit, runResult, sink, _ := sc.runStageThroughRuntime(ctx, inv, logFile)
-		exitCode = exit
-		result = adaptRuntimeResult(runResult)
-		usageLimit = sink.usageLimit || sc.HitUsageLimit() || isUsageLimitError(result)
-		if runResult != nil {
-			sessionID = runResult.SessionID
-		}
-	} else {
-		args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, lessonsPrompt)
-		exit, _ := sc.RunClaudeAgent(ctx, args, logFile)
-		exitCode = exit
-		result, _ = parseAgentLog(sc.LogPath)
-		usageLimit = sc.HitUsageLimit() || isUsageLimitError(result)
-		if result != nil {
-			sessionID = result.SessionID
-		}
+	inv := runtimeInvocationFor(sc, agentName, prompt, lessonsPrompt)
+	exitCode, runResult, sink, _ := sc.runStageThroughRuntime(ctx, inv, logFile)
+	result := adaptRuntimeResult(runResult)
+	usageLimit := sink.usageLimit || sc.HitUsageLimit() || isUsageLimitError(result)
+	sessionID := ""
+	if runResult != nil {
+		sessionID = runResult.SessionID
 	}
 
 	if usageLimit {
@@ -692,29 +618,25 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 			job.PRNumber = sql.NullInt64{Int64: int64(prNum), Valid: true}
 			return stageResult{success: true, prDetected: prNum}
 		}
-	} else {
-		// Non-PR agents: if exit code is 0, consider it success.
-		if exitCode == 0 {
-			return stageResult{success: true}
-		}
+	} else if exitCode == 0 {
+		return stageResult{success: true}
 	}
 
-	// No PR / non-zero exit — classify.
+	// No PR / non-zero exit — classify via the runtime when available.
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
-	status, _, _ := classifyOutcome(result, maxTurns, maxBudget)
-
-	// Extract bail report if present.
-	resultText := ""
-	if result != nil {
-		resultText = result.Result
+	var outcome runtimepkg.Outcome
+	var bailReport *runtimepkg.BailReport
+	if rt != nil {
+		outcome = rt.ClassifyOutcome(runResult, runtimepkg.Limits{MaxTurns: maxTurns, MaxBudgetUSD: maxBudget})
+		bailReport = rt.ExtractBailReport(runResult, sc.LogPath)
 	}
-	m.handleBailReport(ctx, resultText)
+	m.handleBailReport(ctx, bailReport)
 
 	return stageResult{
 		success:   false,
-		bailed:    status == "failed" || (result != nil && extractBailReport(resultText) != nil),
-		exhausted: status == "failed" && result != nil && (result.NumTurns >= maxTurns || result.TotalCost >= maxBudget*0.95),
+		bailed:    outcome.Status == "failed" || bailReport != nil,
+		exhausted: outcome.Status == "failed" && result != nil && (result.NumTurns >= maxTurns || result.TotalCost >= maxBudget*0.95),
 	}
 }
 
@@ -806,13 +728,12 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
 	prompt := renderReviewContext(ctx, sc)
-	if rt := sc.sup.Runtime(); rt != nil {
-		inv := runtimeInvocationFor(sc, agentName, prompt, "")
-		_, _, _, _ = sc.runStageThroughRuntime(ctx, inv, logFile)
-	} else {
-		args := buildAgentArgs(job, sc.Deploy, agentName, sc.AllowedTools, prompt, "")
-		_, _ = sc.RunClaudeAgent(ctx, args, logFile)
+	if sc.sup.Runtime() == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
+		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for review of %s", sc.JobLabel()))
+		return stageResult{success: false}
 	}
+	inv := runtimeInvocationFor(sc, agentName, prompt, "")
+	_, _, _, _ = sc.runStageThroughRuntime(ctx, inv, logFile)
 
 	// Extract structured assessment.
 	assessment := extractReviewAssessmentFromLog(ctx, sc.LogPath, job, sc.sup, sc.Hooks)
@@ -899,10 +820,16 @@ func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
 		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
 	}
 
-	result, _ := parseAgentLog(sc.LogPath)
+	rt := sc.sup.Runtime()
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
-	_, reason, detail := classifyOutcome(result, maxTurns, maxBudget)
+	reason, detail := "", ""
+	if rt != nil {
+		runResult, _ := rt.ParseResult(sc.LogPath)
+		outcome := rt.ClassifyOutcome(runResult, runtimepkg.Limits{MaxTurns: maxTurns, MaxBudgetUSD: maxBudget})
+		reason = outcome.FailureReason
+		detail = outcome.FailureDetail
+	}
 
 	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
 	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s", sc.JobLabel()))
@@ -1002,7 +929,7 @@ func NewTestSupervisor(store *db.Store, deploy *db.Deployment, repoDir string) *
 }
 
 // RegisterTestJob registers a job in the supervisor's running map so that
-// EmitEvent, WasStoppedByUser, and RunClaudeAgent can reference it.
+// EmitEvent and WasStoppedByUser can reference it.
 func (s *Supervisor) RegisterTestJob(job *db.Job) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

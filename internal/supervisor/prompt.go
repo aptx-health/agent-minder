@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
@@ -253,15 +251,6 @@ func resolveAllowedTools(repoDir string) []string {
 	return f.Permissions.AllowedTools
 }
 
-// toCliAllowedTools converts tool patterns to comma-separated CLI format.
-func toCliAllowedTools(tools []string) string {
-	converted := make([]string, len(tools))
-	for i, t := range tools {
-		converted[i] = onboarding.ToCliToolPattern(t)
-	}
-	return strings.Join(converted, ",")
-}
-
 // resolveTestCommand reads from onboarding.yaml or auto-detects.
 func resolveTestCommand(repoDir string) string {
 	f, err := onboarding.Parse(onboarding.FilePath(repoDir))
@@ -318,35 +307,4 @@ func resolveTimeout(repoDir string, kind string) string {
 	default:
 		return "5m"
 	}
-}
-
-// buildAgentArgs constructs CLI arguments for any agent with pre-assembled prompt.
-func buildAgentArgs(job *db.Job, deploy *db.Deployment, agentName string, allowedTools []string, prompt, lessonsPrompt string) []string {
-	maxTurns := job.EffectiveMaxTurns(deploy)
-	maxBudget := job.EffectiveMaxBudget(deploy)
-
-	// For reviewer, use deploy-level review overrides if set.
-	if agentName == "reviewer" {
-		if deploy.ReviewMaxTurns.Valid {
-			maxTurns = int(deploy.ReviewMaxTurns.Int64)
-		}
-		if deploy.ReviewMaxBudget.Valid {
-			maxBudget = deploy.ReviewMaxBudget.Float64
-		}
-	}
-
-	args := []string{
-		"--agent", agentName,
-		"-p",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--max-turns", strconv.Itoa(maxTurns),
-		"--max-budget-usd", fmt.Sprintf("%.2f", maxBudget),
-		"--allowedTools", toCliAllowedTools(allowedTools),
-	}
-	if lessonsPrompt != "" {
-		args = append(args, "--append-system-prompt", lessonsPrompt)
-	}
-	args = append(args, "--", prompt)
-	return args
 }
