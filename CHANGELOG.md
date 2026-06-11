@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **ClaudeRuntime adapter**: New `internal/runtime/claudecode` package implements the `runtime.AgentRuntime` contract for the Claude Code CLI. Encapsulates command-arg construction (`--agent`, `-p`, `--output-format stream-json`, `--max-turns`, `--max-budget-usd`, `--allowedTools`, `--append-system-prompt`), `.claude/agents/<name>.md` materialization, stream-json scanning with normalized `EventSink` callbacks (tool start/end, assistant step, usage limit), result-event parsing into `runtime.Result`, outcome classification against `runtime.Limits`, and `<bail-report>` extraction from final text with raw-log fallback. Session resume via `--resume`. Not yet wired into the supervisor (see #502 / #504). (#501)
 - **PR build artifacts in CI**: CI workflow now builds the `minder` binary on `ubuntu-latest` and `macos-latest`, uploading per-OS artifacts on pull request builds via `actions/upload-artifact@v4` so reviewers can download a binary without compiling locally. Retention is 14 days. (#477)
 - **Weekly cron schedules for proactive agents**: Built-in agent definitions now include default cron schedules (weekly dependency checks, security scans, doc updates) (#431)
 - **Repo-level agent defs and overnight cron jobs**: Agent definitions can be stored in repos at `.claude/agents/` and discovered at deploy time; overnight cron scheduling for proactive agents (#375)
