@@ -832,7 +832,19 @@ func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
 		detail = outcome.FailureDetail
 	}
 
-	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
+	// Only write classifier output when it produced a non-empty reason.
+	// handleBailReport (called earlier in the bail path) may have already
+	// written authoritative failure_reason/failure_detail from a structured
+	// <bail-report> block; an unconditional UpdateJobFailure here would
+	// clobber those fields with empty strings when ClassifyOutcome has
+	// nothing to report (e.g. clean exit with no max_turns/max_budget/
+	// is_error signal). When classifier has nothing, fall back to just
+	// marking the job bailed so status still transitions. See #517.
+	if reason != "" {
+		_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
+	} else {
+		_ = sc.Store.CompleteJob(job.ID, db.StatusBailed)
+	}
 	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s", sc.JobLabel()))
 	sc.RecordLessonOutcome(false)
 
