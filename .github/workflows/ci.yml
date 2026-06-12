@@ -49,3 +49,19 @@ jobs:
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.11.3
+
+  integration-tests:
+    # Surface the supervisor scenario suite as its own visible CI check.
+    # The scenarios lock in DB-final-state expectations for the supervisor
+    # seams that pure unit tests cannot observe (see #517 / #519). Kept fast
+    # so it can also run in the pre-push lefthook.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run supervisor scenario suite
+        run: make integration
