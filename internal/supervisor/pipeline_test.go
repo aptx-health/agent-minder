@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
+	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
 )
 
 // --- Test helpers ---
@@ -86,13 +87,13 @@ type pipelineHarness struct {
 	sup      *Supervisor
 	logDir   string
 	hooks    *TestHooks
-	stageLog []stageCall // records each RunClaudeAgent invocation
+	stageLog []stageCall // records each runtime stage invocation
 	mu       sync.Mutex
 }
 
 type stageCall struct {
-	Agent string // agent name from --agent arg
-	Args  []string
+	Agent string // agent name from the runtime invocation
+	Inv   runtimepkg.Invocation
 }
 
 func newHarness(t *testing.T, opts ...func(*db.Deployment)) *pipelineHarness {
@@ -117,13 +118,12 @@ func newHarness(t *testing.T, opts ...func(*db.Deployment)) *pipelineHarness {
 		EnsureAgentDefFn: func(name AgentName) (AgentDefSource, error) {
 			return AgentDefBuiltIn, nil // always succeed
 		},
-		RunClaudeAgentFn: func(ctx context.Context, args []string, logFile *os.File) (int, error) {
+		RunStageFn: func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
 			// Default: succeed immediately.
-			agent := extractAgentArg(args)
 			h.mu.Lock()
-			h.stageLog = append(h.stageLog, stageCall{Agent: agent, Args: args})
+			h.stageLog = append(h.stageLog, stageCall{Agent: inv.AgentName, Inv: inv})
 			h.mu.Unlock()
-			return 0, nil
+			return 0, &runtimepkg.Result{}, false, nil
 		},
 		DetectPRFn: func(ctx context.Context) int {
 			return 0 // default: no PR detected
@@ -176,16 +176,6 @@ func (h *pipelineHarness) stages() []stageCall {
 // events returns all buffered supervisor events.
 func (h *pipelineHarness) events() []Event {
 	return h.sup.DrainEvents()
-}
-
-// extractAgentArg finds the --agent value from CLI args.
-func extractAgentArg(args []string) string {
-	for i, a := range args {
-		if a == "--agent" && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
 }
 
 // hasEvent returns true if any event matches the given type and contains substr.
@@ -307,12 +297,11 @@ func TestPipeline_CodeBailsNoReview(t *testing.T) {
 	})
 
 	// Mock: code stage fails (non-zero exit, no PR).
-	h.hooks.RunClaudeAgentFn = func(ctx context.Context, args []string, logFile *os.File) (int, error) {
-		agent := extractAgentArg(args)
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
 		h.mu.Lock()
-		h.stageLog = append(h.stageLog, stageCall{Agent: agent, Args: args})
+		h.stageLog = append(h.stageLog, stageCall{Agent: inv.AgentName, Inv: inv})
 		h.mu.Unlock()
-		return 1, nil // non-zero exit
+		return 1, &runtimepkg.Result{}, false, nil
 	}
 	h.hooks.DetectPRFn = func(ctx context.Context) int {
 		return 0 // no PR
@@ -359,17 +348,16 @@ func TestPipeline_ReviewSuspectRetry(t *testing.T) {
 	// Track how many times each stage runs.
 	var codeRuns, reviewRuns atomic.Int32
 
-	h.hooks.RunClaudeAgentFn = func(ctx context.Context, args []string, logFile *os.File) (int, error) {
-		agent := extractAgentArg(args)
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
 		h.mu.Lock()
-		h.stageLog = append(h.stageLog, stageCall{Agent: agent, Args: args})
+		h.stageLog = append(h.stageLog, stageCall{Agent: inv.AgentName, Inv: inv})
 		h.mu.Unlock()
-		if agent == "reviewer" {
+		if inv.AgentName == "reviewer" {
 			reviewRuns.Add(1)
 		} else {
 			codeRuns.Add(1)
 		}
-		return 0, nil
+		return 0, &runtimepkg.Result{}, false, nil
 	}
 
 	// First review: suspect with issues → triggers retry.
@@ -411,11 +399,10 @@ func TestPipeline_ReviewSuspectRetry(t *testing.T) {
 	if len(stages) < 3 {
 		t.Fatalf("expected at least 3 stage calls, got %d", len(stages))
 	}
-	// The retry code stage should have "Review Feedback" in its prompt (last arg).
-	retryArgs := stages[2].Args
-	lastArg := retryArgs[len(retryArgs)-1]
-	if !strContains(lastArg, "Review Feedback") {
-		t.Errorf("retry code stage prompt should contain 'Review Feedback', got: %s", truncate(lastArg, 200))
+	// The retry code stage should have "Review Feedback" in its prompt.
+	retryPrompt := stages[2].Inv.Prompt
+	if !strContains(retryPrompt, "Review Feedback") {
+		t.Errorf("retry code stage prompt should contain 'Review Feedback', got: %s", truncate(retryPrompt, 200))
 	}
 }
 
@@ -560,10 +547,9 @@ func TestPipeline_ConcurrentJobs(t *testing.T) {
 		return &TestHooks{
 			SetupWorktreeFn:  func() error { return nil },
 			EnsureAgentDefFn: func(name AgentName) (AgentDefSource, error) { return AgentDefBuiltIn, nil },
-			RunClaudeAgentFn: func(ctx context.Context, args []string, logFile *os.File) (int, error) {
-				agent := extractAgentArg(args)
+			RunStageFn: func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
 				mu.Lock()
-				*stages = append(*stages, stageCall{Agent: agent})
+				*stages = append(*stages, stageCall{Agent: inv.AgentName})
 				mu.Unlock()
 
 				if job.ID == jobA.ID {
@@ -572,11 +558,11 @@ func TestPipeline_ConcurrentJobs(t *testing.T) {
 					select {
 					case <-bCodeStarted:
 					case <-ctx.Done():
-						return 1, ctx.Err()
+						return 1, &runtimepkg.Result{}, false, ctx.Err()
 					}
-					return 1, nil // bail
+					return 1, &runtimepkg.Result{}, false, nil // bail
 				}
-				if job.ID == jobB.ID && agent != "reviewer" {
+				if job.ID == jobB.ID && inv.AgentName != "reviewer" {
 					// Job B code stage: signal that B has started.
 					select {
 					case <-aCanFinish: // wait for A to be running
@@ -584,7 +570,7 @@ func TestPipeline_ConcurrentJobs(t *testing.T) {
 					}
 					close(bCodeStarted)
 				}
-				return 0, nil
+				return 0, &runtimepkg.Result{}, false, nil
 			},
 			DetectPRFn: func(ctx context.Context) int {
 				if job.ID == jobB.ID {
@@ -711,7 +697,7 @@ func TestPipeline_ReviewSkipOnNoPR(t *testing.T) {
 	// Code stage runs the agent; review stage should see no PR and skip gracefully
 	// (executeReviewStage returns success when PRNumber is not valid).
 	if len(stages) != 1 {
-		// Only code stage calls RunClaudeAgent; review stage exits early since no PR.
+		// Only code stage runs through the runtime; review stage exits early since no PR.
 		t.Logf("stages: %+v", stages)
 	}
 
@@ -777,15 +763,14 @@ func TestPipeline_StageNamedReviewWithNonReviewerAgent(t *testing.T) {
 	})
 
 	var callOrder []string
-	h.hooks.RunClaudeAgentFn = func(ctx context.Context, args []string, logFile *os.File) (int, error) {
-		agent := extractAgentArg(args)
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
 		h.mu.Lock()
-		callOrder = append(callOrder, agent)
-		h.stageLog = append(h.stageLog, stageCall{Agent: agent, Args: args})
+		callOrder = append(callOrder, inv.AgentName)
+		h.stageLog = append(h.stageLog, stageCall{Agent: inv.AgentName, Inv: inv})
 		h.mu.Unlock()
 		// Simulate some work time so timestamps differ.
 		time.Sleep(10 * time.Millisecond)
-		return 0, nil
+		return 0, &runtimepkg.Result{}, false, nil
 	}
 
 	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
@@ -816,7 +801,7 @@ func TestPipeline_StageNamedReviewWithNonReviewerAgent(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	// Both stages should have called RunClaudeAgent.
+	// Both stages should have run through the runtime.
 	stages := h.stages()
 	if len(stages) < 2 {
 		t.Fatalf("expected 2 agent invocations, got %d: %+v", len(stages), stages)

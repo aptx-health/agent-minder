@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -77,10 +76,9 @@ type RunInfo struct {
 type runState struct {
 	job           *db.Job
 	startedAt     time.Time
-	cmd           *exec.Cmd
 	cancelFunc    context.CancelFunc
 	stoppedByUser bool
-	hitUsageLimit bool // set by scanner when rate_limit/billing_error detected
+	hitUsageLimit bool // set by the runtime's EventSink on usage-limit events
 	liveStatus    LiveStatus
 }
 

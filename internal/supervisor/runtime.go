@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 
 	"github.com/aptx-health/agent-minder/internal/agentutil"
 	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
@@ -136,14 +137,61 @@ func adaptRuntimeResult(r *runtimepkg.Result) *agentutil.AgentResult {
 // Returns the parsed result, sink (so callers can read usage-limit), and exit
 // code. ParseResult / ClassifyOutcome / ExtractBailReport are intentionally
 // left to the caller, which already has the limits + result context.
+//
+// When SlotContext.Hooks.RunStageFn is set (tests only), the runtime call is
+// short-circuited: the hook supplies the exit code + parsed result + usage-
+// limit flag directly. The sink is still constructed so callers can read
+// usageLimit uniformly.
 func (sc *SlotContext) runStageThroughRuntime(
 	ctx context.Context,
 	inv runtimepkg.Invocation,
 	logFile io.Writer,
 ) (int, *runtimepkg.Result, *liveStatusSink, error) {
-	rt := sc.sup.Runtime()
 	sink := newLiveStatusSink(sc.sup, sc.Job.ID)
+	if sc.Hooks != nil && sc.Hooks.RunStageFn != nil {
+		f, ok := logFile.(*os.File)
+		if !ok {
+			f = nil
+		}
+		exit, result, usageLimit, err := sc.Hooks.RunStageFn(ctx, inv, f)
+		if usageLimit {
+			sink.OnUsageLimit()
+		}
+		return exit, result, sink, err
+	}
+	rt := sc.sup.Runtime()
 	exit, err := rt.Run(ctx, inv, sink, logFile)
 	result, _ := rt.ParseResult(sc.LogPath)
 	return exit, result, sink, err
+}
+
+// resumeThroughRuntime drives the runtime's session-resume path during usage-
+// limit recovery. Returns the parsed result, whether the resumed session also
+// hit a limit, and an error (ErrNotSupported when the runtime cannot resume).
+//
+// Tests may inject SlotContext.Hooks.ResumeFn to skip the actual runtime call
+// and supply a synthetic result.
+func (sc *SlotContext) resumeThroughRuntime(
+	ctx context.Context,
+	sessionID string,
+	logFile io.Writer,
+) (*runtimepkg.Result, bool, error) {
+	if sc.Hooks != nil && sc.Hooks.ResumeFn != nil {
+		f, ok := logFile.(*os.File)
+		if !ok {
+			f = nil
+		}
+		result, usageLimit, err := sc.Hooks.ResumeFn(ctx, sessionID, f)
+		return result, usageLimit, err
+	}
+	rt := sc.sup.Runtime()
+	if rt == nil {
+		return nil, false, runtimepkg.ErrNotSupported
+	}
+	sink := newLiveStatusSink(sc.sup, sc.Job.ID)
+	if _, err := rt.Resume(ctx, sessionID, sink, logFile); err != nil {
+		return nil, sink.usageLimit, err
+	}
+	result, _ := rt.ParseResult(sc.LogPath)
+	return result, sink.usageLimit, nil
 }
