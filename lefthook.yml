@@ -14,3 +14,11 @@ pre-commit:
           echo "$UNFMTED"
           exit 1
         fi
+
+# pre-push runs the supervisor scenario integration suite. Locks in
+# DB-final-state expectations for the supervisor seams that unit tests cannot
+# observe (see #517 / #519). Fast enough to run on every push.
+pre-push:
+  commands:
+    integration:
+      run: make integration
