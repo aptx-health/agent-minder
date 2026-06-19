@@ -259,6 +259,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 |------|---------|-------------|
 | `--repo <dir>` | `.` | Repository directory |
 | `--agent <name>` | `autopilot` | Agent type to use |
+| `--runtime <name>` | `claude-code` | Doer runtime to execute agents (currently only `claude-code` is implemented) |
 | `--watch <filter>` | — | Watch for issues (`label:<name>` or `milestone:<name>`) |
 | `--serve <addr>` | — | Start HTTP API (e.g., `:7749`) |
 | `--foreground` | — | Don't daemonize |
@@ -335,8 +336,9 @@ internal/
   supervisor/                # Job manager, context providers, contracts, dedup, review, bail, templates
   scheduler/                 # Cron parser, jobs.yaml, scheduled job firing
   daemon/                    # PID files, heartbeat, HTTP API server + client
-  db/                        # SQLite schema (v4), models, queries, migrations
+  db/                        # SQLite schema (v5), models, queries, migrations
   claudecli/                 # Claude Code CLI wrapper
+  runtime/                   # AgentRuntime contract + registry; claudecode/ default impl
   github/                    # GitHub API client (go-github, ETag caching)
   git/                       # Git CLI wrappers
   auth/                      # OS keyring integration (macOS Keychain, Linux libsecret)
@@ -351,7 +353,7 @@ xbar/                        # macOS SwiftBar menu bar plugin
 
 ### Data storage
 
-SQLite at `~/.agent-minder/v2.db` (WAL mode, foreign keys, single-writer via `SetMaxOpenConns(1)`). Schema v4.
+SQLite at `~/.agent-minder/v2.db` (WAL mode, foreign keys, single-writer via `SetMaxOpenConns(1)`). Schema v5.
 
 | Table | Purpose |
 |-------|---------|

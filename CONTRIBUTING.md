@@ -9,7 +9,8 @@ Thanks for your interest in contributing to agent-minder! This document covers e
 - **Go 1.25+** (required for bubbletea v2)
 - **golangci-lint** — install via `go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest` or [other methods](https://golangci-lint.run/welcome/install/)
 - **lefthook** — git hook manager; install via `go install github.com/evilmartians/lefthook@latest` or [other methods](https://github.com/evilmartians/lefthook/blob/master/docs/install.md)
-- **An `ANTHROPIC_API_KEY`** environment variable (needed at runtime and for integration tests)
+- **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — agent execution (no Anthropic API key needed; the CLI handles auth)
+- **`GITHUB_TOKEN`** — GitHub API token (env var or `minder auth login`)
 
 ### Clone and build
 
@@ -42,11 +43,12 @@ go test ./...
 
 # Package-specific tests (verbose)
 go test ./internal/db/... -v
-go test ./internal/poller/... -v
-go test ./internal/msgbus/... -v
+go test ./internal/supervisor/... -v
+go test ./internal/scheduler/... -v
+go test ./internal/daemon/... -v
 
-# Integration test (requires ANTHROPIC_API_KEY + an existing agent-test project)
-go test -tags integration -run TestIntegrationTwoTierPipeline -v ./internal/poller/ -timeout 90s
+# Supervisor scenario integration suite (end-to-end pipeline scenarios)
+make integration
 ```
 
 ## Running a local dev instance
@@ -64,10 +66,11 @@ This auto-derives paths from the current branch name, copies the production DB o
 
 | Variable | Description |
 |----------|-------------|
-| `MINDER_DB` | Override database path (default: `~/.agent-minder/minder.db`) |
+| `MINDER_DB` | Override database path (default: `~/.agent-minder/v2.db`) |
 | `MINDER_LOG` | Override debug log path (default: `~/.agent-minder/debug.log`) |
 | `MINDER_DEBUG=1` | Enable structured JSON debug logging |
-| `ANTHROPIC_API_KEY` | Required for LLM calls |
+| `GITHUB_TOKEN` | GitHub API token (required for agent execution) |
+| `MINDER_API_KEY` | API key for remote daemon access |
 
 ## Code style and linting
 
@@ -83,12 +86,13 @@ The codebase is organized into focused internal packages. See the **Package map*
 
 High-level:
 
-- **`cmd/`** — Cobra CLI commands (`init`, `start`, `status`, `enroll`, etc.)
-- **`internal/poller`** — Two-tier LLM pipeline (Haiku summarizer → Sonnet analyzer)
-- **`internal/tui`** — Bubbletea v2 terminal dashboard
+- **`cmd/`** — Cobra CLI commands (`deploy`, `status`, `stop`, `enroll`, `lesson`, `jobs`, `agents`, `auth`, `tui`, etc.)
+- **`internal/supervisor`** — Job manager for concurrent Claude Code agents (contracts, context providers, dedup, review, dep graph, stage executor)
+- **`internal/runtime`** — `AgentRuntime` contract + registry; `claudecode/` is the default doer implementation
+- **`internal/daemon`** — PID/heartbeat lifecycle and HTTP API server + client
+- **`internal/scheduler`** — Cron parser, `jobs.yaml`, scheduled job firing
 - **`internal/db`** — SQLite schema, migrations, and CRUD operations
-- **`internal/autopilot`** — Supervisor for concurrent Claude Code agents
-- **`internal/msgbus`** — Integration with the agent-msg message bus
+- **`internal/claudecli`** — Claude Code CLI wrapper (`claude -p` / `claude --agent`)
 - **`internal/git`** — Git CLI wrappers
 
 ## Making changes
@@ -114,7 +118,7 @@ If your change modifies the SQLite schema:
 
 ### Agent definitions
 
-The repo-level `agents/autopilot.md` file and the `defaultAgentDef` constant in `internal/autopilot/prompt.go` must stay in sync. There is a drift-prevention test that enforces this.
+Built-in agent definitions live under `agents/` at the repo root and are also embedded into the binary via `internal/supervisor/templates.go` (`AgentTemplates()`). Both copies must stay in sync — drift-prevention tests in `internal/supervisor` enforce this.
 
 ## Pull requests
 

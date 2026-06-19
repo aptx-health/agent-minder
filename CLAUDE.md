@@ -12,7 +12,7 @@ Go CLI coordination layer on top of [agent-msg](../agent-msg). Monitors git repo
 
 ## Architecture
 
-All LLM calls go through `internal/claudecli`, which wraps `claude -p` with `--output-format json` and `claude --agent` for agent execution.
+All LLM calls go through `internal/claudecli`, which wraps `claude -p` with `--output-format json` and `claude --agent` for agent execution. Doer (agent) execution flows through the `runtime.AgentRuntime` contract (`internal/runtime`), with `internal/runtime/claudecode` as the default (and currently only) implementation. The runtime is selected per deploy via `--runtime` (default `claude-code`) and injected into the supervisor via `Supervisor.SetRuntime`; `liveStatusSink` adapts `runtime.EventSink` so live tool/step status still surfaces through `minder status`, daemon `/jobs`, and the TUI.
 
 ### Supervisor (internal/supervisor)
 
@@ -65,6 +65,8 @@ Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3
 | `internal/scheduler` | Job scheduler | Cron parser, `jobs.yaml` config, scheduled job firing |
 | `internal/db` | SQLite schema + CRUD | sqlx.DB wrapper, migrations in `schema.go` |
 | `internal/claudecli` | Claude Code CLI wrapper | `Completer` interface, `claude -p` invocation |
+| `internal/runtime` | Doer-runtime contract + registry | `AgentRuntime` interface, `EventSink`, `Validate`, `KnownNames`, `DefaultName` |
+| `internal/runtime/claudecode` | Default `AgentRuntime` impl | Wraps `claude --agent`, stream-json scanning, `<bail-report>` extraction, `--resume` |
 | `internal/git` | Git CLI wrappers | `LogSince()`, `Branches()`, `WorktreeList()` |
 | `internal/github` | GitHub API client | go-github wrapper, ETag transport, URL parsing |
 | `internal/lesson` | Learning system | Lesson selection, injection, grooming |
@@ -75,7 +77,7 @@ Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3
 
 ## Commands
 
-- `deploy [issues...] [flags]` — Launch agents on issues or start daemon. Key flags: `--repo`, `--agent`, `--watch`, `--serve`, `--foreground`, `--max-agents`, `--auto-merge`, `--total-budget`.
+- `deploy [issues...] [flags]` — Launch agents on issues or start daemon. Key flags: `--repo`, `--agent`, `--runtime` (default `claude-code`, validated against `runtime` registry, propagated through daemon re-exec), `--watch`, `--serve`, `--foreground`, `--max-agents`, `--auto-merge`, `--total-budget`.
 - `status [deploy-id]` — Deployment status (`--json` for structured output, `--remote host:port` for remote daemon).
 - `stop [deploy-id]` — Stop a running deployment (local or `--remote`).
 - `enroll [repo-dir]` — Scan repo, generate `onboarding.yaml`, install agent definitions.
