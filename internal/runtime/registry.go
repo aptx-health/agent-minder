@@ -11,6 +11,7 @@ import (
 // added as their adapters land.
 const (
 	NameClaudeCode = "claude-code"
+	NameCodex      = "codex"
 )
 
 // DefaultName is the runtime selected when the operator does not pass

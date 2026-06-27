@@ -37,9 +37,13 @@ type JobResult struct {
 type stageResult struct {
 	success    bool              // true if stage completed successfully
 	bailed     bool              // true if agent deliberately bailed
+	manual     bool              // true if work is ready but needs human follow-up
+	failed     bool              // true if runtime/process/classifier failed
 	exhausted  bool              // true if turn/budget limit hit
 	usageLimit bool              // true if Claude Code usage/rate limit hit
 	sessionID  string            // session ID for --resume on recovery
+	reason     string            // failure reason for failed stages
+	detail     string            // failure detail for failed stages
 	prDetected int               // PR number if one was opened during this stage
 	assessment *ReviewAssessment // review assessment if this was a review stage
 }
@@ -57,6 +61,7 @@ type TestHooks struct {
 	SetupWorktreeFn           func() error
 	EnsureAgentDefFn          func(name AgentName) (AgentDefSource, error)
 	ExtractReviewAssessmentFn func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment
+	CreateReviewCommentFn     func(ctx context.Context, prNumber int, body string) (int64, error)
 }
 
 // SlotContext provides primitives that job managers use to interact
@@ -143,7 +148,20 @@ func (sc *SlotContext) EnsureAgentDef(name AgentName) (AgentDefSource, error) {
 	if sc.Hooks != nil && sc.Hooks.EnsureAgentDefFn != nil {
 		return sc.Hooks.EnsureAgentDefFn(name)
 	}
-	return ensureAgentDefByName(sc.WorktreePath, name)
+	source, body, err := resolveAgentDefByName(sc.WorktreePath, name)
+	if err != nil {
+		return "", err
+	}
+	if rt := sc.sup.Runtime(); rt != nil {
+		if err := rt.PrepareAgentDef(context.Background(), runtimepkg.Workspace{Dir: sc.WorktreePath}, runtimepkg.AgentDefinition{
+			Name:   string(name),
+			Source: source.Description(),
+			Body:   body,
+		}); err != nil {
+			return "", err
+		}
+	}
+	return source, nil
 }
 
 // OpenLogFile opens (or creates) the agent log file.
@@ -514,14 +532,22 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 			// Exhausted retries — still hitting limit.
 			if result.usageLimit {
-				sc.EmitEvent("error", fmt.Sprintf("Usage limit: exhausted %d retries on %s, bailing",
+				sc.EmitEvent("error", fmt.Sprintf("Usage limit: exhausted %d retries on %s, failing",
 					maxUsageLimitRetries, sc.JobLabel()))
-				return m.finalizeBail(ctx)
+				return m.finalizeFailure(ctx, "usage_limit", fmt.Sprintf("exhausted %d usage-limit retries", maxUsageLimitRetries))
 			}
 		}
 
 		if result.success {
 			continue // next stage
+		}
+
+		if result.manual {
+			return m.finalizeManual(ctx, result.reason, result.detail)
+		}
+
+		if result.failed {
+			return m.finalizeFailure(ctx, result.reason, result.detail)
 		}
 
 		// Stage failed — handle on_failure.
@@ -597,12 +623,21 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	}
 
 	inv := runtimeInvocationFor(sc, agentName, prompt, lessonsPrompt)
-	exitCode, runResult, sink, _ := sc.runStageThroughRuntime(ctx, inv, logFile)
+	exitCode, runResult, sink, runErr := sc.runStageThroughRuntime(ctx, inv, logFile)
 	result := adaptRuntimeResult(runResult)
 	usageLimit := sink.usageLimit || sc.HitUsageLimit() || isUsageLimitError(result)
 	sessionID := ""
 	if runResult != nil {
 		sessionID = runResult.SessionID
+	}
+
+	if runErr != nil {
+		return stageResult{
+			success: false,
+			failed:  true,
+			reason:  "runtime_error",
+			detail:  runErr.Error(),
+		}
 	}
 
 	if usageLimit {
@@ -630,13 +665,74 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 		outcome = rt.ClassifyOutcome(runResult, runtimepkg.Limits{MaxTurns: maxTurns, MaxBudgetUSD: maxBudget})
 		bailReport = rt.ExtractBailReport(runResult, sc.LogPath)
 	}
-	m.handleBailReport(ctx, bailReport)
-
-	return stageResult{
-		success:   false,
-		bailed:    outcome.Status == "failed" || bailReport != nil,
-		exhausted: outcome.Status == "failed" && result != nil && (result.NumTurns >= maxTurns || result.TotalCost >= maxBudget*0.95),
+	if bailReport != nil {
+		m.handleBailReport(ctx, bailReport)
+		return stageResult{
+			success: false,
+			bailed:  true,
+		}
 	}
+
+	if outcome.Status == "failed" {
+		return stageResult{
+			success:   false,
+			failed:    true,
+			exhausted: outcome.FailureReason == "max_turns" || outcome.FailureReason == "max_budget",
+			reason:    outcome.FailureReason,
+			detail:    outcome.FailureDetail,
+		}
+	}
+
+	if exitCode != 0 {
+		return stageResult{
+			success: false,
+			failed:  true,
+			reason:  "process_exit",
+			detail:  fmt.Sprintf("agent process exited with code %d before producing a successful result", exitCode),
+		}
+	}
+
+	detail := "agent exited successfully but did not open a PR"
+	if runResult != nil && strings.TrimSpace(runResult.FinalText) != "" {
+		detail = truncateFailureDetail(runResult.FinalText, 2000)
+	}
+	if branchPushed(sc.WorktreePath) {
+		return stageResult{
+			success: false,
+			manual:  true,
+			reason:  "pr_required",
+			detail:  detail,
+		}
+	}
+	return stageResult{
+		success: false,
+		failed:  true,
+		reason:  "no_pr",
+		detail:  detail,
+	}
+}
+
+func branchPushed(worktreePath string) bool {
+	current, err := gitpkg.CurrentBranch(worktreePath)
+	if err != nil || current == "" || current == "HEAD" {
+		return false
+	}
+	upstream, err := gitpkg.UpstreamBranch(worktreePath)
+	if err != nil {
+		return false
+	}
+	return upstream == "origin/"+current || strings.HasSuffix(upstream, "/"+current)
+}
+
+func truncateFailureDetail(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // usageLimitWaitDuration is how long to sleep before retrying after a usage
@@ -744,7 +840,23 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		risk = "needs-testing"
 	}
 
-	_ = sc.Store.UpdateJobReview(job.ID, risk, 0)
+	reviewCommentID := int64(0)
+	commentBody := formatReviewComment(assessment)
+	var commentID int64
+	var err error
+	if sc.Hooks != nil && sc.Hooks.CreateReviewCommentFn != nil {
+		commentID, err = sc.Hooks.CreateReviewCommentFn(ctx, int(job.PRNumber.Int64), commentBody)
+	} else {
+		ghClient := sc.NewGHClient()
+		commentID, err = ghClient.CreateComment(ctx, sc.Owner, sc.Repo, int(job.PRNumber.Int64), commentBody)
+	}
+	if err != nil {
+		sc.EmitEvent("warning", fmt.Sprintf("Review comment failed for %s PR #%d: %v", sc.JobLabel(), job.PRNumber.Int64, err))
+	} else {
+		reviewCommentID = commentID
+	}
+
+	_ = sc.Store.UpdateJobReview(job.ID, risk, reviewCommentID)
 
 	sc.EmitEvent("info", fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk))
 	if assessment.Summary != "" {
@@ -846,6 +958,58 @@ func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
 		_ = sc.Store.CompleteJob(job.ID, db.StatusBailed)
 	}
 	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s", sc.JobLabel()))
+	sc.RecordLessonOutcome(false)
+
+	return nil
+}
+
+// finalizeFailure handles runtime/process failures that are not deliberate
+// structured agent bails.
+func (m *DefaultJobManager) finalizeFailure(ctx context.Context, reason, detail string) error {
+	sc := m.sc
+	job := sc.Job
+	ghClient := sc.NewGHClient()
+
+	if job.IssueNumber > 0 {
+		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	}
+
+	if reason == "" {
+		reason = "failed"
+	}
+	if detail == "" {
+		detail = "agent failed without additional detail"
+	}
+
+	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
+	_ = sc.Store.CompleteJob(job.ID, db.StatusFailed)
+	sc.EmitEvent("error", fmt.Sprintf("Agent failed on %s: %s", sc.JobLabel(), detail))
+	sc.RecordLessonOutcome(false)
+
+	return nil
+}
+
+// finalizeManual handles runs where the agent completed local work and pushed a
+// branch, but a human/token action is required to finish publication.
+func (m *DefaultJobManager) finalizeManual(ctx context.Context, reason, detail string) error {
+	sc := m.sc
+	job := sc.Job
+	ghClient := sc.NewGHClient()
+
+	if job.IssueNumber > 0 {
+		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
+	}
+
+	if reason == "" {
+		reason = "manual"
+	}
+	if detail == "" {
+		detail = "agent completed work but manual follow-up is required"
+	}
+
+	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
+	_ = sc.Store.CompleteJob(job.ID, db.StatusManual)
+	sc.EmitEvent("manual", fmt.Sprintf("Agent needs manual follow-up on %s: %s", sc.JobLabel(), detail))
 	sc.RecordLessonOutcome(false)
 
 	return nil

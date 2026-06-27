@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS deployments (
 	max_agents INTEGER DEFAULT 3,
 	max_turns INTEGER DEFAULT 50,
 	max_budget_usd REAL DEFAULT 5.0,
+	runtime TEXT DEFAULT 'claude-code',
 	analyzer_model TEXT DEFAULT 'sonnet',
 	skip_label TEXT DEFAULT 'no-agent',
 	auto_merge INTEGER DEFAULT 0,
@@ -258,6 +259,13 @@ ALTER TABLE lessons ADD COLUMN last_unhelpful_at DATETIME;
 UPDATE schema_version SET version = 5;
 `
 
+// migrateV5toV6 records the doer runtime selected for each deployment.
+const migrateV5toV6 = `
+ALTER TABLE deployments ADD COLUMN runtime TEXT DEFAULT 'claude-code';
+UPDATE deployments SET runtime = 'claude-code' WHERE runtime IS NULL OR runtime = '';
+UPDATE schema_version SET version = 6;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -309,6 +317,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV4toV5); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v4→v5: %w", err)
+			}
+		}
+		if version < 6 {
+			if _, err := db.Exec(migrateV5toV6); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v5→v6: %w", err)
 			}
 		}
 	} else if !hasVersion {

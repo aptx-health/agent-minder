@@ -329,7 +329,7 @@ func TestScenarios(t *testing.T) {
 			TotalCostUSD:        0.20,
 			DetectedPR:          0,
 			FinalText:           "Out of turns.",
-			WantStatus:          db.StatusBailed,
+			WantStatus:          db.StatusFailed,
 			WantFailureReason:   "max_turns",
 			WantFailureDetailIn: "50",
 		},

@@ -67,6 +67,9 @@ func TestDeploymentCRUD(t *testing.T) {
 	if got.Owner != "aptx-health" || got.Repo != "agent-minder" {
 		t.Errorf("got %s/%s, want aptx-health/agent-minder", got.Owner, got.Repo)
 	}
+	if got.Runtime != "claude-code" {
+		t.Errorf("got runtime %q, want claude-code default", got.Runtime)
+	}
 
 	ds, err := s.ListDeployments()
 	if err != nil {
@@ -426,6 +429,13 @@ INSERT INTO tasks (deployment_id, issue_number, owner, repo, status) VALUES ('d1
 	}
 	if len(jobs) != 2 {
 		t.Fatalf("got %d jobs, want 2", len(jobs))
+	}
+	deploy, err := store.GetDeployment("d1")
+	if err != nil {
+		t.Fatalf("GetDeployment after migration: %v", err)
+	}
+	if deploy.Runtime != "claude-code" {
+		t.Errorf("migrated runtime = %q, want claude-code", deploy.Runtime)
 	}
 
 	// Verify backfilled fields.
