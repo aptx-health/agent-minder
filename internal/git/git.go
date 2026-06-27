@@ -76,6 +76,12 @@ func CurrentBranch(dir string) (string, error) {
 	return run(dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
+// UpstreamBranch returns the configured upstream branch for HEAD, e.g.
+// "origin/agent/issue-42". It returns an error if no upstream is configured.
+func UpstreamBranch(dir string) (string, error) {
+	return run(dir, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+}
+
 // parseLogOutput parses the pipe-delimited output from git log into LogEntry
 // slices. The expected format per line is "hash|subject|author|ISO-date".
 // If a date cannot be parsed, the current time is used as a fallback so that

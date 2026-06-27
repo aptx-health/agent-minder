@@ -22,6 +22,7 @@ type Deployment struct {
 	MaxAgents       int             `db:"max_agents"`
 	MaxTurns        int             `db:"max_turns"`
 	MaxBudgetUSD    float64         `db:"max_budget_usd"`
+	Runtime         string          `db:"runtime"`
 	AnalyzerModel   string          `db:"analyzer_model"`
 	SkipLabel       string          `db:"skip_label"`
 	AutoMerge       bool            `db:"auto_merge"`
@@ -114,6 +115,7 @@ const (
 	StatusReviewing = "reviewing"
 	StatusReviewed  = "reviewed"
 	StatusDone      = "done"
+	StatusFailed    = "failed"
 	StatusBailed    = "bailed"
 	StatusManual    = "manual"
 	StatusStopped   = "stopped"

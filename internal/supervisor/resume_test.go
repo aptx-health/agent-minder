@@ -109,8 +109,8 @@ func TestResume_ResumedSessionAlsoHitsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	if updated.Status != db.StatusBailed {
-		t.Errorf("status = %q, want %q after exhausting usage-limit retries", updated.Status, db.StatusBailed)
+	if updated.Status != db.StatusFailed {
+		t.Errorf("status = %q, want %q after exhausting usage-limit retries", updated.Status, db.StatusFailed)
 	}
 
 	// Supervisor should have emitted the "exhausted N retries" error event.

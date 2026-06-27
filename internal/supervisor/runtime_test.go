@@ -15,13 +15,19 @@ import (
 // DefaultJobManager drives stages through the runtime contract and that
 // EventSink events surface as live status updates.
 type fakeRuntime struct {
-	runCalled int
-	lastInv   runtimepkg.Invocation
+	runCalled     int
+	prepareCalled int
+	lastInv       runtimepkg.Invocation
+	lastDef       runtimepkg.AgentDefinition
+	lastWorkspace runtimepkg.Workspace
 }
 
 func (f *fakeRuntime) Name() string { return "fake" }
 
-func (f *fakeRuntime) PrepareAgentDef(_ context.Context, _ runtimepkg.Workspace, _ runtimepkg.AgentDefinition) error {
+func (f *fakeRuntime) PrepareAgentDef(_ context.Context, ws runtimepkg.Workspace, def runtimepkg.AgentDefinition) error {
+	f.prepareCalled++
+	f.lastWorkspace = ws
+	f.lastDef = def
 	return nil
 }
 
@@ -58,6 +64,49 @@ func (f *fakeRuntime) ClassifyOutcome(_ *runtimepkg.Result, _ runtimepkg.Limits)
 
 func (f *fakeRuntime) ExtractBailReport(_ *runtimepkg.Result, _ string) *runtimepkg.BailReport {
 	return nil
+}
+
+func TestEnsureAgentDefPreparesRuntimeDefinition(t *testing.T) {
+	store := testStore(t)
+	deploy := testDeployment(t, store)
+	job := testJob(t, store, deploy)
+
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+	rt := &fakeRuntime{}
+	sup.SetRuntime(rt)
+
+	worktree := t.TempDir()
+	agentsDir := filepath.Join(worktree, ".claude", "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("---\nname: autopilot\n---\nrepo contract")
+	if err := os.WriteFile(filepath.Join(agentsDir, "autopilot.md"), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := sup.newSlotContext(job.ID, job)
+	sc.WorktreePath = worktree
+
+	source, err := sc.EnsureAgentDef(AgentAutopilot)
+	if err != nil {
+		t.Fatalf("EnsureAgentDef: %v", err)
+	}
+	if source != AgentDefRepo {
+		t.Errorf("source = %q, want %q", source, AgentDefRepo)
+	}
+	if rt.prepareCalled != 1 {
+		t.Fatalf("PrepareAgentDef calls = %d, want 1", rt.prepareCalled)
+	}
+	if rt.lastWorkspace.Dir != worktree {
+		t.Errorf("workspace = %q, want %q", rt.lastWorkspace.Dir, worktree)
+	}
+	if rt.lastDef.Name != "autopilot" {
+		t.Errorf("def name = %q, want autopilot", rt.lastDef.Name)
+	}
+	if string(rt.lastDef.Body) != string(body) {
+		t.Errorf("def body = %q, want %q", rt.lastDef.Body, body)
+	}
 }
 
 // TestExecuteCodeStage_RuntimeLiveStatus exercises executeCodeStage through a

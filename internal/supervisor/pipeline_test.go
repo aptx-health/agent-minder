@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -131,6 +132,9 @@ func newHarness(t *testing.T, opts ...func(*db.Deployment)) *pipelineHarness {
 		ExtractReviewAssessmentFn: func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
 			return ReviewAssessment{Risk: "low-risk", Summary: "All good"}
 		},
+		CreateReviewCommentFn: func(ctx context.Context, prNumber int, body string) (int64, error) {
+			return 9001, nil
+		},
 	}
 
 	return h
@@ -215,7 +219,14 @@ func TestPipeline_CodeThenReview(t *testing.T) {
 
 	// Mock: review returns low-risk.
 	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
-		return ReviewAssessment{Risk: "low-risk", Summary: "Clean PR"}
+		return ReviewAssessment{Risk: "low-risk", Summary: "Clean PR", Lessons: []string{"Keep tests focused"}}
+	}
+	var reviewCommentPR int
+	var reviewCommentBody string
+	h.hooks.CreateReviewCommentFn = func(ctx context.Context, prNumber int, body string) (int64, error) {
+		reviewCommentPR = prNumber
+		reviewCommentBody = body
+		return 12345, nil
 	}
 
 	job := testJob(t, h.store, h.deploy)
@@ -249,9 +260,18 @@ func TestPipeline_CodeThenReview(t *testing.T) {
 	if !updated.ReviewRisk.Valid || updated.ReviewRisk.String != "low-risk" {
 		t.Errorf("expected review_risk 'low-risk', got %v", updated.ReviewRisk)
 	}
+	if !updated.ReviewCommentID.Valid || updated.ReviewCommentID.Int64 != 12345 {
+		t.Errorf("expected review_comment_id 12345, got %v", updated.ReviewCommentID)
+	}
 	// Status should be "reviewed" (pipeline finalized with PR).
 	if updated.Status != db.StatusReviewed {
 		t.Errorf("expected status %q, got %q", db.StatusReviewed, updated.Status)
+	}
+	if reviewCommentPR != 100 {
+		t.Errorf("review comment PR = %d, want 100", reviewCommentPR)
+	}
+	if !strContains(reviewCommentBody, "**Risk:** `low-risk`") || !strContains(reviewCommentBody, "Clean PR") || !strContains(reviewCommentBody, "Keep tests focused") {
+		t.Errorf("review comment body missing expected content: %s", reviewCommentBody)
 	}
 
 	// Verify events include review stage starting.
@@ -330,6 +350,90 @@ func TestPipeline_CodeBailsNoReview(t *testing.T) {
 		// finalizeBail sets failure; if log is empty classifyOutcome returns empty strings,
 		// but the DB update still happens.
 		t.Logf("Note: failure_reason not set (expected when log is empty)")
+	}
+}
+
+func TestPipeline_PushedBranchWithoutPRNeedsManualFollowUp(t *testing.T) {
+	repo := initPushedBranchRepo(t, "agent/issue-2")
+	h := newHarness(t, func(d *db.Deployment) {
+		d.RepoDir = repo
+		d.ReviewEnabled = false
+	})
+
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
+		h.mu.Lock()
+		h.stageLog = append(h.stageLog, stageCall{Agent: inv.AgentName, Inv: inv})
+		h.mu.Unlock()
+		return 0, &runtimepkg.Result{FinalText: "Implemented and pushed. PR creation requires token permissions."}, false, nil
+	}
+	h.hooks.DetectPRFn = func(ctx context.Context) int { return 0 }
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 2
+		j.Name = "issue-2"
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	updated, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if updated.Status != db.StatusManual {
+		t.Fatalf("status = %q, want %q", updated.Status, db.StatusManual)
+	}
+	if !updated.FailureReason.Valid || updated.FailureReason.String != "pr_required" {
+		t.Errorf("failure_reason = %+v, want pr_required", updated.FailureReason)
+	}
+	if !updated.FailureDetail.Valid || !strContains(updated.FailureDetail.String, "token permissions") {
+		t.Errorf("failure_detail = %+v, want final message", updated.FailureDetail)
+	}
+	if !hasEvent(h.events(), "manual", "manual follow-up") {
+		t.Errorf("expected manual event, got %+v", h.events())
+	}
+}
+
+func initPushedBranchRepo(t *testing.T, branch string) string {
+	t.Helper()
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	repo := filepath.Join(root, "repo")
+	runGitCmd(t, root, "init", "--bare", origin)
+	runGitCmd(t, root, "init", repo)
+	runGitCmd(t, repo, "config", "user.email", "test@example.com")
+	runGitCmd(t, repo, "config", "user.name", "Test User")
+	runGitCmd(t, repo, "remote", "add", "origin", origin)
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, repo, "add", "README.md")
+	runGitCmd(t, repo, "commit", "-m", "initial")
+	runGitCmd(t, repo, "branch", "-M", "main")
+	runGitCmd(t, repo, "push", "-u", "origin", "main")
+	runGitCmd(t, repo, "switch", "-c", branch)
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitCmd(t, repo, "add", "feature.txt")
+	runGitCmd(t, repo, "commit", "-m", "feature")
+	runGitCmd(t, repo, "push", "-u", "origin", branch)
+	return repo
+}
+
+func runGitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
 

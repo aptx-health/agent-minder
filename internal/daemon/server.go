@@ -137,6 +137,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			MaxAgents:  deploy.MaxAgents,
 			MaxTurns:   deploy.MaxTurns,
 			MaxBudget:  deploy.MaxBudgetUSD,
+			Runtime:    deploy.Runtime,
 			Model:      deploy.AnalyzerModel,
 			SkipLabel:  deploy.SkipLabel,
 			AutoMerge:  deploy.AutoMerge,
@@ -314,6 +315,7 @@ type DeployConfig struct {
 	MaxAgents  int     `json:"max_agents"`
 	MaxTurns   int     `json:"max_turns"`
 	MaxBudget  float64 `json:"max_budget"`
+	Runtime    string  `json:"runtime"`
 	Model      string  `json:"model"`
 	SkipLabel  string  `json:"skip_label"`
 	AutoMerge  bool    `json:"auto_merge"`

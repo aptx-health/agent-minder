@@ -29,6 +29,42 @@ type LessonFeedback struct {
 	Reason  string `json:"reason"`  // Brief explanation
 }
 
+func formatReviewComment(assessment ReviewAssessment) string {
+	var b strings.Builder
+	risk := assessment.Risk
+	if risk == "" {
+		risk = "needs-testing"
+	}
+	summary := assessment.Summary
+	if summary == "" {
+		summary = "Review completed."
+	}
+
+	fmt.Fprintf(&b, "## Agent Review\n\n")
+	fmt.Fprintf(&b, "**Risk:** `%s`\n\n", risk)
+	fmt.Fprintf(&b, "%s\n", summary)
+
+	if len(assessment.Issues) > 0 {
+		fmt.Fprintf(&b, "\n### Issues\n")
+		for _, issue := range assessment.Issues {
+			if strings.TrimSpace(issue) != "" {
+				fmt.Fprintf(&b, "- %s\n", issue)
+			}
+		}
+	}
+
+	if len(assessment.Lessons) > 0 {
+		fmt.Fprintf(&b, "\n### Lessons Captured\n")
+		for _, lesson := range assessment.Lessons {
+			if strings.TrimSpace(lesson) != "" {
+				fmt.Fprintf(&b, "- %s\n", lesson)
+			}
+		}
+	}
+
+	return b.String()
+}
+
 var reviewAssessmentSchema = `{
 	"type": "object",
 	"properties": {

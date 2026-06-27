@@ -180,29 +180,46 @@ func ensureAgentDef(worktreePath string) (AgentDefSource, error) {
 }
 
 func ensureAgentDefByName(worktreePath string, name AgentName) (AgentDefSource, error) {
+	source, _, err := resolveAgentDefByName(worktreePath, name)
+	return source, err
+}
+
+func resolveAgentDefByName(worktreePath string, name AgentName) (AgentDefSource, []byte, error) {
 	filename := string(name) + ".md"
 
 	// Check repo-level.
 	repoPath := filepath.Join(worktreePath, ".claude", "agents", filename)
 	if _, err := os.Stat(repoPath); err == nil {
-		return AgentDefRepo, nil
+		body, err := os.ReadFile(repoPath)
+		if err != nil {
+			return "", nil, err
+		}
+		return AgentDefRepo, body, nil
 	}
 
 	// Check user-level.
 	home, _ := os.UserHomeDir()
 	userPath := filepath.Join(home, ".claude", "agents", filename)
 	if _, err := os.Stat(userPath); err == nil {
-		return AgentDefUser, nil
+		body, err := os.ReadFile(userPath)
+		if err != nil {
+			return "", nil, err
+		}
+		return AgentDefUser, body, nil
 	}
 
 	// Install from template registry, falling back to built-in constants.
 	for _, tmpl := range AgentTemplates() {
 		if tmpl.Name == string(name) {
-			_, err := InstallAgentDef(worktreePath, tmpl)
+			path, err := InstallAgentDef(worktreePath, tmpl)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
-			return AgentDefBuiltIn, nil
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return "", nil, err
+			}
+			return AgentDefBuiltIn, body, nil
 		}
 	}
 
@@ -213,12 +230,13 @@ func ensureAgentDefByName(worktreePath string, name AgentName) (AgentDefSource, 
 	}
 	dir := filepath.Join(worktreePath, ".claude", "agents")
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("create agent dir: %w", err)
+		return "", nil, fmt.Errorf("create agent dir: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, filename), []byte(def), 0644); err != nil {
-		return "", fmt.Errorf("write agent def: %w", err)
+	body := []byte(def)
+	if err := os.WriteFile(filepath.Join(dir, filename), body, 0644); err != nil {
+		return "", nil, fmt.Errorf("write agent def: %w", err)
 	}
-	return AgentDefBuiltIn, nil
+	return AgentDefBuiltIn, body, nil
 }
 
 // resolveBaseBranch determines the base branch from onboarding.yaml, deploy config, or git default.

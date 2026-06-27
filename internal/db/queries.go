@@ -34,13 +34,17 @@ func (s *Store) DB() *sqlx.DB {
 
 // CreateDeployment inserts a new deployment.
 func (s *Store) CreateDeployment(d *Deployment) error {
+	runtimeName := d.Runtime
+	if runtimeName == "" {
+		runtimeName = "claude-code"
+	}
 	_, err := s.db.Exec(`INSERT INTO deployments
 		(id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns,
-		 max_budget_usd, analyzer_model, skip_label, auto_merge, review_enabled,
+		 max_budget_usd, runtime, analyzer_model, skip_label, auto_merge, review_enabled,
 		 review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ID, d.RepoDir, d.Owner, d.Repo, d.Mode, d.WatchFilter,
-		d.MaxAgents, d.MaxTurns, d.MaxBudgetUSD, d.AnalyzerModel,
+		d.MaxAgents, d.MaxTurns, d.MaxBudgetUSD, runtimeName, d.AnalyzerModel,
 		d.SkipLabel, d.AutoMerge, d.ReviewEnabled,
 		d.ReviewMaxTurns, d.ReviewMaxBudget,
 		d.TotalBudgetUSD, d.CarriedCostUSD, d.BaseBranch)

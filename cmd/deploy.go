@@ -19,6 +19,9 @@ import (
 	// Side-effect import: register the claude-code runtime factory in the
 	// runtime registry so runtime.Lookup("claude-code") resolves.
 	_ "github.com/aptx-health/agent-minder/internal/runtime/claudecode"
+	// Side-effect import: register the codex runtime factory in the runtime
+	// registry so runtime.Lookup("codex") resolves.
+	_ "github.com/aptx-health/agent-minder/internal/runtime/codex"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 	"github.com/google/uuid"
@@ -165,6 +168,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		MaxAgents:      flagMaxAgents,
 		MaxTurns:       flagMaxTurns,
 		MaxBudgetUSD:   flagBudget,
+		Runtime:        flagRuntime,
 		AnalyzerModel:  flagModel,
 		SkipLabel:      flagSkipLabel,
 		AutoMerge:      flagAutoMerge,
@@ -288,6 +292,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 // runForeground runs the supervisor in the current process.
 // Prepare() has already been called — jobs exist in the DB.
 func runForeground(deployID string) error {
+	if err := daemon.WritePID(deployID); err != nil {
+		return fmt.Errorf("write PID: %w", err)
+	}
+	stopHB := daemon.StartHeartbeat(deployID)
+	defer daemon.RemovePID(deployID)
+	defer daemon.RemoveHeartbeat(deployID)
+	defer stopHB()
+
 	conn, err := db.Open(db.DefaultDBPath())
 	if err != nil {
 		return err
