@@ -267,6 +267,10 @@ func runLogsRemote(args []string) error {
 
 // streamLog reads stream-json from r and prints formatted output.
 func streamLog(r io.Reader, raw bool) error {
+	return streamLogTo(os.Stdout, r, raw)
+}
+
+func streamLogTo(out io.Writer, r io.Reader, raw bool) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 
@@ -274,31 +278,15 @@ func streamLog(r io.Reader, raw bool) error {
 		line := scanner.Bytes()
 
 		if raw {
-			fmt.Println(string(line))
+			writeLogLine(out, string(line))
 			continue
 		}
 
-		var evt struct {
-			Type    string `json:"type"`
-			Subtype string `json:"subtype,omitempty"`
-			Message *struct {
-				Content []struct {
-					Type  string          `json:"type"`
-					Name  string          `json:"name,omitempty"`
-					Text  string          `json:"text,omitempty"`
-					Input json.RawMessage `json:"input,omitempty"`
-				} `json:"content"`
-			} `json:"message,omitempty"`
-			NumTurns  int     `json:"num_turns,omitempty"`
-			TotalCost float64 `json:"total_cost_usd,omitempty"`
-			IsError   bool    `json:"is_error,omitempty"`
-			Result    string  `json:"result,omitempty"`
-			Error     string  `json:"error,omitempty"`
-		}
+		var evt formattedLogEvent
 
 		if json.Unmarshal(line, &evt) != nil {
 			// Non-JSON line (e.g., "--- REVIEW AGENT ---").
-			fmt.Println(string(line))
+			writeLogLine(out, string(line))
 			continue
 		}
 
@@ -311,34 +299,73 @@ func streamLog(r io.Reader, raw bool) error {
 				switch block.Type {
 				case "tool_use":
 					input := truncateLogStr(string(block.Input), 120)
-					fmt.Printf("\033[36m> %s\033[0m %s\n", block.Name, input)
+					writeLogf(out, "\033[36m> %s\033[0m %s\n", block.Name, input)
 				case "text":
 					if block.Text != "" {
-						fmt.Printf("\033[33m%s\033[0m\n", block.Text)
+						writeLogf(out, "\033[33m%s\033[0m\n", block.Text)
 					}
 				}
 			}
 
 		case "result":
-			fmt.Println()
+			writeLogLine(out)
 			if evt.IsError {
-				fmt.Printf("\033[31m--- Result (error) ---\033[0m\n")
+				writeLogf(out, "\033[31m--- Result (error) ---\033[0m\n")
 			} else {
-				fmt.Printf("\033[32m--- Result ---\033[0m\n")
+				writeLogf(out, "\033[32m--- Result ---\033[0m\n")
 			}
 			if evt.Result != "" {
 				result := evt.Result
 				if len(result) > 500 {
 					result = result[:497] + "..."
 				}
-				fmt.Println(result)
+				writeLogLine(out, result)
 			}
-			fmt.Printf("Turns: %d  Cost: $%.2f\n", evt.NumTurns, evt.TotalCost)
+			writeLogf(out, "Turns: %d  Cost: $%.2f\n", evt.NumTurns, evt.TotalCost)
 
 		case "system":
 			if evt.Error != "" {
-				fmt.Printf("\033[31m[system] %s: %s\033[0m\n", evt.Subtype, evt.Error)
+				writeLogf(out, "\033[31m[system] %s: %s\033[0m\n", evt.Subtype, evt.Error)
 			}
+
+		case "thread.started":
+			if evt.ThreadID != "" {
+				writeLogf(out, "\033[90mSession: %s\033[0m\n", evt.ThreadID)
+			}
+
+		case "turn.started":
+			writeLogLine(out, "\033[90m--- Turn started ---\033[0m")
+
+		case "turn.completed":
+			writeLogLine(out)
+			writeLogLine(out, "\033[32m--- Turn complete ---\033[0m")
+			if evt.Usage != nil {
+				writeLogf(out, "Tokens: input=%d cached=%d output=%d reasoning=%d\n",
+					evt.Usage.InputTokens,
+					evt.Usage.CachedInputTokens,
+					evt.Usage.OutputTokens,
+					evt.Usage.ReasoningOutputTokens,
+				)
+			}
+
+		case "turn.failed", "error":
+			msg := evt.Error
+			if msg == "" {
+				msg = evt.Result
+			}
+			if msg == "" && evt.Item != nil {
+				msg = codexLogItemError(evt.Item.Error)
+			}
+			writeLogf(out, "\033[31m[%s] %s\033[0m\n", evt.Type, msg)
+
+		case "item.started":
+			formatCodexLogItem(out, "started", evt.Item)
+
+		case "item.completed":
+			formatCodexLogItem(out, "completed", evt.Item)
+
+		case "response_item":
+			formatCodexLogItem(out, "response", evt.Item)
 
 		default:
 			// Skip other event types (tool_result, etc.)
@@ -346,6 +373,167 @@ func streamLog(r io.Reader, raw bool) error {
 	}
 
 	return scanner.Err()
+}
+
+type formattedLogEvent struct {
+	Type      string         `json:"type"`
+	Subtype   string         `json:"subtype,omitempty"`
+	ThreadID  string         `json:"thread_id,omitempty"`
+	Message   *claudeLogMsg  `json:"message,omitempty"`
+	NumTurns  int            `json:"num_turns,omitempty"`
+	TotalCost float64        `json:"total_cost_usd,omitempty"`
+	IsError   bool           `json:"is_error,omitempty"`
+	Result    string         `json:"result,omitempty"`
+	Error     string         `json:"error,omitempty"`
+	Item      *codexLogItem  `json:"item,omitempty"`
+	Usage     *codexLogUsage `json:"usage,omitempty"`
+}
+
+type claudeLogMsg struct {
+	Content []claudeLogContent `json:"content"`
+}
+
+type claudeLogContent struct {
+	Type  string          `json:"type"`
+	Name  string          `json:"name,omitempty"`
+	Text  string          `json:"text,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+type codexLogUsage struct {
+	InputTokens           int `json:"input_tokens"`
+	CachedInputTokens     int `json:"cached_input_tokens"`
+	OutputTokens          int `json:"output_tokens"`
+	ReasoningOutputTokens int `json:"reasoning_output_tokens"`
+}
+
+func formatCodexLogItem(out io.Writer, eventStatus string, item *codexLogItem) {
+	if item == nil {
+		return
+	}
+	formatCodexLogItemValue(out, eventStatus, *item)
+}
+
+type codexLogItem struct {
+	Type             string           `json:"type"`
+	Name             string           `json:"name,omitempty"`
+	Text             string           `json:"text,omitempty"`
+	Command          string           `json:"command,omitempty"`
+	AggregatedOutput string           `json:"aggregated_output,omitempty"`
+	ExitCode         *int             `json:"exit_code,omitempty"`
+	Status           string           `json:"status,omitempty"`
+	Input            json.RawMessage  `json:"input,omitempty"`
+	Arguments        json.RawMessage  `json:"arguments,omitempty"`
+	Error            json.RawMessage  `json:"error,omitempty"`
+	Changes          []codexLogChange `json:"changes,omitempty"`
+}
+
+type codexLogChange struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+}
+
+func formatCodexLogItemValue(out io.Writer, eventStatus string, item codexLogItem) {
+	switch item.Type {
+	case "agent_message":
+		if item.Text != "" {
+			writeLogf(out, "\033[33m%s\033[0m\n", item.Text)
+		}
+
+	case "command_execution":
+		if eventStatus == "started" {
+			writeLogf(out, "\033[36m> %s\033[0m\n", item.Command)
+			return
+		}
+		if item.AggregatedOutput != "" {
+			writeLog(out, item.AggregatedOutput)
+			if !strings.HasSuffix(item.AggregatedOutput, "\n") {
+				writeLogLine(out)
+			}
+		}
+		if item.ExitCode != nil && *item.ExitCode != 0 {
+			writeLogf(out, "\033[31mexit code %d\033[0m\n", *item.ExitCode)
+		}
+
+	case "file_change":
+		if eventStatus == "started" {
+			writeLogLine(out, "\033[36m> file_change\033[0m")
+		}
+		if eventStatus == "completed" {
+			for _, change := range item.Changes {
+				writeLogf(out, "\033[36m%s\033[0m %s\n", change.Kind, change.Path)
+			}
+		}
+
+	case "function_call", "custom_tool_call", "mcp_tool_call":
+		name := item.Name
+		if name == "" {
+			name = item.Type
+		}
+		writeLogf(out, "\033[36m> %s\033[0m %s\n", name, codexLogInputSummary(item, 120))
+
+	case "function_call_output", "custom_tool_call_output":
+		if item.Text != "" {
+			writeLogLine(out, item.Text)
+		}
+
+	case "error":
+		msg := item.Text
+		if msg == "" {
+			msg = codexLogItemError(item.Error)
+		}
+		writeLogf(out, "\033[31m[error] %s\033[0m\n", msg)
+	}
+}
+
+func writeLog(out io.Writer, text string) {
+	_, _ = fmt.Fprint(out, text)
+}
+
+func writeLogLine(out io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(out, args...)
+}
+
+func writeLogf(out io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(out, format, args...)
+}
+
+func codexLogInputSummary(item codexLogItem, maxLen int) string {
+	for _, raw := range []json.RawMessage{item.Input, item.Arguments} {
+		if len(raw) > 0 {
+			return truncateLogStr(string(raw), maxLen)
+		}
+	}
+	if item.Command != "" {
+		return truncateLogStr(item.Command, maxLen)
+	}
+	return ""
+}
+
+func codexLogItemError(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var obj struct {
+		Message string `json:"message"`
+		Code    string `json:"code"`
+		Type    string `json:"type"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		switch {
+		case obj.Message != "":
+			return obj.Message
+		case obj.Code != "":
+			return obj.Code
+		case obj.Type != "":
+			return obj.Type
+		}
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return string(raw)
 }
 
 func truncateLogStr(s string, max int) string {
