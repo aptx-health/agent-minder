@@ -72,12 +72,14 @@ jobs:
   weekly-deps:
     schedule: "0 9 * * 1"          # cron expression
     agent: dependency-updater
+    runtime: codex                 # optional; falls back to deployment runtime
     description: "Check for outdated dependencies"
     budget: 3.0
 
   bug-triage:
     trigger: "label:bug"           # label trigger -> agent
     agent: bug-fixer
+    runtime: claude-code           # optional per-trigger override
 
   spike:
     trigger: "label:spike"
@@ -94,6 +96,21 @@ The trigger map prints at startup so you can see exactly what's wired up:
 minder jobs list                   # show schedules
 minder jobs run weekly-deps        # manual trigger
 ```
+
+### Runtime selection
+
+The doer runtime is selected in this order:
+
+1. Job-level `runtime:` in `.agent-minder/jobs.yaml` for scheduled or trigger-created jobs.
+2. Explicit `minder deploy --runtime <claude-code|codex>`.
+3. Repo default in `.agent-minder/config.yaml`:
+
+```yaml
+runtime: codex
+```
+
+4. User default in `~/.agent-minder/config.yaml`.
+5. Built-in default: `claude-code`.
 
 ### Built-in agent types
 
@@ -259,6 +276,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 |------|---------|-------------|
 | `--repo <dir>` | `.` | Repository directory |
 | `--agent <name>` | `autopilot` | Agent type to use |
+| `--runtime <name>` | hierarchy | Doer runtime override (`claude-code` or `codex`) |
 | `--watch <filter>` | — | Watch for issues (`label:<name>` or `milestone:<name>`) |
 | `--serve <addr>` | — | Start HTTP API (e.g., `:7749`) |
 | `--foreground` | — | Don't daemonize |

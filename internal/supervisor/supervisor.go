@@ -136,6 +136,21 @@ func (s *Supervisor) Runtime() runtimepkg.AgentRuntime {
 	return s.runtime
 }
 
+// RuntimeForJob returns the job override runtime when present, otherwise the
+// deployment runtime configured on the supervisor.
+func (s *Supervisor) RuntimeForJob(job *db.Job) (runtimepkg.AgentRuntime, error) {
+	if job != nil && job.Runtime.Valid && job.Runtime.String != "" {
+		return runtimepkg.Lookup(job.Runtime.String)
+	}
+	if rt := s.Runtime(); rt != nil {
+		return rt, nil
+	}
+	if s.deploy != nil && s.deploy.Runtime != "" {
+		return runtimepkg.Lookup(s.deploy.Runtime)
+	}
+	return nil, nil
+}
+
 // New creates a new Supervisor.
 func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken string) *Supervisor {
 	maxAgents := deploy.MaxAgents

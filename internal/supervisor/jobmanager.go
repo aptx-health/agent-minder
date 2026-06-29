@@ -152,7 +152,9 @@ func (sc *SlotContext) EnsureAgentDef(name AgentName) (AgentDefSource, error) {
 	if err != nil {
 		return "", err
 	}
-	if rt := sc.sup.Runtime(); rt != nil {
+	if rt, err := sc.sup.RuntimeForJob(sc.Job); err != nil {
+		return "", err
+	} else if rt != nil {
 		if err := rt.PrepareAgentDef(context.Background(), runtimepkg.Workspace{Dir: sc.WorktreePath}, runtimepkg.AgentDefinition{
 			Name:   string(name),
 			Source: source.Description(),
@@ -615,7 +617,10 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 
 	debugLog("stage execute", "stage", stage.Name, "agent", agentName, "label", sc.JobLabel())
 
-	rt := sc.sup.Runtime()
+	rt, rtErr := sc.sup.RuntimeForJob(job)
+	if rtErr != nil {
+		return stageResult{success: false, failed: true, reason: "runtime_config", detail: rtErr.Error()}
+	}
 	runtimeAvailable := rt != nil || (sc.Hooks != nil && sc.Hooks.RunStageFn != nil)
 	if !runtimeAvailable {
 		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for %s — bailing", sc.JobLabel()))
@@ -825,7 +830,10 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
 	prompt := renderReviewContext(ctx, sc)
-	if sc.sup.Runtime() == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
+	if rt, err := sc.sup.RuntimeForJob(job); err != nil {
+		sc.EmitEvent("error", fmt.Sprintf("Runtime config error for review of %s: %v", sc.JobLabel(), err))
+		return stageResult{success: false}
+	} else if rt == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
 		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for review of %s", sc.JobLabel()))
 		return stageResult{success: false}
 	}
@@ -933,7 +941,7 @@ func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
 		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
 	}
 
-	rt := sc.sup.Runtime()
+	rt, _ := sc.sup.RuntimeForJob(job)
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
 	reason, detail := "", ""

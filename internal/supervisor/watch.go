@@ -23,8 +23,9 @@ type WatchFilter struct {
 // When an issue has ALL matching labels (AND logic), it's routed to the
 // specified agent instead of the default autopilot.
 type TriggerRoute struct {
-	Labels []string // GitHub labels to match (AND logic)
-	Agent  string   // agent type to use
+	Labels  []string // GitHub labels to match (AND logic)
+	Agent   string   // agent type to use
+	Runtime string   // optional job-level runtime override
 }
 
 // SetTriggerRoutes configures label→agent routing from jobs.yaml triggers.
@@ -101,12 +102,12 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 		issues := s.pollFilter(ctx, ghClient, s.deploy.WatchFilter.String)
 		totalPolled += len(issues)
 		for _, issue := range issues {
-			agent := s.resolveAgentForIssue(issue.Labels)
-			if knownJobs[issueAgent{issue.Number, agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
+			route := s.resolveRouteForIssue(issue.Labels)
+			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
-			if n := s.createJobForIssue(ctx, ghClient, issue, agent); n > 0 {
-				knownJobs[issueAgent{issue.Number, agent}] = true
+			if n := s.createJobForIssue(ctx, ghClient, issue, route); n > 0 {
+				knownJobs[issueAgent{issue.Number, route.Agent}] = true
 				discovered += n
 			}
 		}
@@ -122,13 +123,13 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 		totalPolled += len(issues)
 		for _, issue := range issues {
 			// Skip if a more-specific route should handle this issue.
-			if s.resolveAgentForIssue(issue.Labels) != route.Agent {
+			if s.resolveRouteForIssue(issue.Labels).Agent != route.Agent {
 				continue
 			}
 			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
-			if n := s.createJobForIssue(ctx, ghClient, issue, route.Agent); n > 0 {
+			if n := s.createJobForIssue(ctx, ghClient, issue, route); n > 0 {
 				knownJobs[issueAgent{issue.Number, route.Agent}] = true
 				discovered += n
 			}
@@ -194,16 +195,20 @@ func (s *Supervisor) reportGHError(msg string) {
 // Returns the matching agent, or "autopilot" as default.
 // Routes with more labels are checked first so specific routes take priority.
 func (s *Supervisor) resolveAgentForIssue(labels []string) string {
+	return s.resolveRouteForIssue(labels).Agent
+}
+
+func (s *Supervisor) resolveRouteForIssue(labels []string) TriggerRoute {
 	s.mu.Lock()
 	routes := s.triggerRoutes
 	s.mu.Unlock()
 
 	for _, route := range routes {
 		if hasAllLabels(labels, route.Labels) {
-			return route.Agent
+			return route
 		}
 	}
-	return "autopilot"
+	return TriggerRoute{Agent: "autopilot"}
 }
 
 // hasAllLabels returns true if issueLabels contains every label in required (case-insensitive).
@@ -217,17 +222,22 @@ func hasAllLabels(issueLabels []string, required []string) bool {
 }
 
 // createJobForIssue fetches issue content and inserts a job row.
-func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Client, issue ghpkg.ItemStatus, agent string) int {
+func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Client, issue ghpkg.ItemStatus, route TriggerRoute) int {
 	content, _ := ghClient.FetchItemContent(ctx, s.owner, s.repo, issue.Number, "issue")
 	body := ""
 	if content != nil {
 		body = content.Body
+	}
+	agent := route.Agent
+	if agent == "" {
+		agent = "autopilot"
 	}
 
 	j := &db.Job{
 		DeploymentID: s.deploy.ID,
 		Agent:        agent,
 		Name:         fmt.Sprintf("%s-issue-%d", agent, issue.Number),
+		Runtime:      sql.NullString{String: route.Runtime, Valid: route.Runtime != ""},
 		IssueNumber:  issue.Number,
 		IssueTitle:   sql.NullString{String: issue.Title, Valid: true},
 		IssueBody:    sql.NullString{String: body, Valid: body != ""},

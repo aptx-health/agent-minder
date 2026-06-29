@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 	-- What to run
 	agent TEXT NOT NULL DEFAULT 'autopilot',
 	name TEXT NOT NULL,
+	runtime TEXT,
 
 	-- Context (nullable for proactive agents)
 	issue_number INTEGER,
@@ -137,6 +138,7 @@ CREATE TABLE IF NOT EXISTS job_schedules (
 	cron_expr TEXT,
 	trigger_expr TEXT,
 	agent TEXT NOT NULL,
+	runtime TEXT,
 	description TEXT,
 	budget REAL,
 	max_turns INTEGER,
@@ -266,6 +268,13 @@ UPDATE deployments SET runtime = 'claude-code' WHERE runtime IS NULL OR runtime 
 UPDATE schema_version SET version = 6;
 `
 
+// migrateV6toV7 records optional per-job and per-schedule runtime overrides.
+const migrateV6toV7 = `
+ALTER TABLE jobs ADD COLUMN runtime TEXT;
+ALTER TABLE job_schedules ADD COLUMN runtime TEXT;
+UPDATE schema_version SET version = 7;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -323,6 +332,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV5toV6); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v5→v6: %w", err)
+			}
+		}
+		if version < 7 {
+			if _, err := db.Exec(migrateV6toV7); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v6→v7: %w", err)
 			}
 		}
 	} else if !hasVersion {

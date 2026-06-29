@@ -42,6 +42,7 @@ jobs:
   weekly-deps:
     schedule: "0 9 * * 1"
     agent: dependency-updater
+    runtime: codex
     description: "Check deps"
     budget: 3.0
   nightly-scan:
@@ -74,6 +75,9 @@ jobs:
 		if sched.Agent == "" {
 			t.Errorf("schedule %q: agent is empty", sched.Name)
 		}
+		if sched.Name == "weekly-deps" && (!sched.Runtime.Valid || sched.Runtime.String != "codex") {
+			t.Errorf("schedule %q: runtime = %v, want codex", sched.Name, sched.Runtime)
+		}
 		if !sched.NextRunAt.Valid {
 			t.Errorf("schedule %q: next_run_at not set", sched.Name)
 		}
@@ -92,6 +96,7 @@ jobs:
   test-job:
     schedule: "* * * * *"
     agent: autopilot
+    runtime: codex
     budget: 2.5
 `))
 
@@ -114,6 +119,9 @@ jobs:
 	}
 	if jobs[0].Status != db.StatusQueued {
 		t.Errorf("status = %q, want queued", jobs[0].Status)
+	}
+	if !jobs[0].Runtime.Valid || jobs[0].Runtime.String != "codex" {
+		t.Errorf("runtime = %v, want codex", jobs[0].Runtime)
 	}
 
 	// Verify schedule was updated.
@@ -142,6 +150,7 @@ jobs:
   manual-test:
     schedule: "0 0 1 1 *"
     agent: autopilot
+    runtime: codex
 `))
 
 	s := New(store, "test-sched", "acme", "widgets", cfg)
@@ -158,6 +167,9 @@ jobs:
 	jobs, _ := store.GetJobs("test-sched")
 	if len(jobs) != 1 {
 		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+	if !jobs[0].Runtime.Valid || jobs[0].Runtime.String != "codex" {
+		t.Errorf("runtime = %v, want codex", jobs[0].Runtime)
 	}
 
 	// Non-existent schedule.

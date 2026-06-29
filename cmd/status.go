@@ -80,11 +80,15 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if flagJSON {
 			jj := make([]jobJSON, len(jobs))
 			for i, j := range jobs {
+				runtimeName := j.Runtime
+				if runtimeName == "" {
+					runtimeName = status.Config.Runtime
+				}
 				jj[i] = jobJSON{
 					IssueNumber: j.IssueNumber,
 					Title:       j.Title,
 					Agent:       j.Agent,
-					Runtime:     status.Config.Runtime,
+					Runtime:     runtimeName,
 					Status:      j.Status,
 					PRNumber:    j.PRNumber,
 					CostUSD:     j.CostUSD,
@@ -108,7 +112,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			fmt.Print(" [PAUSED]")
 		}
 		fmt.Println()
-		printJobs(jobs)
+		printJobs(jobs, status.Config.Runtime)
 		return nil
 	}
 
@@ -154,7 +158,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				IssueNumber: j.IssueNumber,
 				Title:       title,
 				Agent:       j.Agent,
-				Runtime:     deploy.Runtime,
+				Runtime:     j.EffectiveRuntime(deploy),
 				Status:      j.Status,
 				PRNumber:    pr,
 				CostUSD:     j.CostUSD,
@@ -196,13 +200,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			title = j.Name
 		}
 		if j.IssueNumber > 0 {
-			fmt.Printf("  #%-5d %-30s %-12s %-10s%s%s\n", j.IssueNumber, title, deploy.Runtime, j.Status, pr, cost)
+			fmt.Printf("  #%-5d %-30s %-12s %-10s%s%s\n", j.IssueNumber, title, j.EffectiveRuntime(deploy), j.Status, pr, cost)
 		} else {
 			agent := ""
 			if j.Agent != "autopilot" {
 				agent = fmt.Sprintf("[%s] ", j.Agent)
 			}
-			fmt.Printf("  %-6s %-30s %-12s %-10s%s%s\n", agent, title, deploy.Runtime, j.Status, pr, cost)
+			fmt.Printf("  %-6s %-30s %-12s %-10s%s%s\n", agent, title, j.EffectiveRuntime(deploy), j.Status, pr, cost)
 		}
 	}
 
@@ -240,7 +244,7 @@ func listAllDeployments() error {
 	return nil
 }
 
-func printJobs(jobs []daemon.JobResponse) {
+func printJobs(jobs []daemon.JobResponse, fallbackRuntime string) {
 	if len(jobs) == 0 {
 		fmt.Println("No jobs.")
 		return
@@ -259,14 +263,18 @@ func printJobs(jobs []daemon.JobResponse) {
 		if title == "" {
 			title = j.IssueTitle // fallback for older daemons
 		}
+		runtimeName := j.Runtime
+		if runtimeName == "" {
+			runtimeName = fallbackRuntime
+		}
 		if j.IssueNumber > 0 {
-			fmt.Printf("  #%-5d %-30s %-10s%s%s\n", j.IssueNumber, title, j.Status, pr, cost)
+			fmt.Printf("  #%-5d %-30s %-12s %-10s%s%s\n", j.IssueNumber, title, runtimeName, j.Status, pr, cost)
 		} else {
 			agent := ""
 			if j.Agent != "autopilot" {
 				agent = fmt.Sprintf("[%s] ", j.Agent)
 			}
-			fmt.Printf("  %-6s %-30s %-10s%s%s\n", agent, title, j.Status, pr, cost)
+			fmt.Printf("  %-6s %-30s %-12s %-10s%s%s\n", agent, title, runtimeName, j.Status, pr, cost)
 		}
 	}
 }

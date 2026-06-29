@@ -95,6 +95,7 @@ func TestJobCRUD(t *testing.T) {
 		DeploymentID: "deploy-jobs",
 		Agent:        "autopilot",
 		Name:         "issue-42",
+		Runtime:      sql.NullString{String: "codex", Valid: true},
 		IssueNumber:  42,
 		IssueTitle:   sql.NullString{String: "Fix auth", Valid: true},
 		Owner:        "o", Repo: "r", Status: StatusQueued,
@@ -126,6 +127,9 @@ func TestJobCRUD(t *testing.T) {
 	}
 	if got.Name != "issue-42" {
 		t.Errorf("got name %q, want %q", got.Name, "issue-42")
+	}
+	if !got.Runtime.Valid || got.Runtime.String != "codex" {
+		t.Errorf("got runtime %v, want codex", got.Runtime)
 	}
 }
 
@@ -449,6 +453,9 @@ INSERT INTO tasks (deployment_id, issue_number, owner, repo, status) VALUES ('d1
 		expectedName := "issue-" + fmt.Sprintf("%d", j.IssueNumber)
 		if j.Name != expectedName {
 			t.Errorf("issue %d: got name %q, want %q", j.IssueNumber, j.Name, expectedName)
+		}
+		if j.Runtime.Valid {
+			t.Errorf("issue %d: runtime = %v, want null fallback", j.IssueNumber, j.Runtime)
 		}
 	}
 }

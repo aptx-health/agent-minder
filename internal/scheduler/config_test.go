@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	_ "github.com/aptx-health/agent-minder/internal/runtime/claudecode"
+	_ "github.com/aptx-health/agent-minder/internal/runtime/codex"
 )
 
 func TestParseConfig(t *testing.T) {
@@ -164,6 +167,35 @@ jobs:
 		}
 		if j.Budget != 2.5 {
 			t.Errorf("budget = %f, want 2.5", j.Budget)
+		}
+	})
+
+	t.Run("with runtime", func(t *testing.T) {
+		cfg, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    schedule: "0 * * * *"
+    runtime: codex
+`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := cfg.Jobs["test"].Runtime; got != "codex" {
+			t.Errorf("runtime = %q, want codex", got)
+		}
+	})
+
+	t.Run("bad runtime", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    schedule: "0 * * * *"
+    runtime: nope
+`))
+		if err == nil {
+			t.Error("expected error for unknown runtime")
 		}
 	})
 }

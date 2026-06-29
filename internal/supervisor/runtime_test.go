@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
+	_ "github.com/aptx-health/agent-minder/internal/runtime/codex"
 )
 
 // fakeRuntime is a runtime.AgentRuntime stub used to verify that
@@ -106,6 +108,28 @@ func TestEnsureAgentDefPreparesRuntimeDefinition(t *testing.T) {
 	}
 	if string(rt.lastDef.Body) != string(body) {
 		t.Errorf("def body = %q, want %q", rt.lastDef.Body, body)
+	}
+}
+
+func TestRuntimeForJobUsesJobOverride(t *testing.T) {
+	store := testStore(t)
+	deploy := testDeployment(t, store)
+	deploy.Runtime = runtimepkg.NameClaudeCode
+	job := testJob(t, store, deploy)
+	job.Runtime = sql.NullString{String: runtimepkg.NameCodex, Valid: true}
+
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+	sup.SetRuntime(&fakeRuntime{})
+
+	rt, err := sup.RuntimeForJob(job)
+	if err != nil {
+		t.Fatalf("RuntimeForJob: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("RuntimeForJob returned nil")
+	}
+	if got := rt.Name(); got != runtimepkg.NameCodex {
+		t.Fatalf("RuntimeForJob runtime = %q, want %q", got, runtimepkg.NameCodex)
 	}
 }
 

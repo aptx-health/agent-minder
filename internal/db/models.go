@@ -41,8 +41,9 @@ type Job struct {
 	DeploymentID string `db:"deployment_id"`
 
 	// What to run.
-	Agent string `db:"agent"` // e.g., "autopilot", "reviewer", "dependency-updater"
-	Name  string `db:"name"`  // e.g., "issue-42", "weekly-deps-2026-04-01"
+	Agent   string         `db:"agent"`   // e.g., "autopilot", "reviewer", "dependency-updater"
+	Name    string         `db:"name"`    // e.g., "issue-42", "weekly-deps-2026-04-01"
+	Runtime sql.NullString `db:"runtime"` // optional per-job runtime override
 
 	// Context (nullable for proactive agents).
 	IssueNumber int            `db:"issue_number"`
@@ -104,6 +105,18 @@ func (j *Job) EffectiveMaxBudget(deploy *Deployment) float64 {
 // HasOverrides returns true if the job has per-job overrides.
 func (j *Job) HasOverrides() bool {
 	return j.MaxTurns.Valid || j.MaxBudgetOv.Valid
+}
+
+// EffectiveRuntime returns the per-job runtime override or the deployment
+// default.
+func (j *Job) EffectiveRuntime(deploy *Deployment) string {
+	if j.Runtime.Valid && j.Runtime.String != "" {
+		return j.Runtime.String
+	}
+	if deploy != nil && deploy.Runtime != "" {
+		return deploy.Runtime
+	}
+	return "claude-code"
 }
 
 // Job status constants.
@@ -168,6 +181,7 @@ type JobSchedule struct {
 	CronExpr     sql.NullString  `db:"cron_expr"`
 	TriggerExpr  sql.NullString  `db:"trigger_expr"`
 	Agent        string          `db:"agent"`
+	Runtime      sql.NullString  `db:"runtime"`
 	Description  sql.NullString  `db:"description"`
 	Budget       sql.NullFloat64 `db:"budget"`
 	MaxTurns     sql.NullInt64   `db:"max_turns"`
