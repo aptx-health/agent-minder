@@ -93,6 +93,9 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 		if def.Runtime != "" {
 			fmt.Printf("  runtime=%s", def.Runtime)
 		}
+		if def.Model != "" {
+			fmt.Printf("  model=%s", def.Model)
+		}
 		if def.Budget > 0 {
 			fmt.Printf("  budget=$%.2f", def.Budget)
 		}

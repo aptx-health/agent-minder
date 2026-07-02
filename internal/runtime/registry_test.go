@@ -142,6 +142,27 @@ func TestLookupRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestValidateModelName(t *testing.T) {
+	valid := []string{"", "opus", "gpt-5", "claude-opus-4-1-20250805", "provider/model:v1", " gpt-5 "}
+	for _, name := range valid {
+		if err := ValidateModelName(name); err != nil {
+			t.Errorf("ValidateModelName(%q) returned error: %v", name, err)
+		}
+	}
+
+	invalid := []string{"opus latest", "gpt;rm", "$(gpt)", "model,other"}
+	for _, name := range invalid {
+		err := ValidateModelName(name)
+		if err == nil {
+			t.Errorf("ValidateModelName(%q) accepted invalid model", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid model") {
+			t.Errorf("ValidateModelName(%q) error %q missing invalid model", name, err)
+		}
+	}
+}
+
 func TestRegisterRejectsDuplicate(t *testing.T) {
 	resetRegistry(t)
 	defer func() {

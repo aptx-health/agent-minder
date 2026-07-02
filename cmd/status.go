@@ -52,6 +52,7 @@ type jobJSON struct {
 	Title       string  `json:"title"`
 	Agent       string  `json:"agent,omitempty"`
 	Runtime     string  `json:"runtime,omitempty"`
+	Model       string  `json:"model,omitempty"`
 	Status      string  `json:"status"`
 	PRNumber    int     `json:"pr_number,omitempty"`
 	CostUSD     float64 `json:"cost_usd,omitempty"`
@@ -89,6 +90,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 					Title:       j.Title,
 					Agent:       j.Agent,
 					Runtime:     runtimeName,
+					Model:       j.Model,
 					Status:      j.Status,
 					PRNumber:    j.PRNumber,
 					CostUSD:     j.CostUSD,
@@ -159,6 +161,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				Title:       title,
 				Agent:       j.Agent,
 				Runtime:     j.EffectiveRuntime(deploy),
+				Model:       j.EffectiveModel(),
 				Status:      j.Status,
 				PRNumber:    pr,
 				CostUSD:     j.CostUSD,
@@ -200,13 +203,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			title = j.Name
 		}
 		if j.IssueNumber > 0 {
-			fmt.Printf("  #%-5d %-30s %-12s %-10s%s%s\n", j.IssueNumber, title, j.EffectiveRuntime(deploy), j.Status, pr, cost)
+			fmt.Printf("  #%-5d %-30s %-12s %-12s %-10s%s%s\n", j.IssueNumber, title, j.EffectiveRuntime(deploy), j.EffectiveModel(), j.Status, pr, cost)
 		} else {
 			agent := ""
 			if j.Agent != "autopilot" {
 				agent = fmt.Sprintf("[%s] ", j.Agent)
 			}
-			fmt.Printf("  %-6s %-30s %-12s %-10s%s%s\n", agent, title, j.EffectiveRuntime(deploy), j.Status, pr, cost)
+			fmt.Printf("  %-6s %-30s %-12s %-12s %-10s%s%s\n", agent, title, j.EffectiveRuntime(deploy), j.EffectiveModel(), j.Status, pr, cost)
 		}
 	}
 
@@ -268,13 +271,13 @@ func printJobs(jobs []daemon.JobResponse, fallbackRuntime string) {
 			runtimeName = fallbackRuntime
 		}
 		if j.IssueNumber > 0 {
-			fmt.Printf("  #%-5d %-30s %-12s %-10s%s%s\n", j.IssueNumber, title, runtimeName, j.Status, pr, cost)
+			fmt.Printf("  #%-5d %-30s %-12s %-12s %-10s%s%s\n", j.IssueNumber, title, runtimeName, j.Model, j.Status, pr, cost)
 		} else {
 			agent := ""
 			if j.Agent != "autopilot" {
 				agent = fmt.Sprintf("[%s] ", j.Agent)
 			}
-			fmt.Printf("  %-6s %-30s %-12s %-10s%s%s\n", agent, title, runtimeName, j.Status, pr, cost)
+			fmt.Printf("  %-6s %-30s %-12s %-12s %-10s%s%s\n", agent, title, runtimeName, j.Model, j.Status, pr, cost)
 		}
 	}
 }

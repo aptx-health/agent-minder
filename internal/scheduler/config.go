@@ -23,6 +23,7 @@ type JobDef struct {
 
 	Agent       string  `yaml:"agent"`       // agent def name (required)
 	Runtime     string  `yaml:"runtime"`     // optional doer runtime override
+	Model       string  `yaml:"model"`       // optional runtime-native model override
 	Description string  `yaml:"description"` // human-readable description
 	Budget      float64 `yaml:"budget"`      // per-run budget override (0 = use deployment default)
 	MaxTurns    int     `yaml:"max_turns"`   // per-run turn limit override (0 = use default)
@@ -103,6 +104,10 @@ func validateJobDef(name string, job *JobDef) error {
 		if err := runtime.Validate(job.Runtime); err != nil {
 			return fmt.Errorf("job %q: %w", name, err)
 		}
+	}
+	job.Model = runtime.NormalizeModelName(job.Model)
+	if err := runtime.ValidateModelName(job.Model); err != nil {
+		return fmt.Errorf("job %q: %w", name, err)
 	}
 
 	if job.Schedule == "" && job.Trigger == "" {

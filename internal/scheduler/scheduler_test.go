@@ -43,6 +43,7 @@ jobs:
     schedule: "0 9 * * 1"
     agent: dependency-updater
     runtime: codex
+    model: gpt-5
     description: "Check deps"
     budget: 3.0
   nightly-scan:
@@ -78,6 +79,9 @@ jobs:
 		if sched.Name == "weekly-deps" && (!sched.Runtime.Valid || sched.Runtime.String != "codex") {
 			t.Errorf("schedule %q: runtime = %v, want codex", sched.Name, sched.Runtime)
 		}
+		if sched.Name == "weekly-deps" && (!sched.Model.Valid || sched.Model.String != "gpt-5") {
+			t.Errorf("schedule %q: model = %v, want gpt-5", sched.Name, sched.Model)
+		}
 		if !sched.NextRunAt.Valid {
 			t.Errorf("schedule %q: next_run_at not set", sched.Name)
 		}
@@ -97,6 +101,7 @@ jobs:
     schedule: "* * * * *"
     agent: autopilot
     runtime: codex
+    model: gpt-5
     budget: 2.5
 `))
 
@@ -122,6 +127,9 @@ jobs:
 	}
 	if !jobs[0].Runtime.Valid || jobs[0].Runtime.String != "codex" {
 		t.Errorf("runtime = %v, want codex", jobs[0].Runtime)
+	}
+	if !jobs[0].Model.Valid || jobs[0].Model.String != "gpt-5" {
+		t.Errorf("model = %v, want gpt-5", jobs[0].Model)
 	}
 
 	// Verify schedule was updated.
@@ -151,6 +159,7 @@ jobs:
     schedule: "0 0 1 1 *"
     agent: autopilot
     runtime: codex
+    model: gpt-5
 `))
 
 	s := New(store, "test-sched", "acme", "widgets", cfg)
@@ -170,6 +179,9 @@ jobs:
 	}
 	if !jobs[0].Runtime.Valid || jobs[0].Runtime.String != "codex" {
 		t.Errorf("runtime = %v, want codex", jobs[0].Runtime)
+	}
+	if !jobs[0].Model.Valid || jobs[0].Model.String != "gpt-5" {
+		t.Errorf("model = %v, want gpt-5", jobs[0].Model)
 	}
 
 	// Non-existent schedule.

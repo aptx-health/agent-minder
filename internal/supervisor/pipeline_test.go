@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,25 @@ import (
 )
 
 // --- Test helpers ---
+
+func TestModelProcessExitDetailIncludesGuidanceAndLogTail(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(logPath, []byte("first line\nunknown model: opus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := modelProcessExitDetail("codex", " opus ", 2, logPath)
+	for _, want := range []string{
+		`model "opus"`,
+		`runtime "codex"`,
+		"remove model:",
+		"unknown model: opus",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("detail missing %q: %s", want, got)
+		}
+	}
+}
 
 // testStore creates a fresh SQLite store in a temp directory.
 func testStore(t *testing.T) *db.Store {

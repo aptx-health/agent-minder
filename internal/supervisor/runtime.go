@@ -91,10 +91,15 @@ func runtimeInvocationFor(sc *SlotContext, agentName, prompt, systemPrompt strin
 	if sc.GHToken != "" {
 		env["GITHUB_TOKEN"] = sc.GHToken
 	}
+	model := ""
+	if agentName == job.Agent {
+		model = job.EffectiveModel()
+	}
 
 	return runtimepkg.Invocation{
 		Workspace:    runtimepkg.Workspace{Dir: wsDir},
 		AgentName:    agentName,
+		Model:        model,
 		Prompt:       prompt,
 		SystemPrompt: systemPrompt,
 		AllowedTools: sc.AllowedTools,

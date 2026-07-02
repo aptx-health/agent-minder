@@ -88,6 +88,7 @@ func TestBuildArgs(t *testing.T) {
 	args := buildArgs(runtime.Invocation{
 		Workspace:    runtime.Workspace{Dir: dir},
 		AgentName:    "autopilot",
+		Model:        "gpt-5",
 		Prompt:       "do the thing",
 		SystemPrompt: "lessons here",
 		AllowedTools: []string{"Read", "Edit"},
@@ -99,6 +100,7 @@ func TestBuildArgs(t *testing.T) {
 		"exec",
 		"--json",
 		"--cd", dir,
+		"--model", "gpt-5",
 		"--sandbox", "workspace-write",
 		"-c", "sandbox_workspace_write.network_access=true",
 		"--add-dir", gitDir,

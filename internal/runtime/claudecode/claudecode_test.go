@@ -61,6 +61,7 @@ func TestPrepareAgentDef_Errors(t *testing.T) {
 func TestBuildArgs(t *testing.T) {
 	args := buildArgs(runtime.Invocation{
 		AgentName:    "autopilot",
+		Model:        "opus",
 		Prompt:       "do the thing",
 		SystemPrompt: "lessons here",
 		AllowedTools: []string{"Read", "Edit", "Bash(git:*)"},
@@ -72,6 +73,7 @@ func TestBuildArgs(t *testing.T) {
 		"-p",
 		"--output-format stream-json",
 		"--verbose",
+		"--model opus",
 		"--max-turns 50",
 		"--max-budget-usd 2.50",
 		"--allowedTools Read,Edit,Bash(git:*)",

@@ -169,7 +169,7 @@ func (w *safeWriter) Write(p []byte) (int, error) {
 //
 //	codex --ask-for-approval never exec --json --cd <worktree>
 //	  --sandbox workspace-write -c sandbox_workspace_write.network_access=true
-//	  [--add-dir <git-metadata-dir> ...] [--config key=value] <prompt>
+//	  [--model <name>] [--add-dir <git-metadata-dir> ...] [--config key=value] <prompt>
 //
 // `workspace-write` gives Codex enough access to edit Minder's worktree while
 // respecting the execution plane boundary. `--ask-for-approval never` must be
@@ -183,6 +183,9 @@ func buildArgs(inv runtime.Invocation) []string {
 	}
 	if inv.Workspace.Dir != "" {
 		args = append(args, "--cd", inv.Workspace.Dir)
+	}
+	if model := runtime.NormalizeModelName(inv.Model); model != "" {
+		args = append(args, "--model", model)
 	}
 	args = append(args,
 		"--sandbox", "workspace-write",

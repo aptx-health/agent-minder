@@ -44,6 +44,7 @@ type Job struct {
 	Agent   string         `db:"agent"`   // e.g., "autopilot", "reviewer", "dependency-updater"
 	Name    string         `db:"name"`    // e.g., "issue-42", "weekly-deps-2026-04-01"
 	Runtime sql.NullString `db:"runtime"` // optional per-job runtime override
+	Model   sql.NullString `db:"model"`   // optional per-job model override
 
 	// Context (nullable for proactive agents).
 	IssueNumber int            `db:"issue_number"`
@@ -119,6 +120,15 @@ func (j *Job) EffectiveRuntime(deploy *Deployment) string {
 	return "claude-code"
 }
 
+// EffectiveModel returns the per-job model override, if one was configured.
+// Empty means the selected runtime should use its own default model.
+func (j *Job) EffectiveModel() string {
+	if j.Model.Valid {
+		return j.Model.String
+	}
+	return ""
+}
+
 // Job status constants.
 const (
 	StatusQueued    = "queued"
@@ -182,6 +192,7 @@ type JobSchedule struct {
 	TriggerExpr  sql.NullString  `db:"trigger_expr"`
 	Agent        string          `db:"agent"`
 	Runtime      sql.NullString  `db:"runtime"`
+	Model        sql.NullString  `db:"model"`
 	Description  sql.NullString  `db:"description"`
 	Budget       sql.NullFloat64 `db:"budget"`
 	MaxTurns     sql.NullInt64   `db:"max_turns"`

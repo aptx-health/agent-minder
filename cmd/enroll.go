@@ -9,6 +9,7 @@ import (
 	"github.com/aptx-health/agent-minder/internal/discovery"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	"github.com/aptx-health/agent-minder/internal/onboarding"
+	"github.com/aptx-health/agent-minder/internal/runtime"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 	"github.com/spf13/cobra"
 )
@@ -26,11 +27,16 @@ Use --force to re-enroll a repo that's already been set up.`,
 	RunE: runEnroll,
 }
 
-var flagEnrollForce bool
+var (
+	flagEnrollForce   bool
+	flagEnrollRuntime string
+)
 
 func init() {
 	rootCmd.AddCommand(enrollCmd)
 	enrollCmd.Flags().BoolVar(&flagEnrollForce, "force", false, "Re-enroll, replacing existing configuration")
+	enrollCmd.Flags().StringVar(&flagEnrollRuntime, "runtime", "",
+		fmt.Sprintf("Runtime used for the onboarding agent (one of %v)", runtime.KnownNames()))
 }
 
 func runEnroll(cmd *cobra.Command, args []string) error {
@@ -46,6 +52,14 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	repoDir, err := gitpkg.TopLevel(dir)
 	if err != nil {
 		return fmt.Errorf("resolve repo: %w", err)
+	}
+	runtimeOverride := ""
+	if cmd.Flags().Changed("runtime") {
+		runtimeOverride = flagEnrollRuntime
+	}
+	runtimeResolution, err := runtime.Resolve(runtimeOverride, repoDir)
+	if err != nil {
+		return err
 	}
 
 	fmt.Println("Scanning repository...")
@@ -75,23 +89,17 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Created initial onboarding file: %s\n", filePath)
 
-	// Launch interactive Claude agent to fill in context + permissions.
-	claudePath, err := exec.LookPath("claude")
+	// Launch interactive onboarding agent to fill in context + permissions.
+	systemPrompt := buildEnrollSystemPrompt(info, filePath, agentReport, runtimeResolution.Name)
+	agentCmd, err := buildEnrollAgentCommand(runtimeResolution.Name, info.Path, systemPrompt)
 	if err != nil {
-		fmt.Println("\nClaude CLI not found. The inventory has been saved.")
-		fmt.Println("Install Claude CLI and re-run 'minder enroll' to complete setup.")
+		fmt.Printf("\n%s runtime not available. The inventory has been saved.\n", runtimeResolution.Name)
+		fmt.Printf("%v\n", err)
 		return nil
 	}
 
-	systemPrompt := buildEnrollSystemPrompt(info, filePath, agentReport)
-	agentCmd := exec.Command(claudePath, "--append-system-prompt", systemPrompt,
-		"Begin the onboarding interview for this repository.")
-	agentCmd.Dir = info.Path
-	agentCmd.Stdin = os.Stdin
-	agentCmd.Stdout = os.Stdout
-	agentCmd.Stderr = os.Stderr
-
 	fmt.Println("\nLaunching onboarding agent...")
+	fmt.Printf("Runtime: %s (%s)\n", runtimeResolution.Name, runtimeResolution.Source)
 	fmt.Println("The agent will ask about your repository and generate configuration.")
 
 	if err := agentCmd.Run(); err != nil {
@@ -156,7 +164,42 @@ func installAgentDefs(repoDir string) string {
 	return report.String()
 }
 
-func buildEnrollSystemPrompt(info *discovery.RepoInfo, filePath, agentReport string) string {
+func buildEnrollAgentCommand(runtimeName, repoDir, systemPrompt string) (*exec.Cmd, error) {
+	const beginPrompt = "Begin the onboarding interview for this repository."
+
+	var agentCmd *exec.Cmd
+	switch runtimeName {
+	case runtime.NameClaudeCode:
+		claudePath, err := exec.LookPath("claude")
+		if err != nil {
+			return nil, fmt.Errorf("install Claude CLI and re-run 'minder enroll' to complete setup: %w", err)
+		}
+		agentCmd = exec.Command(claudePath, "--append-system-prompt", systemPrompt, beginPrompt)
+
+	case runtime.NameCodex:
+		codexPath, err := exec.LookPath("codex")
+		if err != nil {
+			return nil, fmt.Errorf("install Codex CLI and re-run 'minder enroll --runtime codex' to complete setup: %w", err)
+		}
+		prompt := systemPrompt + "\n\n" + beginPrompt
+		agentCmd = exec.Command(codexPath,
+			"--cd", repoDir,
+			"--sandbox", "workspace-write",
+			"--ask-for-approval", "on-request",
+			prompt)
+
+	default:
+		return nil, fmt.Errorf("unsupported onboarding runtime %q", runtimeName)
+	}
+
+	agentCmd.Dir = repoDir
+	agentCmd.Stdin = os.Stdin
+	agentCmd.Stdout = os.Stdout
+	agentCmd.Stderr = os.Stderr
+	return agentCmd, nil
+}
+
+func buildEnrollSystemPrompt(info *discovery.RepoInfo, filePath, agentReport, onboardingRuntime string) string {
 	// Build template reference for the agent.
 	var templateRef strings.Builder
 	for _, tmpl := range supervisor.AgentTemplates() {
@@ -171,6 +214,7 @@ The repository has been scanned and an initial file created at: %s
 
 Repository: %s
 Languages: %v
+Onboarding runtime: %s
 
 %s
 
@@ -268,8 +312,12 @@ Each research agent should focus on what matters for its agent type:
 After all research agents complete, read each output file.
 
 ### 4. Write agent definitions using research results
-Agent definition files go in .claude/agents/<name>.md. Each file has YAML frontmatter
-between --- markers, followed by instruction text.
+Agent definition files MUST be written to .claude/agents/<name>.md. This is the
+canonical agent contract format for agent-minder, even when the repo's selected
+doer runtime is Codex. Claude Code reads these files directly. Codex receives
+the selected canonical definition as AGENTS.md at execution time.
+
+Each file has YAML frontmatter between --- markers, followed by instruction text.
 
 CRITICAL RULES:
 - The YAML frontmatter (between the --- markers) must NOT be modified EXCEPT to
@@ -314,7 +362,16 @@ Use MUST / [REQUIRED] / numbered steps.
 Reference frontmatter for each agent type (use these EXACTLY):
 %s
 
-### 5. Configure jobs.yaml
+### 5. Configure runtime defaults and jobs.yaml
+Create or update .agent-minder/config.yaml with the repo's default doer runtime.
+Ask the user which default they want. Valid values today:
+
+  runtime: claude-code
+  runtime: codex
+
+If the onboarding runtime is Codex, do NOT assume every future job should use Codex;
+ask the user. Individual jobs can override the repo default with runtime:.
+
 Create or update .agent-minder/jobs.yaml with trigger routes and cron schedules
 based on which agents the user installed:
 
@@ -333,16 +390,28 @@ Example jobs.yaml structure:
     bug-fix:
       trigger: "label:bug"
       agent: bug-fixer
+      runtime: claude-code  # optional override; omit to use .agent-minder/config.yaml
       description: "Fix bugs automatically"
       budget: 5.0
 
     weekly-deps:
       schedule: "0 15 * * 1"
       agent: dependency-updater
+      runtime: codex        # optional override; omit to use .agent-minder/config.yaml
       description: "Check for outdated dependencies"
       budget: 3.0
 
-### 6. Validate
+### 6. Harness compatibility checks
+- Claude Code: ensure every selected agent exists in .claude/agents/<name>.md and
+  has valid frontmatter.
+- Codex: do not create per-agent Codex files. Confirm canonical .claude/agents
+  definitions are present; agent-minder will materialize the selected definition
+  into AGENTS.md inside each runtime worktree.
+- Skills: Claude Code skills are not automatically portable to Codex. If you add
+  Claude-only skills in frontmatter, mention that Codex jobs may ignore them unless
+  the instruction body also contains explicit workflow steps.
+
+### 7. Validate
 - Validate agent defs: minder agents list --repo .
 - Validate jobs.yaml: minder jobs list --repo .
   Both use the actual Go YAML parser. If minder is not on PATH, use go run ./cmd/minder.
@@ -352,5 +421,5 @@ Example jobs.yaml structure:
 Be concise and efficient. The research agents do the heavy lifting — your job is to
 orchestrate the interview, launch research, and assemble the results into polished
 agent definitions.`,
-		filePath, info.Path, info.Inventory.Languages, agentReport, templateRef.String())
+		filePath, info.Path, info.Inventory.Languages, onboardingRuntime, agentReport, templateRef.String())
 }

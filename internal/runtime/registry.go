@@ -3,7 +3,9 @@ package runtime
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
+	"unicode"
 )
 
 // Known runtime names. ClaudeCode is the default and is the only runtime with
@@ -86,4 +88,33 @@ func Lookup(name string) (AgentRuntime, error) {
 	factory := factories[name]
 	registryMu.RUnlock()
 	return factory(), nil
+}
+
+// NormalizeModelName trims an optional runtime-native model name. Empty means
+// "use the selected runtime's default model".
+func NormalizeModelName(name string) string {
+	return strings.TrimSpace(name)
+}
+
+// ValidateModelName rejects malformed model names while intentionally avoiding
+// a runtime-specific model catalog. Runtimes and providers add aliases over time,
+// so a well-formed unknown name is passed through and, if unsupported, the CLI
+// error is surfaced with job context.
+func ValidateModelName(name string) error {
+	name = NormalizeModelName(name)
+	if name == "" {
+		return nil
+	}
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue
+		}
+		switch r {
+		case '-', '_', '.', ':', '/':
+			continue
+		default:
+			return fmt.Errorf("invalid model %q: use a runtime-native model name or alias without spaces or shell characters", name)
+		}
+	}
+	return nil
 }

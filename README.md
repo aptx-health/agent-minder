@@ -24,7 +24,7 @@ A few things that make it useful as a devops-minded layer:
 - Configuration lives in `.agent-minder/jobs.yaml`, checked into the repo. You can grep it, diff it, code-review it, and version it alongside the agent definitions in `.claude/agents/`.
 - Custom agents per task type: a `spike` posts research findings as a comment, `autopilot` opens a PR, `bug-fixer` writes a regression test before fixing the code. You tag once; the routing is done.
 - Multi-stage pipelines with conditional routing. After an agent opens a PR, a `reviewer` agent grades it (low-risk, needs-testing, or suspect). Low-risk PRs can auto-merge once CI passes.
-- `minder enroll` scans the repo, researches its stack and conventions, and generates tailored Claude Code agent definitions in `.claude/agents/`. The generated agents are standard subagents, usable inside or outside minder.
+- `minder enroll` scans the repo, researches its stack and conventions, and generates tailored canonical agent definitions in `.claude/agents/`. Claude Code reads those definitions directly; Codex receives the selected definition as runtime context.
 - Self-hosted and open source (MIT). Runs on your laptop in the foreground or as a daemon on a server with a remote client (`minder status --remote host:port`).
 
 ## Quick start
@@ -41,6 +41,7 @@ export GITHUB_TOKEN=ghp_...
 
 # Enroll a repo (scans, installs agents, configures jobs)
 minder enroll /path/to/repo
+minder enroll /path/to/repo --runtime codex
 
 # Deploy on issues
 minder deploy 42 --repo /path/to/repo --foreground
@@ -73,6 +74,7 @@ jobs:
     schedule: "0 9 * * 1"          # cron expression
     agent: dependency-updater
     runtime: codex                 # optional; falls back to deployment runtime
+    model: gpt-5                   # optional; passed through to the selected runtime
     description: "Check for outdated dependencies"
     budget: 3.0
 
@@ -84,6 +86,7 @@ jobs:
   spike:
     trigger: "label:spike"
     agent: spike
+    model: opus
     description: "Research and discovery"
     budget: 5.0
 ```
@@ -268,7 +271,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 | `minder agents list\|show\|add` | List, inspect, or create agent definitions |
 | `minder checkout [issue]` | Check out an agent's worktree for review (interactive picker, `--remote`) |
 | `minder logs [issue]` | View agent log output (interactive picker, `--follow`, `--remote`, `--raw`) |
-| `minder enroll [repo-dir]` | Scan a repo and generate onboarding config |
+| `minder enroll [repo-dir]` | Scan a repo and generate onboarding config (`--runtime` selects Claude or Codex for onboarding) |
 
 ### Deploy flags
 

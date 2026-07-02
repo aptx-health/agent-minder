@@ -337,6 +337,7 @@ type JobResponse struct {
 	Status       string  `json:"status"`
 	CurrentStage string  `json:"current_stage,omitempty"`
 	Runtime      string  `json:"runtime,omitempty"`
+	Model        string  `json:"model,omitempty"`
 	PRNumber     int     `json:"pr_number,omitempty"`
 	CostUSD      float64 `json:"cost_usd"`
 	Branch       string  `json:"branch,omitempty"`
@@ -389,6 +390,7 @@ func jobToResponse(j *db.Job, deploy *db.Deployment) JobResponse {
 		Status:       j.Status,
 		CurrentStage: j.CurrentStage.String,
 		Runtime:      j.EffectiveRuntime(deploy),
+		Model:        j.EffectiveModel(),
 		CostUSD:      j.CostUSD,
 		Branch:       j.Branch.String,
 		FailReason:   j.FailureReason.String,

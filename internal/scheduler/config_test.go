@@ -177,12 +177,16 @@ jobs:
     agent: autopilot
     schedule: "0 * * * *"
     runtime: codex
+    model: " gpt-5 "
 `))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if got := cfg.Jobs["test"].Runtime; got != "codex" {
 			t.Errorf("runtime = %q, want codex", got)
+		}
+		if got := cfg.Jobs["test"].Model; got != "gpt-5" {
+			t.Errorf("model = %q, want gpt-5", got)
 		}
 	})
 
@@ -196,6 +200,19 @@ jobs:
 `))
 		if err == nil {
 			t.Error("expected error for unknown runtime")
+		}
+	})
+
+	t.Run("bad model syntax", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    schedule: "0 * * * *"
+    model: "opus latest"
+`))
+		if err == nil {
+			t.Error("expected error for malformed model")
 		}
 	})
 }

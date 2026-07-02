@@ -26,6 +26,7 @@ type TriggerRoute struct {
 	Labels  []string // GitHub labels to match (AND logic)
 	Agent   string   // agent type to use
 	Runtime string   // optional job-level runtime override
+	Model   string   // optional job-level model override
 }
 
 // SetTriggerRoutes configures label→agent routing from jobs.yaml triggers.
@@ -238,6 +239,7 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 		Agent:        agent,
 		Name:         fmt.Sprintf("%s-issue-%d", agent, issue.Number),
 		Runtime:      sql.NullString{String: route.Runtime, Valid: route.Runtime != ""},
+		Model:        sql.NullString{String: route.Model, Valid: route.Model != ""},
 		IssueNumber:  issue.Number,
 		IssueTitle:   sql.NullString{String: issue.Title, Valid: true},
 		IssueBody:    sql.NullString{String: body, Valid: body != ""},

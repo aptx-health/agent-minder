@@ -339,7 +339,7 @@ func runForeground(deployID string) error {
 		}
 		for _, def := range cfg.Jobs {
 			if labels := def.TriggerLabels(); len(labels) > 0 {
-				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime})
+				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime, Model: def.Model})
 			}
 		}
 		if len(routes) > 0 {
@@ -464,7 +464,7 @@ func runDaemon(deployID string) error {
 		// Extract trigger routes and cron schedules for display.
 		for _, def := range cfg.Jobs {
 			if labels := def.TriggerLabels(); len(labels) > 0 {
-				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime})
+				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime, Model: def.Model})
 			}
 		}
 		if len(routes) > 0 {

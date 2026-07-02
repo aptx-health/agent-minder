@@ -689,11 +689,15 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	}
 
 	if exitCode != 0 {
+		detail := fmt.Sprintf("agent process exited with code %d before producing a successful result", exitCode)
+		if inv.Model != "" && rt != nil {
+			detail = modelProcessExitDetail(rt.Name(), inv.Model, exitCode, sc.LogPath)
+		}
 		return stageResult{
 			success: false,
 			failed:  true,
 			reason:  "process_exit",
-			detail:  fmt.Sprintf("agent process exited with code %d before producing a successful result", exitCode),
+			detail:  detail,
 		}
 	}
 
@@ -738,6 +742,36 @@ func truncateFailureDetail(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func modelProcessExitDetail(runtimeName, model string, exitCode int, logPath string) string {
+	model = runtimepkg.NormalizeModelName(model)
+	detail := fmt.Sprintf(
+		"agent process exited with code %d while using model %q on runtime %q. Check that the job's model value is valid for that runtime, or remove model: to use the runtime default.",
+		exitCode, model, runtimeName,
+	)
+	if tail := readLogTail(logPath, 1200); tail != "" {
+		detail += " Log tail: " + tail
+	}
+	return detail
+}
+
+func readLogTail(path string, maxLen int) string {
+	if path == "" || maxLen <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return ""
+	}
+	if len(s) <= maxLen {
+		return s
+	}
+	return strings.TrimSpace(s[len(s)-maxLen:])
 }
 
 // usageLimitWaitDuration is how long to sleep before retrying after a usage
