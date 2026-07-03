@@ -364,7 +364,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	job := sc.Job
 	contract := m.contract
 
-	sc.EmitEvent("started", fmt.Sprintf("Agent started on %s: %s", sc.JobLabel(), job.IssueTitle.String))
+	sc.EmitEvent("started", formatJobStartedSummary(sc))
 
 	// --- One-time setup ---
 
@@ -742,6 +742,25 @@ func truncateFailureDetail(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func formatJobStartedSummary(sc *SlotContext) string {
+	job := sc.Job
+	title := job.IssueTitle.String
+	if title == "" {
+		title = job.Name
+	}
+	runtimeName := job.EffectiveRuntime(sc.Deploy)
+	if sc.sup != nil {
+		if rt, err := sc.sup.RuntimeForJob(job); err == nil && rt != nil {
+			runtimeName = rt.Name()
+		}
+	}
+	parts := []string{fmt.Sprintf("runtime: %s", runtimeName)}
+	if model := job.EffectiveModel(); model != "" {
+		parts = append(parts, fmt.Sprintf("model: %s", model))
+	}
+	return fmt.Sprintf("Agent started on %s (%s): %s", sc.JobLabel(), strings.Join(parts, ", "), title)
 }
 
 func modelProcessExitDetail(runtimeName, model string, exitCode int, logPath string) string {

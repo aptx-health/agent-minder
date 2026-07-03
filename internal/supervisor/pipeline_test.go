@@ -38,6 +38,40 @@ func TestModelProcessExitDetailIncludesGuidanceAndLogTail(t *testing.T) {
 	}
 }
 
+func TestFormatJobStartedSummaryIncludesRuntimeAndModel(t *testing.T) {
+	deploy := &db.Deployment{Runtime: runtimepkg.NameClaudeCode}
+	job := &db.Job{
+		Agent:      "autopilot",
+		Name:       "autopilot-issue-8",
+		Runtime:    sql.NullString{String: runtimepkg.NameCodex, Valid: true},
+		Model:      sql.NullString{String: "gpt-5.5", Valid: true},
+		IssueTitle: sql.NullString{String: "Snapshot layer", Valid: true},
+	}
+	sc := &SlotContext{Deploy: deploy, Job: job}
+
+	got := formatJobStartedSummary(sc)
+	want := "Agent started on autopilot-issue-8 (runtime: codex, model: gpt-5.5): Snapshot layer"
+	if got != want {
+		t.Fatalf("formatJobStartedSummary() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatJobStartedSummaryOmitsEmptyModel(t *testing.T) {
+	deploy := &db.Deployment{Runtime: runtimepkg.NameClaudeCode}
+	job := &db.Job{
+		Agent:      "autopilot",
+		Name:       "weekly-security-20260708-1500",
+		IssueTitle: sql.NullString{},
+	}
+	sc := &SlotContext{Deploy: deploy, Job: job}
+
+	got := formatJobStartedSummary(sc)
+	want := "Agent started on weekly-security-20260708-1500 (runtime: claude-code): weekly-security-20260708-1500"
+	if got != want {
+		t.Fatalf("formatJobStartedSummary() = %q, want %q", got, want)
+	}
+}
+
 // testStore creates a fresh SQLite store in a temp directory.
 func testStore(t *testing.T) *db.Store {
 	t.Helper()
