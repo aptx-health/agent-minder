@@ -79,8 +79,8 @@ func init() {
 	deployCmd.Flags().StringVar(&flagBaseBranch, "base-branch", "", "Base branch (default: auto-detect)")
 	deployCmd.Flags().StringVar(&flagSkipLabel, "skip-label", "no-agent", "Label to skip issues")
 	deployCmd.Flags().StringVar(&flagAgent, "agent", "autopilot", "Agent type to use")
-	deployCmd.Flags().StringVar(&flagRuntime, "runtime", runtime.DefaultName,
-		fmt.Sprintf("Doer runtime (one of %v)", runtime.KnownNames()))
+	deployCmd.Flags().StringVar(&flagRuntime, "runtime", "",
+		fmt.Sprintf("Doer runtime override (one of %v)", runtime.KnownNames()))
 
 	// Hidden flags for daemon re-exec.
 	deployCmd.Flags().BoolVar(&flagDaemon, "daemon", false, "")
@@ -90,15 +90,13 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
-	// Validate runtime selection up-front so a typo fails before we touch the
-	// filesystem, the DB, or GitHub. The daemon re-exec path also runs through
-	// this check because it re-parses the same flag.
-	if err := runtime.Validate(flagRuntime); err != nil {
-		return err
-	}
-
 	// If this is a daemon re-exec, run the daemon directly.
 	if flagDaemon && flagDeployID != "" {
+		if flagRuntime != "" {
+			if err := runtime.Validate(flagRuntime); err != nil {
+				return err
+			}
+		}
 		return runDaemon(flagDeployID)
 	}
 
@@ -114,6 +112,14 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	// Resolve repo first — needed to check for jobs.yaml.
 	repoDir, err := resolveRepoDir(flagRepo)
+	if err != nil {
+		return err
+	}
+	runtimeOverride := ""
+	if cmd.Flags().Changed("runtime") {
+		runtimeOverride = flagRuntime
+	}
+	runtimeResolution, err := runtime.Resolve(runtimeOverride, repoDir)
 	if err != nil {
 		return err
 	}
@@ -168,7 +174,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		MaxAgents:      flagMaxAgents,
 		MaxTurns:       flagMaxTurns,
 		MaxBudgetUSD:   flagBudget,
-		Runtime:        flagRuntime,
+		Runtime:        runtimeResolution.Name,
 		AnalyzerModel:  flagModel,
 		SkipLabel:      flagSkipLabel,
 		AutoMerge:      flagAutoMerge,
@@ -197,8 +203,8 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Deploy %s: %s/%s (%s)\n", deployID, owner, repo, mode)
 	fmt.Printf("  Issues: %v\n", issues)
-	fmt.Printf("  Agents: %d, Turns: %d, Budget: $%.2f/task, Total: $%.2f\n",
-		flagMaxAgents, flagMaxTurns, flagBudget, flagTotalBudget)
+	fmt.Printf("  Agents: %d, Runtime: %s (%s), Turns: %d, Budget: $%.2f/task, Total: $%.2f\n",
+		flagMaxAgents, deploy.Runtime, runtimeResolution.Source, flagMaxTurns, flagBudget, flagTotalBudget)
 
 	// Prepare: fetch issues, create jobs, build dep graph.
 	if len(issues) > 0 {
@@ -263,7 +269,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	daemonArgs = append(daemonArgs, "--total-budget", fmt.Sprintf("%.2f", flagTotalBudget))
 	daemonArgs = append(daemonArgs, "--model", flagModel)
 	daemonArgs = append(daemonArgs, "--agent", flagAgent)
-	daemonArgs = append(daemonArgs, "--runtime", flagRuntime)
+	daemonArgs = append(daemonArgs, "--runtime", deploy.Runtime)
 	daemonArgs = append(daemonArgs, "--base-branch", baseBranch)
 	if flagAutoMerge {
 		daemonArgs = append(daemonArgs, "--auto-merge")
@@ -316,7 +322,7 @@ func runForeground(deployID string) error {
 
 	// Create supervisor.
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
-	if rt, err := selectRuntime(flagRuntime); err != nil {
+	if rt, err := selectRuntime(deploy.Runtime); err != nil {
 		return err
 	} else if rt != nil {
 		sup.SetRuntime(rt)
@@ -333,7 +339,7 @@ func runForeground(deployID string) error {
 		}
 		for _, def := range cfg.Jobs {
 			if labels := def.TriggerLabels(); len(labels) > 0 {
-				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent})
+				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime, Model: def.Model})
 			}
 		}
 		if len(routes) > 0 {
@@ -439,7 +445,7 @@ func runDaemon(deployID string) error {
 	}
 
 	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
-	if rt, err := selectRuntime(flagRuntime); err != nil {
+	if rt, err := selectRuntime(deploy.Runtime); err != nil {
 		return err
 	} else if rt != nil {
 		sup.SetRuntime(rt)
@@ -458,7 +464,7 @@ func runDaemon(deployID string) error {
 		// Extract trigger routes and cron schedules for display.
 		for _, def := range cfg.Jobs {
 			if labels := def.TriggerLabels(); len(labels) > 0 {
-				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent})
+				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime, Model: def.Model})
 			}
 		}
 		if len(routes) > 0 {
@@ -557,7 +563,11 @@ func printStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute
 		fmt.Printf("  Watch: %s → autopilot\n", deploy.WatchFilter.String)
 	}
 	for _, r := range routes {
-		fmt.Printf("  Trigger: label:%s → %s\n", strings.Join(r.Labels, ","), r.Agent)
+		runtimeSuffix := ""
+		if r.Runtime != "" {
+			runtimeSuffix = fmt.Sprintf(" via %s", r.Runtime)
+		}
+		fmt.Printf("  Trigger: label:%s → %s%s\n", strings.Join(r.Labels, ","), r.Agent, runtimeSuffix)
 	}
 	schedules, _ := store.GetEnabledSchedules(deployID)
 	for _, s := range schedules {
@@ -566,7 +576,11 @@ func printStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute
 			if s.NextRunAt.Valid {
 				next = s.NextRunAt.Time.Format("Mon 15:04 UTC")
 			}
-			fmt.Printf("  Cron: %s (%s) → %s [next: %s]\n", s.Name, s.CronExpr.String, s.Agent, next)
+			runtimeSuffix := ""
+			if s.Runtime.Valid {
+				runtimeSuffix = fmt.Sprintf(" via %s", s.Runtime.String)
+			}
+			fmt.Printf("  Cron: %s (%s) → %s%s [next: %s]\n", s.Name, s.CronExpr.String, s.Agent, runtimeSuffix, next)
 		}
 	}
 	if len(routes) == 0 && len(schedules) == 0 && (!deploy.WatchFilter.Valid || deploy.WatchFilter.String == "") {

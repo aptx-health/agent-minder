@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,59 @@ import (
 )
 
 // --- Test helpers ---
+
+func TestModelProcessExitDetailIncludesGuidanceAndLogTail(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(logPath, []byte("first line\nunknown model: opus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := modelProcessExitDetail("codex", " opus ", 2, logPath)
+	for _, want := range []string{
+		`model "opus"`,
+		`runtime "codex"`,
+		"remove model:",
+		"unknown model: opus",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("detail missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestFormatJobStartedSummaryIncludesRuntimeAndModel(t *testing.T) {
+	deploy := &db.Deployment{Runtime: runtimepkg.NameClaudeCode}
+	job := &db.Job{
+		Agent:      "autopilot",
+		Name:       "autopilot-issue-8",
+		Runtime:    sql.NullString{String: runtimepkg.NameCodex, Valid: true},
+		Model:      sql.NullString{String: "gpt-5.5", Valid: true},
+		IssueTitle: sql.NullString{String: "Snapshot layer", Valid: true},
+	}
+	sc := &SlotContext{Deploy: deploy, Job: job}
+
+	got := formatJobStartedSummary(sc)
+	want := "Agent started on autopilot-issue-8 (runtime: codex, model: gpt-5.5): Snapshot layer"
+	if got != want {
+		t.Fatalf("formatJobStartedSummary() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatJobStartedSummaryOmitsEmptyModel(t *testing.T) {
+	deploy := &db.Deployment{Runtime: runtimepkg.NameClaudeCode}
+	job := &db.Job{
+		Agent:      "autopilot",
+		Name:       "weekly-security-20260708-1500",
+		IssueTitle: sql.NullString{},
+	}
+	sc := &SlotContext{Deploy: deploy, Job: job}
+
+	got := formatJobStartedSummary(sc)
+	want := "Agent started on weekly-security-20260708-1500 (runtime: claude-code): weekly-security-20260708-1500"
+	if got != want {
+		t.Fatalf("formatJobStartedSummary() = %q, want %q", got, want)
+	}
+}
 
 // testStore creates a fresh SQLite store in a temp directory.
 func testStore(t *testing.T) *db.Store {
@@ -507,6 +561,49 @@ func TestPipeline_ReviewSuspectRetry(t *testing.T) {
 	retryPrompt := stages[2].Inv.Prompt
 	if !strContains(retryPrompt, "Review Feedback") {
 		t.Errorf("retry code stage prompt should contain 'Review Feedback', got: %s", truncate(retryPrompt, 200))
+	}
+}
+
+func TestPipeline_ReviewSuspectSkipLogsGateNotFailure(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = true
+	})
+
+	h.hooks.DetectPRFn = func(ctx context.Context) int {
+		return 300
+	}
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{
+			Risk:    "suspect",
+			Summary: "Found blocking issues",
+			Issues:  []string{"Missing stale-lock recovery"},
+		}
+	}
+
+	job := testJob(t, h.store, h.deploy)
+	contract := DefaultAutopilotContract() // review on_failure=skip by default.
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	events := h.events()
+	if !hasEvent(events, "info", `Stage "review" review gate reported suspect`) {
+		t.Fatalf("expected review gate skip event, got %#v", events)
+	}
+	if hasEvent(events, "info", `Stage "review" failed`) {
+		t.Fatalf("did not expect review stage failure wording, got %#v", events)
+	}
+
+	updated, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if updated.Status != db.StatusReviewed {
+		t.Fatalf("status = %q, want %q", updated.Status, db.StatusReviewed)
+	}
+	if !updated.ReviewRisk.Valid || updated.ReviewRisk.String != "suspect" {
+		t.Fatalf("review_risk = %+v, want suspect", updated.ReviewRisk)
 	}
 }
 

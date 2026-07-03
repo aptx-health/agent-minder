@@ -91,10 +91,15 @@ func runtimeInvocationFor(sc *SlotContext, agentName, prompt, systemPrompt strin
 	if sc.GHToken != "" {
 		env["GITHUB_TOKEN"] = sc.GHToken
 	}
+	model := ""
+	if agentName == job.Agent {
+		model = job.EffectiveModel()
+	}
 
 	return runtimepkg.Invocation{
 		Workspace:    runtimepkg.Workspace{Dir: wsDir},
 		AgentName:    agentName,
+		Model:        model,
 		Prompt:       prompt,
 		SystemPrompt: systemPrompt,
 		AllowedTools: sc.AllowedTools,
@@ -159,7 +164,13 @@ func (sc *SlotContext) runStageThroughRuntime(
 		}
 		return exit, result, sink, err
 	}
-	rt := sc.sup.Runtime()
+	rt, err := sc.sup.RuntimeForJob(sc.Job)
+	if err != nil {
+		return 0, nil, sink, err
+	}
+	if rt == nil {
+		return 0, nil, sink, runtimepkg.ErrNotSupported
+	}
 	exit, err := rt.Run(ctx, inv, sink, logFile)
 	result, _ := rt.ParseResult(sc.LogPath)
 	return exit, result, sink, err
@@ -184,7 +195,10 @@ func (sc *SlotContext) resumeThroughRuntime(
 		result, usageLimit, err := sc.Hooks.ResumeFn(ctx, sessionID, f)
 		return result, usageLimit, err
 	}
-	rt := sc.sup.Runtime()
+	rt, err := sc.sup.RuntimeForJob(sc.Job)
+	if err != nil {
+		return nil, false, err
+	}
 	if rt == nil {
 		return nil, false, runtimepkg.ErrNotSupported
 	}

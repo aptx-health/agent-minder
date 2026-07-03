@@ -159,7 +159,7 @@ func (c *ClaudeRuntime) exec(ctx context.Context, args []string, workDir string,
 // `internal/supervisor/prompt.go:buildAgentArgs`):
 //
 //	--agent <name> -p --output-format stream-json --verbose
-//	--max-turns N --max-budget-usd F --allowedTools <csv>
+//	[--model <name>] --max-turns N --max-budget-usd F --allowedTools <csv>
 //	[--append-system-prompt <text>]
 //	-- <prompt>
 func buildArgs(inv runtime.Invocation) []string {
@@ -168,6 +168,9 @@ func buildArgs(inv runtime.Invocation) []string {
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
+	}
+	if model := runtime.NormalizeModelName(inv.Model); model != "" {
+		args = append(args, "--model", model)
 	}
 	if inv.Limits.MaxTurns > 0 {
 		args = append(args, "--max-turns", strconv.Itoa(inv.Limits.MaxTurns))

@@ -33,6 +33,7 @@ type AgentDefinition struct {
 type Invocation struct {
 	Workspace    Workspace
 	AgentName    string   // must match a prior PrepareAgentDef
+	Model        string   // optional runtime-native model name or alias
 	Prompt       string   // assembled user prompt / context
 	SystemPrompt string   // optional system-prompt append (e.g., lessons)
 	AllowedTools []string // runtime translates to its own gating; may ignore

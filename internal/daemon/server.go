@@ -154,8 +154,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	resp := make([]JobResponse, 0, len(jobs))
+	deploy, _ := s.store.GetDeployment(s.deployID)
 	for _, j := range jobs {
-		resp = append(resp, jobToResponse(j))
+		resp = append(resp, jobToResponse(j, deploy))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -173,7 +174,8 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, jobToResponse(job))
+	deploy, _ := s.store.GetDeployment(s.deployID)
+	writeJSON(w, http.StatusOK, jobToResponse(job, deploy))
 }
 
 func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
@@ -334,6 +336,8 @@ type JobResponse struct {
 	Repo         string  `json:"repo"`
 	Status       string  `json:"status"`
 	CurrentStage string  `json:"current_stage,omitempty"`
+	Runtime      string  `json:"runtime,omitempty"`
+	Model        string  `json:"model,omitempty"`
 	PRNumber     int     `json:"pr_number,omitempty"`
 	CostUSD      float64 `json:"cost_usd"`
 	Branch       string  `json:"branch,omitempty"`
@@ -367,7 +371,7 @@ type LessonResponse struct {
 
 // --- Helpers ---
 
-func jobToResponse(j *db.Job) JobResponse {
+func jobToResponse(j *db.Job, deploy *db.Deployment) JobResponse {
 	// Title: prefer issue title for reactive jobs, fall back to job name.
 	title := j.IssueTitle.String
 	if title == "" {
@@ -385,6 +389,8 @@ func jobToResponse(j *db.Job) JobResponse {
 		Repo:         j.Repo,
 		Status:       j.Status,
 		CurrentStage: j.CurrentStage.String,
+		Runtime:      j.EffectiveRuntime(deploy),
+		Model:        j.EffectiveModel(),
 		CostUSD:      j.CostUSD,
 		Branch:       j.Branch.String,
 		FailReason:   j.FailureReason.String,

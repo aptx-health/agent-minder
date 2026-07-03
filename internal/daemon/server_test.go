@@ -34,6 +34,7 @@ func testServer(t *testing.T) (*Server, *db.Store) {
 		MaxAgents:      3,
 		MaxTurns:       50,
 		MaxBudgetUSD:   5.0,
+		Runtime:        "claude-code",
 		AnalyzerModel:  "sonnet",
 		SkipLabel:      "no-agent",
 		TotalBudgetUSD: 25.0,
@@ -137,6 +138,9 @@ func TestHandleTasks(t *testing.T) {
 	if jobs[0].Title != "Fix auth" {
 		t.Errorf("title = %q, want %q", jobs[0].Title, "Fix auth")
 	}
+	if jobs[0].Runtime != "claude-code" {
+		t.Errorf("runtime = %q, want claude-code", jobs[0].Runtime)
+	}
 }
 
 func TestHandleTaskByID(t *testing.T) {
@@ -146,6 +150,7 @@ func TestHandleTaskByID(t *testing.T) {
 		DeploymentID: "test-deploy",
 		IssueNumber:  99,
 		IssueTitle:   sql.NullString{String: "Add feature", Valid: true},
+		Runtime:      sql.NullString{String: "codex", Valid: true},
 		Owner:        "acme",
 		Repo:         "widgets",
 		Status:       db.StatusQueued,
@@ -172,6 +177,9 @@ func TestHandleTaskByID(t *testing.T) {
 	}
 	if resp.Title != "Add feature" {
 		t.Errorf("title = %q, want %q", resp.Title, "Add feature")
+	}
+	if resp.Runtime != "codex" {
+		t.Errorf("runtime = %q, want codex", resp.Runtime)
 	}
 
 	// Non-existent task → 404.

@@ -152,7 +152,9 @@ func (sc *SlotContext) EnsureAgentDef(name AgentName) (AgentDefSource, error) {
 	if err != nil {
 		return "", err
 	}
-	if rt := sc.sup.Runtime(); rt != nil {
+	if rt, err := sc.sup.RuntimeForJob(sc.Job); err != nil {
+		return "", err
+	} else if rt != nil {
 		if err := rt.PrepareAgentDef(context.Background(), runtimepkg.Workspace{Dir: sc.WorktreePath}, runtimepkg.AgentDefinition{
 			Name:   string(name),
 			Source: source.Description(),
@@ -362,7 +364,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	job := sc.Job
 	contract := m.contract
 
-	sc.EmitEvent("started", fmt.Sprintf("Agent started on %s: %s", sc.JobLabel(), job.IssueTitle.String))
+	sc.EmitEvent("started", formatJobStartedSummary(sc))
 
 	// --- One-time setup ---
 
@@ -558,7 +560,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 		switch onFailure {
 		case "skip":
-			sc.EmitEvent("info", fmt.Sprintf("Stage %q failed on %s, skipping", stageName, sc.JobLabel()))
+			sc.EmitEvent("info", formatStageSkippedSummary(stageName, sc.JobLabel(), result))
 			continue
 
 		case "retry":
@@ -615,7 +617,10 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 
 	debugLog("stage execute", "stage", stage.Name, "agent", agentName, "label", sc.JobLabel())
 
-	rt := sc.sup.Runtime()
+	rt, rtErr := sc.sup.RuntimeForJob(job)
+	if rtErr != nil {
+		return stageResult{success: false, failed: true, reason: "runtime_config", detail: rtErr.Error()}
+	}
 	runtimeAvailable := rt != nil || (sc.Hooks != nil && sc.Hooks.RunStageFn != nil)
 	if !runtimeAvailable {
 		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for %s — bailing", sc.JobLabel()))
@@ -684,11 +689,15 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	}
 
 	if exitCode != 0 {
+		detail := fmt.Sprintf("agent process exited with code %d before producing a successful result", exitCode)
+		if inv.Model != "" && rt != nil {
+			detail = modelProcessExitDetail(rt.Name(), inv.Model, exitCode, sc.LogPath)
+		}
 		return stageResult{
 			success: false,
 			failed:  true,
 			reason:  "process_exit",
-			detail:  fmt.Sprintf("agent process exited with code %d before producing a successful result", exitCode),
+			detail:  detail,
 		}
 	}
 
@@ -733,6 +742,66 @@ func truncateFailureDetail(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func formatJobStartedSummary(sc *SlotContext) string {
+	job := sc.Job
+	title := job.IssueTitle.String
+	if title == "" {
+		title = job.Name
+	}
+	runtimeName := job.EffectiveRuntime(sc.Deploy)
+	if sc.sup != nil {
+		if rt, err := sc.sup.RuntimeForJob(job); err == nil && rt != nil {
+			runtimeName = rt.Name()
+		}
+	}
+	parts := []string{fmt.Sprintf("runtime: %s", runtimeName)}
+	if model := job.EffectiveModel(); model != "" {
+		parts = append(parts, fmt.Sprintf("model: %s", model))
+	}
+	return fmt.Sprintf("Agent started on %s (%s): %s", sc.JobLabel(), strings.Join(parts, ", "), title)
+}
+
+func formatStageSkippedSummary(stageName, jobLabel string, result stageResult) string {
+	if result.assessment != nil {
+		risk := result.assessment.Risk
+		if risk == "" {
+			risk = "unknown"
+		}
+		return fmt.Sprintf("Stage %q review gate reported %s on %s, skipping", stageName, risk, jobLabel)
+	}
+	return fmt.Sprintf("Stage %q failed on %s, skipping", stageName, jobLabel)
+}
+
+func modelProcessExitDetail(runtimeName, model string, exitCode int, logPath string) string {
+	model = runtimepkg.NormalizeModelName(model)
+	detail := fmt.Sprintf(
+		"agent process exited with code %d while using model %q on runtime %q. Check that the job's model value is valid for that runtime, or remove model: to use the runtime default.",
+		exitCode, model, runtimeName,
+	)
+	if tail := readLogTail(logPath, 1200); tail != "" {
+		detail += " Log tail: " + tail
+	}
+	return detail
+}
+
+func readLogTail(path string, maxLen int) string {
+	if path == "" || maxLen <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return ""
+	}
+	if len(s) <= maxLen {
+		return s
+	}
+	return strings.TrimSpace(s[len(s)-maxLen:])
 }
 
 // usageLimitWaitDuration is how long to sleep before retrying after a usage
@@ -825,7 +894,10 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
 	prompt := renderReviewContext(ctx, sc)
-	if sc.sup.Runtime() == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
+	if rt, err := sc.sup.RuntimeForJob(job); err != nil {
+		sc.EmitEvent("error", fmt.Sprintf("Runtime config error for review of %s: %v", sc.JobLabel(), err))
+		return stageResult{success: false}
+	} else if rt == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
 		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for review of %s", sc.JobLabel()))
 		return stageResult{success: false}
 	}
@@ -933,7 +1005,7 @@ func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
 		ghClient.RemoveLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
 	}
 
-	rt := sc.sup.Runtime()
+	rt, _ := sc.sup.RuntimeForJob(job)
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
 	reason, detail := "", ""

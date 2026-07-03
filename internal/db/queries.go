@@ -79,10 +79,10 @@ func (s *Store) UpdateDeploymentCarriedCost(id string, cost float64) error {
 // CreateJob inserts a new job.
 func (s *Store) CreateJob(j *Job) error {
 	res, err := s.db.Exec(`INSERT INTO jobs
-		(deployment_id, agent, name, issue_number, issue_title, issue_body,
+		(deployment_id, agent, name, runtime, model, issue_number, issue_title, issue_body,
 		 owner, repo, status, dependencies, stages_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.DeploymentID, j.Agent, j.Name, j.IssueNumber, j.IssueTitle, j.IssueBody,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.IssueNumber, j.IssueTitle, j.IssueBody,
 		j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON)
 	if err != nil {
 		return err
@@ -96,10 +96,10 @@ func (s *Store) CreateJob(j *Job) error {
 func (s *Store) BulkCreateJobs(jobs []*Job) error {
 	for _, j := range jobs {
 		_, err := s.db.Exec(`INSERT OR IGNORE INTO jobs
-			(deployment_id, agent, name, issue_number, issue_title, issue_body,
+			(deployment_id, agent, name, runtime, model, issue_number, issue_title, issue_body,
 			 owner, repo, status, dependencies, stages_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			j.DeploymentID, j.Agent, j.Name, j.IssueNumber, j.IssueTitle, j.IssueBody,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.IssueNumber, j.IssueTitle, j.IssueBody,
 			j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON)
 		if err != nil {
 			return err
@@ -578,10 +578,10 @@ func (s *Store) GetOnboarding(repoDir string) (*RepoOnboarding, error) {
 // UpsertSchedule inserts or updates a job schedule.
 func (s *Store) UpsertSchedule(js *JobSchedule) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO job_schedules
-		(name, deployment_id, cron_expr, trigger_expr, agent, description, budget, max_turns, enabled, next_run_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(name, deployment_id, cron_expr, trigger_expr, agent, runtime, model, description, budget, max_turns, enabled, next_run_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		js.Name, js.DeploymentID, js.CronExpr, js.TriggerExpr,
-		js.Agent, js.Description, js.Budget, js.MaxTurns, js.Enabled, js.NextRunAt)
+		js.Agent, js.Runtime, js.Model, js.Description, js.Budget, js.MaxTurns, js.Enabled, js.NextRunAt)
 	return err
 }
 
