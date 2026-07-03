@@ -560,7 +560,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 		switch onFailure {
 		case "skip":
-			sc.EmitEvent("info", fmt.Sprintf("Stage %q failed on %s, skipping", stageName, sc.JobLabel()))
+			sc.EmitEvent("info", formatStageSkippedSummary(stageName, sc.JobLabel(), result))
 			continue
 
 		case "retry":
@@ -761,6 +761,17 @@ func formatJobStartedSummary(sc *SlotContext) string {
 		parts = append(parts, fmt.Sprintf("model: %s", model))
 	}
 	return fmt.Sprintf("Agent started on %s (%s): %s", sc.JobLabel(), strings.Join(parts, ", "), title)
+}
+
+func formatStageSkippedSummary(stageName, jobLabel string, result stageResult) string {
+	if result.assessment != nil {
+		risk := result.assessment.Risk
+		if risk == "" {
+			risk = "unknown"
+		}
+		return fmt.Sprintf("Stage %q review gate reported %s on %s, skipping", stageName, risk, jobLabel)
+	}
+	return fmt.Sprintf("Stage %q failed on %s, skipping", stageName, jobLabel)
 }
 
 func modelProcessExitDetail(runtimeName, model string, exitCode int, logPath string) string {

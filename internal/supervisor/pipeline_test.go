@@ -564,6 +564,49 @@ func TestPipeline_ReviewSuspectRetry(t *testing.T) {
 	}
 }
 
+func TestPipeline_ReviewSuspectSkipLogsGateNotFailure(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = true
+	})
+
+	h.hooks.DetectPRFn = func(ctx context.Context) int {
+		return 300
+	}
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{
+			Risk:    "suspect",
+			Summary: "Found blocking issues",
+			Issues:  []string{"Missing stale-lock recovery"},
+		}
+	}
+
+	job := testJob(t, h.store, h.deploy)
+	contract := DefaultAutopilotContract() // review on_failure=skip by default.
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	events := h.events()
+	if !hasEvent(events, "info", `Stage "review" review gate reported suspect`) {
+		t.Fatalf("expected review gate skip event, got %#v", events)
+	}
+	if hasEvent(events, "info", `Stage "review" failed`) {
+		t.Fatalf("did not expect review stage failure wording, got %#v", events)
+	}
+
+	updated, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if updated.Status != db.StatusReviewed {
+		t.Fatalf("status = %q, want %q", updated.Status, db.StatusReviewed)
+	}
+	if !updated.ReviewRisk.Valid || updated.ReviewRisk.String != "suspect" {
+		t.Fatalf("review_risk = %+v, want suspect", updated.ReviewRisk)
+	}
+}
+
 // TestPipeline_ProactiveAgent verifies pipeline execution for a proactive agent
 // (issue_number=0) with no issue context.
 func TestPipeline_ProactiveAgent(t *testing.T) {
