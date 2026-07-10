@@ -14,6 +14,7 @@ import (
 const (
 	NameClaudeCode = "claude-code"
 	NameCodex      = "codex"
+	NameOpenCode   = "opencode"
 )
 
 // DefaultName is the runtime selected when the operator does not pass

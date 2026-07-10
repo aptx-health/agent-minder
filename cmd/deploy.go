@@ -22,6 +22,9 @@ import (
 	// Side-effect import: register the codex runtime factory in the runtime
 	// registry so runtime.Lookup("codex") resolves.
 	_ "github.com/aptx-health/agent-minder/internal/runtime/codex"
+	// Side-effect import: register the opencode runtime factory in the runtime
+	// registry so runtime.Lookup("opencode") resolves.
+	_ "github.com/aptx-health/agent-minder/internal/runtime/opencode"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 	"github.com/google/uuid"
