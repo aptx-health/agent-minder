@@ -82,6 +82,35 @@ func TestValidateRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestRuntimeNameConstants(t *testing.T) {
+	cases := map[string]string{
+		"claude-code": NameClaudeCode,
+		"codex":       NameCodex,
+		"opencode":    NameOpenCode,
+	}
+	for want, got := range cases {
+		if got != want {
+			t.Errorf("runtime name constant = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestKnownNamesIncludesRegistered(t *testing.T) {
+	resetRegistry(t)
+	Register(NameOpenCode, func() AgentRuntime { return &stubRuntime{name: NameOpenCode} })
+	names := KnownNames()
+	found := false
+	for _, n := range names {
+		if n == NameOpenCode {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("KnownNames does not include %q: %v", NameOpenCode, names)
+	}
+}
+
 func TestKnownNamesIncludesClaudeCode(t *testing.T) {
 	resetRegistry(t)
 	names := KnownNames()
