@@ -55,12 +55,14 @@ func (o *OpencodeRuntime) binPath() string {
 }
 
 // logRecord is the canonical final record appended to the run log. It carries
-// the session id (for Resume) and the final assistant message (for ParseResult).
+// the session id (for Resume), the final assistant message (cost/tokens/error),
+// and its parts (final text + step count) for ParseResult.
 type logRecord struct {
 	Marker    string          `json:"marker"`
 	SessionID string          `json:"sessionID"`
 	ExitCode  int             `json:"exitCode"`
 	Info      json.RawMessage `json:"info"`
+	Parts     json.RawMessage `json:"parts"`
 }
 
 func init() {
@@ -145,10 +147,13 @@ func (o *OpencodeRuntime) Run(ctx context.Context, inv runtime.Invocation, sink 
 	stopStream()
 	<-streamDone
 
-	exitCode, info := 0, json.RawMessage(nil)
+	exitCode, info, parts := 0, json.RawMessage(nil), json.RawMessage(nil)
 	if resp != nil {
 		if raw, mErr := json.Marshal(resp.Info); mErr == nil {
 			info = raw
+		}
+		if raw, mErr := json.Marshal(resp.Parts); mErr == nil {
+			parts = raw
 		}
 		if resp.Info.Error.Name != "" {
 			exitCode = 1
@@ -163,6 +168,7 @@ func (o *OpencodeRuntime) Run(ctx context.Context, inv runtime.Invocation, sink 
 		SessionID: sess.ID,
 		ExitCode:  exitCode,
 		Info:      info,
+		Parts:     parts,
 	})
 
 	if promptErr != nil {
@@ -236,16 +242,6 @@ func writeLogRecord(w io.Writer, rec logRecord) {
 // Resume is not yet implemented.
 func (o *OpencodeRuntime) Resume(_ context.Context, _ string, _ runtime.EventSink, _ io.Writer) (int, error) {
 	return 0, runtime.ErrNotSupported
-}
-
-// ParseResult is not yet implemented.
-func (o *OpencodeRuntime) ParseResult(_ string) (*runtime.Result, error) {
-	return nil, runtime.ErrNotSupported
-}
-
-// ClassifyOutcome is not yet implemented.
-func (o *OpencodeRuntime) ClassifyOutcome(_ *runtime.Result, _ runtime.Limits) runtime.Outcome {
-	return runtime.Outcome{}
 }
 
 // ExtractBailReport is not yet implemented.
