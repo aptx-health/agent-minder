@@ -1,0 +1,159 @@
+package opencode
+
+import (
+	"testing"
+
+	opencodesdk "github.com/sst/opencode-sdk-go"
+
+	"github.com/aptx-health/agent-minder/internal/runtime"
+)
+
+func TestSplitModel(t *testing.T) {
+	cases := []struct {
+		in           string
+		provider, id string
+		ok           bool
+	}{
+		{"anthropic/claude-3-5-sonnet", "anthropic", "claude-3-5-sonnet", true},
+		{"localmlx/mlx-community/Qwen3.6-35B-A3B-4bit-DWQ", "localmlx", "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ", true},
+		{"openrouter/anthropic/claude-3-5-sonnet", "openrouter", "anthropic/claude-3-5-sonnet", true},
+		{"", "", "", false},
+		{"noprovider", "", "", false},
+		{"/model", "", "", false},
+		{"provider/", "", "", false},
+		{"  spaced/model  ", "spaced", "model", true},
+	}
+	for _, c := range cases {
+		p, id, ok := splitModel(c.in)
+		if ok != c.ok || p != c.provider || id != c.id {
+			t.Errorf("splitModel(%q) = (%q,%q,%v), want (%q,%q,%v)", c.in, p, id, ok, c.provider, c.id, c.ok)
+		}
+	}
+}
+
+func TestPromptParamsMapping(t *testing.T) {
+	inv := runtime.Invocation{
+		AgentName:    "autopilot",
+		SystemPrompt: "be careful",
+		Model:        "localmlx/qwen",
+		Prompt:       "do the thing",
+		AllowedTools: []string{"read", "edit"},
+	}
+	p := promptParams(inv, "/work/dir")
+
+	if got := p.Directory.Value; got != "/work/dir" {
+		t.Errorf("Directory = %q, want /work/dir", got)
+	}
+	if got := p.Agent.Value; got != "autopilot" {
+		t.Errorf("Agent = %q, want autopilot", got)
+	}
+	if got := p.System.Value; got != "be careful" {
+		t.Errorf("System = %q, want 'be careful'", got)
+	}
+	m := p.Model.Value
+	if m.ProviderID.Value != "localmlx" || m.ModelID.Value != "qwen" {
+		t.Errorf("Model = %q/%q, want localmlx/qwen", m.ProviderID.Value, m.ModelID.Value)
+	}
+	tools := p.Tools.Value
+	if !tools["read"] || !tools["edit"] || len(tools) != 2 {
+		t.Errorf("Tools = %v, want {read:true, edit:true}", tools)
+	}
+	if len(p.Parts.Value) != 1 {
+		t.Fatalf("Parts len = %d, want 1", len(p.Parts.Value))
+	}
+	part, ok := p.Parts.Value[0].(opencodesdk.TextPartInputParam)
+	if !ok || part.Text.Value != "do the thing" {
+		t.Errorf("Parts[0] = %#v, want text 'do the thing'", p.Parts.Value[0])
+	}
+}
+
+func TestPromptParamsOmitsEmptyOptionals(t *testing.T) {
+	// No model, agent, system, or tools set: those fields must stay unset so
+	// opencode falls back to its configured defaults.
+	p := promptParams(runtime.Invocation{Prompt: "hi"}, "/d")
+	if p.Model.Present {
+		t.Errorf("Model should be absent when Invocation.Model is empty")
+	}
+	if p.Agent.Present {
+		t.Errorf("Agent should be absent when AgentName is empty")
+	}
+	if p.System.Present {
+		t.Errorf("System should be absent when SystemPrompt is empty")
+	}
+	if p.Tools.Present {
+		t.Errorf("Tools should be absent when AllowedTools is empty")
+	}
+}
+
+func TestBytesCutSSEData(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{`data: {"type":"x"}`, `{"type":"x"}`, true},
+		{"data:{\"a\":1}\r", `{"a":1}`, true},
+		{"", "", false},
+		{"event: message", "", false},
+		{"data: ", "", false},
+		{": comment", "", false},
+	}
+	for _, c := range cases {
+		got, ok := bytesCutSSEData([]byte(c.in))
+		if ok != c.ok || string(got) != c.want {
+			t.Errorf("bytesCutSSEData(%q) = (%q,%v), want (%q,%v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestTranslatorEvents(t *testing.T) {
+	sink := &recordingSink{}
+	tr := &translator{sink: sink, tools: map[string]bool{}}
+
+	step := func(kind string) sseEvent {
+		e := sseEvent{Type: "message.part.updated"}
+		e.Properties.Part = &ssePart{Type: kind}
+		return e
+	}
+	tr.handle(step("step-start"))
+	tr.handle(step("step-finish"))
+	if sink.steps != 1 || sink.toolEnds != 1 {
+		t.Fatalf("step events: steps=%d toolEnds=%d, want 1/1", sink.steps, sink.toolEnds)
+	}
+
+	// A tool lifecycle: two running updates (deduped) then a completion.
+	toolEvt := func(status string) sseEvent {
+		e := sseEvent{Type: "message.part.updated"}
+		p := &ssePart{Type: "tool", Tool: "bash", CallID: "call-1"}
+		p.State.Status = status
+		e.Properties.Part = p
+		return e
+	}
+	tr.handle(toolEvt("running"))
+	tr.handle(toolEvt("running"))
+	tr.handle(toolEvt("completed"))
+	if sink.toolStarts != 1 {
+		t.Errorf("toolStarts = %d, want 1 (deduped by callID)", sink.toolStarts)
+	}
+	if sink.lastTool != "bash" {
+		t.Errorf("lastTool = %q, want bash", sink.lastTool)
+	}
+	if sink.toolEnds != 2 { // step-finish + tool completion
+		t.Errorf("toolEnds = %d, want 2", sink.toolEnds)
+	}
+
+	// Usage-limit signal on a message.updated carrying a rate-limit error.
+	ul := sseEvent{Type: "message.updated"}
+	ul.Properties.Info = []byte(`{"error":{"name":"APIError","data":{"message":"rate limit exceeded"}}}`)
+	tr.handle(ul)
+	if sink.caps != 1 {
+		t.Errorf("usageLimits = %d, want 1", sink.caps)
+	}
+}
+
+func TestTranslatorFiltersOtherSessions(t *testing.T) {
+	// streamEvents filters by sessionID before calling handle; verify handle
+	// itself does not require a session and that a nil sink is safe.
+	tr := &translator{sink: nil, tools: map[string]bool{}}
+	tr.handle(sseEvent{Type: "message.part.updated"}) // must not panic on nil sink/part
+}
