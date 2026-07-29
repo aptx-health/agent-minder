@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -74,8 +75,32 @@ func TestLiveRun(t *testing.T) {
 	if sink.steps == 0 {
 		t.Errorf("expected at least one assistant step event")
 	}
-	t.Logf("exit=%d steps=%d toolStarts=%d toolEnds=%d usageLimits=%d logBytes=%d",
+
+	// Close the loop through ParseResult against the real run log.
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(logPath, log.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.ParseResult(logPath)
+	if err != nil {
+		t.Fatalf("ParseResult err: %v", err)
+	}
+	if res == nil {
+		t.Fatal("ParseResult returned nil for a completed run")
+	}
+	if res.SessionID == "" {
+		t.Errorf("ParseResult: empty SessionID")
+	}
+	if res.IsError {
+		t.Errorf("ParseResult: IsError=true, StopReason=%q", res.StopReason)
+	}
+	if strings.TrimSpace(res.FinalText) == "" {
+		t.Errorf("ParseResult: empty FinalText")
+	}
+	t.Logf("run: exit=%d steps=%d toolStarts=%d toolEnds=%d usageLimits=%d logBytes=%d",
 		exit, sink.steps, sink.toolStarts, sink.toolEnds, sink.caps, log.Len())
+	t.Logf("parsed: session=%s turns=%d costUSD=%.6f finalText=%q",
+		res.SessionID, res.NumTurns, res.TotalCostUSD, truncate(res.FinalText, 60))
 }
 
 func envOr(k, def string) string {

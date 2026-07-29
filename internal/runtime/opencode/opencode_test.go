@@ -103,21 +103,34 @@ func TestPrepareAgentDef_Errors(t *testing.T) {
 	}
 }
 
-// TestStubbedMethodsNotSupported covers the methods still stubbed for later
-// issues (#539 ParseResult/ClassifyOutcome, #540 Resume/ExtractBailReport).
-// Run is implemented (#538) and is exercised by the pure-logic and live tests.
+// TestStubbedMethodsNotSupported covers the methods still stubbed for #540
+// (Resume/ExtractBailReport). Run (#538) and ParseResult/ClassifyOutcome (#539)
+// are implemented and exercised by the pure-logic and live tests.
 func TestStubbedMethodsNotSupported(t *testing.T) {
 	o := New()
 	if _, err := o.Resume(context.Background(), "sid", nil, nil); !errors.Is(err, runtime.ErrNotSupported) {
 		t.Errorf("Resume err = %v, want ErrNotSupported", err)
 	}
-	if _, err := o.ParseResult(""); !errors.Is(err, runtime.ErrNotSupported) {
-		t.Errorf("ParseResult err = %v, want ErrNotSupported", err)
-	}
-	if got := o.ClassifyOutcome(nil, runtime.Limits{}); got != (runtime.Outcome{}) {
-		t.Errorf("ClassifyOutcome = %+v, want zero Outcome", got)
-	}
 	if got := o.ExtractBailReport(nil, ""); got != nil {
 		t.Errorf("ExtractBailReport = %+v, want nil", got)
+	}
+}
+
+// TestParseResultMissing verifies the (nil, nil) contract when no result record
+// exists — an empty path, a missing file, and a log with no marker line.
+func TestParseResultMissing(t *testing.T) {
+	o := New()
+	if r, err := o.ParseResult(""); r != nil || err != nil {
+		t.Errorf("empty path: got (%v, %v), want (nil, nil)", r, err)
+	}
+	if r, err := o.ParseResult(filepath.Join(t.TempDir(), "nope.log")); r != nil || err != nil {
+		t.Errorf("missing file: got (%v, %v), want (nil, nil)", r, err)
+	}
+	p := filepath.Join(t.TempDir(), "noresult.log")
+	if err := os.WriteFile(p, []byte(`{"type":"message.part.updated"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := o.ParseResult(p); r != nil || err != nil {
+		t.Errorf("no marker: got (%v, %v), want (nil, nil)", r, err)
 	}
 }
