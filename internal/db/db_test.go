@@ -313,6 +313,21 @@ func TestDefaultDBPath(t *testing.T) {
 	}
 }
 
+func TestOpenCreatesMissingParentDir(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "nested", "does-not-exist-yet", "v2.db")
+
+	conn, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Errorf("expected database file to be created: %v", err)
+	}
+}
+
 func TestStaleAndIneffectiveLessons(t *testing.T) {
 	s := testStore(t)
 
