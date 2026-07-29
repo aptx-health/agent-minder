@@ -233,18 +233,34 @@ code before changing anything.
 
 ## Deciding whether to proceed
 
-Proceed when you have a clear mental model of what needs to change and why, the work follows
-existing patterns, and you can verify it automatically.
+Bailing is an exception. The test is one question: can you deliver a PR that addresses one
+distinct problem you understand well enough to move forward on? If yes, proceed — a large diff,
+many files, or code you had never seen before this run are not reasons to stop.
 
-Bail when the architecture is still unclear to you, the issue needs design decisions it does not
-specify, you cannot trace the blast radius, or verifying the change would need interactive
-testing you cannot automate. File count alone is not a reason to bail — a 20-file rename is
-simpler than a 3-file architecture change.
+Most apparent blockers have a way through. Before you conclude you are stuck:
+
+- Unsure how it fits together? Read more. Feeling unclear after one pass is normal, not a verdict.
+- Issue bundles several problems? Solve the one you understand best, scope the PR to it, and say
+  in the body what you left and why. A scoped PR that lands beats a plan that does not.
+- Issue leaves a decision open? Make the call a careful colleague would make, state the
+  assumption in the PR body, and keep going. An open question blocks you only when different
+  readings would produce materially different work AND you have no basis to choose between them.
+- Cannot verify it headlessly? Implement it, then say plainly in the PR body what you could not
+  verify and what a human should smoke test. UI behavior, running services, and external
+  dependencies are expected gaps, not reasons to stop.
+
+Bail only when, after all that, you still cannot name a single problem you understand well enough
+to solve — or when the work needs a human's authority: product direction, an intentional breaking
+change, or a migration whose data implications you cannot determine.
 
 ## Implementing
 
 Work inside your worktree. Commit with "Fixes #<issue>", rebase onto the base branch using the
 commands from your task context, then push and open a draft PR.
+
+If you finish part of the issue and the rest is genuinely out of reach, open the draft PR for the
+part that stands on its own and passes the gates, then comment on the issue describing what
+remains. Reviewable code beats a written plan; the bail path is for when nothing is shippable.
 
 Run the project's own build, test, and lint gates before pushing; if the repo has pre-commit
 hooks, a commit that succeeds has already cleared them. Give up after three failed attempts at
@@ -321,7 +337,9 @@ REVIEW_RISK: suspect
 - low-risk — all gates pass, implementation correct and tested. Eligible for auto-merge once CI
   is green.
 - needs-testing — correct as far as you can tell and tests pass, but the behavior is hard to
-  verify headlessly. A human should smoke test it.
+  verify headlessly. A human should smoke test it. Agents are expected to ship changes they could
+  not verify headlessly and say so; a PR that states plainly what it did not verify is doing the
+  right thing, so rate it here rather than suspect.
 - suspect — blockers: failing tests or lint, missing error handling, a goroutine leak, a security
   issue, or an implementation that does not match the issue. List each one.
 
@@ -349,8 +367,13 @@ deployment environment. When the cause is clear from reading the code, fix it an
 plainly in the PR body that the fix rests on code analysis and needs manual verification. A
 correct fix without a test beats no fix; do not bail merely because you could not write one.
 
-Bail when the root cause is genuinely ambiguous after a thorough investigation, or when the fix
-would spread across unrelated systems.
+Bailing is an exception. The test is whether you can name one distinct problem you understand
+well enough to fix. If the issue reports several bugs, fix the one whose root cause you have
+actually traced, scope the PR to it, and note the rest in the body. A fix that sprawls across
+packages is a large diff, not a blocker.
+
+Bail only when the root cause is still genuinely ambiguous after a thorough investigation —
+guessing at a fix is worse than handing over what you learned.
 
 ## Fix and ship
 
@@ -363,8 +386,12 @@ bail instead of thrashing.
 
 ## If you cannot proceed
 
-Post a comment covering what you investigated, whether you could reproduce the bug, and what you
-recommend next. Add the "blocked" label and remove "in-progress". Then, as your FINAL message,
+If you fixed part of what the issue reports, open the draft PR for that and comment on the issue
+with what remains — a landed partial fix beats a plan. The bail path is for when nothing is
+shippable.
+
+Otherwise, post a comment covering what you investigated, whether you could reproduce the bug,
+and what you recommend next. Add the "blocked" label and remove "in-progress". Then, as your FINAL message,
 emit the report as raw text — not inside a code fence or any other wrapper:
 
 <bail-report>

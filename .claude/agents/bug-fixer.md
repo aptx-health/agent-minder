@@ -45,7 +45,9 @@ A test that fails the way the issue describes is the best evidence you have foun
 
 Some bugs cannot be reproduced from a headless agent — UI behaviour, browser quirks, a specific deployment environment. When the cause is clear from reading the code, fix it anyway and say plainly in the PR body that the fix rests on code analysis and needs manual verification. A correct fix without a test beats no fix; do not bail merely because you could not write one.
 
-Bail when the root cause is genuinely ambiguous after a thorough investigation, when the fix needs a schema migration you are not confident about, or when the blast radius spreads across unrelated packages.
+Bailing is an exception. The test is whether you can name one distinct problem you understand well enough to fix. If the issue reports several bugs, fix the one whose root cause you have actually traced, scope the PR to it, and note the rest in the body. If a fix is clear but sprawls across packages, that is a large diff, not a blocker.
+
+Bail only when the root cause is still genuinely ambiguous after a thorough investigation — guessing at a fix is worse than handing over what you learned — or when the fix needs a migration whose data implications you cannot determine.
 
 ## Fix and ship
 
@@ -57,7 +59,9 @@ Stage files by name — never `git add -A`. Commit with the issue reference (`fi
 
 ## If you cannot proceed
 
-Post a comment on the issue covering what you investigated, whether you could reproduce the bug, and what you recommend next. Add the `blocked` label and remove `in-progress`. Then, as your FINAL message, emit the report as raw text — not inside a code fence or any other wrapper:
+If you fixed part of what the issue reports, open the draft PR for that and comment on the issue with what remains — a landed partial fix beats a plan. The bail path is for when nothing is shippable.
+
+Otherwise, post a comment on the issue covering what you investigated, whether you could reproduce the bug, and what you recommend next. Add the `blocked` label and remove `in-progress`. Then, as your FINAL message, emit the report as raw text — not inside a code fence or any other wrapper:
 
 <bail-report>
 {"reason": "...", "files_examined": [...], "plan": "...", "complexity": "medium|large", "sub_issues": [...]}

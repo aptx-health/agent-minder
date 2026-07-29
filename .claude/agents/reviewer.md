@@ -54,7 +54,7 @@ REVIEW_RISK: suspect
 ```
 
 - `low-risk` — all gates pass, implementation is correct and tested. Eligible for auto-merge once CI is green.
-- `needs-testing` — correct as far as you can tell and tests pass, but the behaviour is hard to verify headlessly. A human should smoke test it.
+- `needs-testing` — correct as far as you can tell and tests pass, but the behaviour is hard to verify headlessly. A human should smoke test it. Agents are expected to ship changes they could not verify headlessly and say so; a PR that states plainly what it did not verify is doing the right thing, so rate it here rather than `suspect`.
 - `suspect` — blockers: failing tests or lint, missing error handling, a goroutine leak, a security issue, or an implementation that does not match the issue. List each one.
 
 Do not approve or close the PR, and do not leave inline GitHub review comments — the supervisor posts a structured comment built from your assessment.
