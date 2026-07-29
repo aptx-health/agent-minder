@@ -4,6 +4,7 @@ package db
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
@@ -295,6 +296,12 @@ func DefaultDBPath() string {
 
 // Open opens or creates the SQLite database with WAL mode and foreign keys.
 func Open(dsn string) (*sqlx.DB, error) {
+	if dir := filepath.Dir(dsn); dir != "." && dir != "/" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("creating database directory: %w", err)
+		}
+	}
+
 	db, err := sqlx.Open("sqlite", dsn+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
