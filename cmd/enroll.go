@@ -285,12 +285,15 @@ sub-agent using the Bash tool to run:
 
   claude -p --model sonnet "Research this codebase for writing an optimized <agent-name> agent definition. Focus on: <focus areas>. Available skills the agent can invoke: <skill-name>: <description>; ... (omit if none). The research should consider which of these skills naturally fit this agent's job and recommend which to attach. Output ONLY the instruction body markdown — no frontmatter, no preamble."
 
-Run ALL research sub-agents in parallel (use & and wait) to save time:
+Run these in parallel to save time, but no more than 4 concurrently — each is a
+full model session, and a wider fan-out mostly buys contention. Batch and wait:
 
   (claude -p --model sonnet "..." > /tmp/research-autopilot.md 2>/dev/null &
    claude -p --model sonnet "..." > /tmp/research-reviewer.md 2>/dev/null &
    claude -p --model sonnet "..." > /tmp/research-bug-fixer.md 2>/dev/null &
    wait)
+
+Then run the next batch the same way until every agent has been researched.
 
 Each research agent should focus on what matters for its agent type:
 
@@ -328,6 +331,40 @@ CRITICAL RULES:
   Refine it: ensure it references actual commands, directories, and conventions
   found in THIS repo. Remove any generic filler that doesn't add value.
 - Keep instructions concise and actionable.
+
+**What belongs in a contract body (and what does not):**
+
+A contract carries BEHAVIOR — how this agent decides, when it stops, what it
+produces, and the project-specific facts that are expensive to rediscover on
+every run (bug-prone files, dependency chains that must move together, lint
+config policy, migration rules).
+
+Three things do NOT belong in a contract body, because they are supplied
+elsewhere and a copy will drift out of sync:
+
+- **Project facts already in CLAUDE.md** — architecture, package map, schema,
+  command list. Tell the agent to read CLAUDE.md; do not restate it.
+- **Task context** — issue body, branch, worktree path, base branch, test
+  command. The supervisor injects these per run.
+- **Scope control, human-facing output format, and delegation budget.** These
+  are injected into every prompt automatically as a shared "Working agreement"
+  section. Do not write your own version of them.
+
+**Style — write for a current frontier model:**
+
+- State intent and constraints, not step-by-step choreography. "The gates are X,
+  Y, Z; lefthook runs them on commit" beats a numbered list that re-runs each
+  gate and then re-verifies.
+- Do not add explicit verification or double-check instructions. They cause
+  over-verification and waste tokens without improving the result. Deterministic
+  caps ARE worth stating ("give up after three failed attempts and bail").
+- Never instruct an agent to withhold findings — no severity floors, no "only
+  report if you're certain". Have it report everything and label its own
+  confidence; humans and the risk tier do the filtering.
+- Prefer stating the desired behavior over listing prohibitions.
+- Keep machine-parsed protocol EXACT where a body already has it: raw
+  <bail-report> tags outside any code fence, and the terminal REVIEW_RISK line
+  with its three tiers (low-risk, needs-testing, suspect).
 
 **Skills attachment (two layers, both required):**
 
@@ -368,6 +405,7 @@ Ask the user which default they want. Valid values today:
 
   runtime: claude-code
   runtime: codex
+  runtime: opencode
 
 If the onboarding runtime is Codex, do NOT assume every future job should use Codex;
 ask the user. Individual jobs can override the repo default with runtime:.

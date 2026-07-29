@@ -188,6 +188,41 @@ func TestAssembleContext_UnknownProvider(t *testing.T) {
 	}
 }
 
+func TestHouseStyleInjectedEverywhere(t *testing.T) {
+	store, deploy, job := testContextSetup(t)
+	job.PRNumber = sql.NullInt64{Int64: 99, Valid: true}
+	sc := &SlotContext{
+		Store: store, Deploy: deploy, Job: job,
+		Owner: "acme", Repo: "widgets", BaseBranch: "main",
+	}
+
+	// The working agreement must reach doer prompts, review prompts, and
+	// proactive jobs that have no issue attached.
+	proactive := *job
+	proactive.IssueNumber = 0
+	proactiveSC := *sc
+	proactiveSC.Job = &proactive
+
+	cases := map[string]string{
+		"reactive":  AssembleContext(context.Background(), sc, []string{"repo_info"}),
+		"proactive": AssembleContext(context.Background(), &proactiveSC, []string{"repo_info"}),
+		"review":    renderReviewContext(context.Background(), sc),
+	}
+
+	for name, result := range cases {
+		for _, want := range []string{
+			"## Working agreement",
+			"### Writing for humans",
+			`First line answers "what happened."`,
+			"### Delegation",
+		} {
+			if !contains(result, want) {
+				t.Errorf("%s prompt missing house style section %q", name, want)
+			}
+		}
+	}
+}
+
 func TestRenderReviewContext(t *testing.T) {
 	store, deploy, job := testContextSetup(t)
 	job.PRNumber = sql.NullInt64{Int64: 99, Valid: true}

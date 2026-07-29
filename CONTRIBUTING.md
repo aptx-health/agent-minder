@@ -114,7 +114,13 @@ If your change modifies the SQLite schema:
 
 ### Agent definitions
 
-The repo-level `agents/autopilot.md` file and the `defaultAgentDef` constant in `internal/autopilot/prompt.go` must stay in sync. There is a drift-prevention test that enforces this.
+Built-in agent definitions live in `AgentTemplates()` in `internal/supervisor/templates.go`. The `defaultAgentDef` and `defaultReviewerDef` fallbacks in `internal/supervisor/prompt.go` reference the same body constants, so they cannot drift from the registry.
+
+This repo's own contracts are the repo-level overrides in `.claude/agents/*.md`. Read a built-in definition with `minder agents show <name>`.
+
+Contracts carry behavior — how an agent decides, when it stops, what it produces. Project facts belong in `CLAUDE.md`, and the shared working agreement (scope, human-facing output format, delegation) is injected at prompt-assembly time by `renderHouseStyle` in `internal/supervisor/context.go`. Do not restate either inside a contract.
+
+`TestClaudeMDSchemaVersion` and `TestClaudeMDBuiltInAgentList` in `internal/supervisor` fail when `CLAUDE.md` drifts from `schemaVersion` or from the template registry.
 
 ## Pull requests
 
