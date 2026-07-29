@@ -41,7 +41,9 @@ const (
 	AgentReviewer  AgentName = "reviewer"
 )
 
-// defaultAgentDef is the built-in fallback agent definition.
+// defaultAgentDef is the built-in fallback agent definition. It shares its
+// instruction body with the autopilot template registry entry so the two
+// cannot drift.
 const defaultAgentDef = `---
 name: autopilot
 description: >
@@ -64,67 +66,7 @@ context:
   - dep_graph
 ---
 
-You are an autonomous agent working on a GitHub issue in an isolated git worktree.
-Your task context is provided in the user prompt.
-
-## First steps
-1. Label the issue in-progress using the gh command from your task context
-2. Post a starting comment
-3. Read the full issue with comments and any linked issues
-4. Explore the codebase to understand the relevant code
-
-## Pre-check: assess whether you can complete this
-After exploring but BEFORE making changes, decide if you can complete the work confidently.
-
-**Proceed if:**
-- You have a clear mental model of what needs to change and why
-- The changes are mechanical or follow clear patterns (even across many files)
-- You can write automated tests to verify correctness
-
-**Bail if:**
-- You don't understand the architecture well enough to be confident in your changes
-- The issue needs design decisions that aren't specified (ambiguous requirements)
-- Implementation requires extensive manual or interactive testing (UI, hardware, running services)
-- The change has unclear blast radius across the codebase
-
-File count alone is NOT a reason to bail — a 20-file rename is simpler than a 3-file architecture change.
-
-## If you can complete the work
-- Implement the changes
-- Ensure tests pass
-- Commit with "Fixes #<issue>" in the message
-- Rebase onto the base branch before pushing
-- Open a draft PR
-
-## If you cannot proceed — structured bail
-When you decide to bail, do the following in order:
-
-1. Write your bail report to a file, then post it as an issue comment:
-   - Write the report to /tmp/bail-report.md using the Write tool
-   - Post with: gh issue comment <number> --body-file /tmp/bail-report.md
-   - This avoids shell escaping issues with inline --body
-2. Update labels: gh issue edit <number> --add-label blocked --remove-label in-progress
-3. Commit any partial work you've done (even without a PR) so future attempts have context
-4. As your FINAL message, output a JSON block wrapped in <bail-report> tags (this MUST be
-   in your last text response — the orchestrator parses it from your output):
-
-<bail-report>
-{
-  "reason": "Why you're bailing — be specific about what's blocking you",
-  "files_examined": ["list", "of", "files", "you", "explored"],
-  "plan": "Step-by-step implementation plan for the next agent or human",
-  "sub_issues": ["Optional: if the issue should be decomposed, suggest 2-4 sub-issues with clear scope"],
-  "complexity": "small | medium | large | epic"
-}
-</bail-report>
-
-IMPORTANT: The <bail-report> tags must NOT be inside a code fence or any other wrapper.
-Output them as raw text so the orchestrator can parse them.
-
-## Constraints
-- Only modify files within your worktree
-- Do not keep retrying if stuck — bail early with good context
-- Do not over-engineer
+` + autopilotBody + `
 `
 
 // defaultReviewerDef is the built-in reviewer agent definition.
@@ -138,26 +80,7 @@ mode: reactive
 output: pr
 ---
 
-You are a code reviewer examining a PR opened by an automated agent.
-Review context is provided in the user prompt.
-
-## Review process
-1. Read the PR diff and understand the changes
-2. Check that the implementation matches the issue requirements
-3. Run the test command if provided
-4. Look for bugs, edge cases, and missing error handling
-5. Assess risk level: low-risk, needs-testing, or suspect
-
-## If changes are needed
-- Make the fixes directly in the worktree
-- Run tests to verify
-- Commit and push
-
-## Risk assessment
-Rate the PR as one of:
-- low-risk: Simple, correct, well-tested
-- needs-testing: Looks correct but needs manual verification
-- suspect: Has issues that need human review
+` + reviewerBody + `
 `
 
 // defaultAllowedTools is the default tool permission set.

@@ -1,96 +1,67 @@
 # Agent Definitions
 
-This directory contains Claude Code [agent definitions](https://docs.anthropic.com/en/docs/claude-code/sub-agents) for agent-minder.
+Most agent definitions do **not** live here. This directory holds only the one agent that is not
+part of the built-in registry.
 
-## Agents
+## Where agent definitions come from
 
-| File | Purpose | Scope |
-|------|---------|-------|
-| [`autopilot.md`](autopilot.md) | Implements GitHub issues in isolated worktrees | Per-issue, runs many times |
-| [`onboarding.md`](onboarding.md) | Interactive repo onboarding — gathers context and generates config | Per-repo, runs once |
+Agent contracts are resolved at run time by `resolveAgentDefByName`
+(`internal/supervisor/prompt.go`) through a three-tier failover:
 
----
+1. **Repo-level** — `<repo>/.claude/agents/<name>.md`
+2. **User-level** — `~/.claude/agents/<name>.md`
+3. **Built-in** — the template registry in `internal/supervisor/templates.go`, installed into the
+   repo on first use
 
-## Autopilot (`autopilot.md`)
+So the built-in definitions are in Go source, not in this directory. To read one:
 
-## What it does
+```bash
+minder agents list
+minder agents show autopilot
+```
 
-When autopilot launches a Claude Code agent to work on a GitHub issue, it checks whether the target repository has `.claude/agents/autopilot.md`. If found, the agent definition provides the behavioral instructions (workflow, constraints, bail conditions) and the supervisor passes only the dynamic task context (issue number, worktree path, commands) as the prompt.
+`minder enroll` installs the required agents (`autopilot`, `reviewer`) into `.claude/agents/` and
+offers the optional ones (`bug-fixer`, `dependency-updater`, `security-scanner`, `doc-updater`,
+`spike`). Editing the installed file is how you customize an agent for a project — the repo-level
+copy wins over the built-in one.
 
-If no agent definition is found, autopilot falls back to its built-in full prompt — everything works exactly as before. **The agent definition is additive, never required.** It's a thin layer to help make agent behaviors more predictable and customizable throughout the lifecycle.
+### Runtimes
 
-## Installing
+One resolved definition serves all three doer runtimes. `SlotContext.EnsureAgentDef` hands the
+resolved body to the active runtime's `PrepareAgentDef`, which writes it where that runtime looks
+for it:
 
-Copy `autopilot.md` into a target repository:
+| Runtime | Materialized as |
+|---------|-----------------|
+| `claude-code` | `.claude/agents/<name>.md` |
+| `codex` | `AGENTS.md` |
+| `opencode` | `.opencode/agent/<name>.md` |
+
+Nothing needs to be duplicated per runtime.
+
+## `designer.md`
+
+The designer agent runs a design interview on an issue before implementation starts and posts a
+structured design plan as an issue comment.
+
+It lives here rather than in the registry because it is **interactive** — it expects a human in the
+conversation — while the supervisor runs agents headless. It is not installed by `minder enroll`
+and is not dispatched by the supervisor. Install it by hand:
 
 ```bash
 mkdir -p <your-repo>/.claude/agents
-cp agents/autopilot.md <your-repo>/.claude/agents/autopilot.md
+cp agents/designer.md <your-repo>/.claude/agents/designer.md
 ```
 
-Or install it globally for all repositories:
+Or at `~/.claude/agents/designer.md` for every repo. Then invoke it directly through Claude Code.
 
-```bash
-mkdir -p ~/.claude/agents
-cp agents/autopilot.md ~/.claude/agents/autopilot.md
-```
+## Frontmatter
 
-Then commit as appropriate. The next time autopilot creates a worktree from that repo, it will detect the definition and use it.
+The YAML frontmatter is the machine-readable contract, parsed by `internal/supervisor/contract.go`:
+`mode`, `output`, `stages`, `context`, and `dedup` drive orchestration, so changing them changes
+behavior. The instruction body below the closing `---` is yours to customize freely.
 
-## Customizing
-
-The agent definition is plain markdown with YAML frontmatter. You can customize it per-repo to:
-
-- Adjust the complexity threshold (default: 8 files)
-- Add project-specific constraints or conventions
-- Change the bail criteria
-- Add steps to the workflow (e.g., "run `make lint` before committing")
-
-The `tools` field in the frontmatter controls which Claude Code tools the agent can use. The default set (`Bash, Read, Edit, Write, Glob, Grep`) covers typical development work.
-
-## How it works
-
-Without agent definition (legacy fallback):
-```
-claude -p --max-turns 50 --max-budget-usd 3.00 --allowedTools Read --allowedTools Edit ... "<full prompt with behavior + context>"
-```
-
-With agent definition (current):
-```
-claude --agent autopilot -p --max-turns 50 --max-budget-usd 3.00 --allowedTools Read --allowedTools Edit ... "<task context only>"
-```
-
-Allowed tools are loaded from `.agent-minder/onboarding.yaml` if available, otherwise a safe default set is used (`Read`, `Edit`, `Write`, `Glob`, `Grep`, `Bash(git *)`, `Bash(gh *)`). The agent definition becomes the system prompt; the task context becomes the user prompt.
-
----
-
-## Onboarding (`onboarding.md`)
-
-The onboarding agent performs the interactive portion of `agent-minder repo enroll`. After the CLI runs a mechanical inventory scan, it launches this agent to:
-
-1. Ask the user targeted questions about things that can't be mechanically detected (secrets management, test commands, special tooling)
-2. Generate three artifacts:
-   - `.agent-minder/onboarding.yaml` — structured onboarding file with user-provided context
-   - `.claude/settings.json` — Claude Code permissions derived from detected tooling
-   - `.claude/agents/autopilot.md` — project-specific autopilot agent definition (if none exists)
-3. Review artifacts with the user before writing to disk
-
-### Installing
-
-Install globally (recommended — onboarding is repo-independent):
-
-```bash
-mkdir -p ~/.claude/agents
-cp agents/onboarding.md ~/.claude/agents/onboarding.md
-```
-
-### How it works
-
-The CLI (`agent-minder repo enroll`) orchestrates the process:
-
-1. CLI scans the repo mechanically → writes initial `.agent-minder/onboarding.yaml` with inventory
-2. CLI launches: `claude --agent onboarding -p "<repo path + inventory summary>"`
-3. Onboarding agent asks user ≤5 targeted questions
-4. Agent generates and writes configuration files after user approval
-
-Unlike autopilot, onboarding runs once per repo and doesn't need the repo→user→built-in failover chain. It lives at `~/.claude/agents/onboarding.md` only.
+Contracts carry **behavior** — how the agent decides, when it stops, what it produces. Project
+**facts** belong in `CLAUDE.md`, and the shared working agreement (scope, human-facing output
+format, delegation) is injected at prompt-assembly time by `renderHouseStyle`
+(`internal/supervisor/context.go`). Restating either in a contract only creates drift.

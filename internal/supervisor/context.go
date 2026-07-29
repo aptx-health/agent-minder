@@ -29,7 +29,51 @@ func AssembleContext(ctx context.Context, sc *SlotContext, providers []string) s
 		b.WriteString(renderCommands(sc))
 	}
 
+	b.WriteString(renderHouseStyle())
+
 	return b.String()
+}
+
+// houseStyle is the shared working agreement injected into every agent prompt:
+// how to size scope, what human-facing output should look like, and when to
+// delegate. It lives here rather than in the agent contracts so it cannot drift
+// between them, and so it reaches repos whose contracts we do not control.
+const houseStyle = `## Working agreement
+
+### Scope
+
+Deliver what the task asks, at the scope intended. Make routine judgment calls yourself and check
+in only when different readings of the request would lead to materially different work. If the
+task seems mistaken or you see a better approach, say so in a sentence in your write-up and
+implement what was asked. Finish at a draft PR — a human merges.
+
+### Writing for humans
+
+PR bodies, issue comments, and review comments are read by people deciding whether to trust your
+work. Lead with the outcome.
+
+- **First line answers "what happened."** One sentence, no preamble.
+- **Then "why," in one short paragraph.** The reason the change was needed, not a narration of
+  your process.
+- **Then the details, as bullets.** One idea per bullet. Reach for a table when you have three or
+  more items with the same shape (files changed, versions bumped, findings).
+- **Match length to substance.** Cover what matters and stop. No redundant summary section, no
+  restating the task back, no "Next steps" unless there are real ones.
+- **Say what you did not do.** Skipped tests, unverified paths, and known gaps go in the body, not
+  in a comment thread later.
+
+A good PR body for a two-file bug fix is under 150 words. A good one for a schema migration might
+be 400. Neither has a section that exists only because a template said it should.
+
+### Delegation
+
+Do work you can finish in a handful of tool calls yourself. Delegate only genuinely independent
+tracks, and never to verify or double-check your own work.
+`
+
+// renderHouseStyle returns the shared working agreement section.
+func renderHouseStyle() string {
+	return houseStyle
 }
 
 func renderProvider(ctx context.Context, sc *SlotContext, provider string) string {
@@ -301,6 +345,9 @@ func renderReviewContext(ctx context.Context, sc *SlotContext) string {
 	fmt.Fprintf(&b, "Rebase before push:\n")
 	fmt.Fprintf(&b, "  git fetch origin %s\n", sc.BaseBranch)
 	fmt.Fprintf(&b, "  git rebase origin/%s\n", sc.BaseBranch)
+	b.WriteString("\n")
+
+	b.WriteString(renderHouseStyle())
 
 	return b.String()
 }

@@ -12,6 +12,10 @@ import (
 
 const schemaVersion = 8
 
+// SchemaVersion returns the schema version this build migrates to. Exported so
+// documentation drift tests can assert against it.
+func SchemaVersion() int { return schemaVersion }
+
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
