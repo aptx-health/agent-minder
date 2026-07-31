@@ -1,11 +1,11 @@
 // Package opencode is the opencode implementation of runtime.AgentRuntime.
 //
-// This is a partial adapter: it registers the "opencode" runtime so
-// `--runtime opencode` passes early validation, and PrepareAgentDef writes
-// native on-disk agent definitions. The execution methods (Run, Resume,
-// ParseResult, etc.) are still stubs that return runtime.ErrNotSupported (or
-// zero values) until the real adapter — planned around `opencode serve` plus
-// its Go SDK — lands in later issues. See design/opencode-mapping.md.
+// It drives a process-wide shared `opencode serve` via the opencode Go SDK:
+// PrepareAgentDef writes native agent definitions, Run/Resume create or continue
+// a session and stream progress to the sink while mirroring events (and a final
+// result record) to the log, ParseResult/ClassifyOutcome lift the normalized
+// result and outcome, and ExtractBailReport recovers the embedded <bail-report>.
+// See design/opencode-mapping.md.
 package opencode
 
 import (
@@ -114,13 +114,9 @@ func (o *OpencodeRuntime) PrepareAgentDef(_ context.Context, ws runtime.Workspac
 // logFile for ParseResult. The returned exitCode is synthetic: 0 on success,
 // 1 when the prompt errors or the assistant message carries an error.
 func (o *OpencodeRuntime) Run(ctx context.Context, inv runtime.Invocation, sink runtime.EventSink, logFile io.Writer) (int, error) {
-	baseURL := o.BaseURL
-	if baseURL == "" {
-		var err error
-		baseURL, err = sharedManager.ensure(ctx, o.binPath(), inv.Env)
-		if err != nil {
-			return 0, err
-		}
+	baseURL, err := o.resolveServer(ctx, inv.Env)
+	if err != nil {
+		return 0, err
 	}
 
 	client := opencodesdk.NewClient(option.WithBaseURL(baseURL))
@@ -134,15 +130,50 @@ func (o *OpencodeRuntime) Run(ctx context.Context, inv runtime.Invocation, sink 
 		return 0, fmt.Errorf("opencode: create session: %w", err)
 	}
 
-	// Stream live events for the sink while the (blocking) prompt runs.
+	return o.driveSession(ctx, client, baseURL, sess.ID, promptParams(inv, dir), sink, logFile)
+}
+
+// Resume continues a prior opencode session by id, typically after a usage-limit
+// wait. opencode has no no-input continuation, but the session retains its full
+// message history, so Resume re-prompts the same session with a continuation
+// nudge — preserving the accumulated context (unlike a fresh Run). It reuses the
+// shared server (already running in-process from the original Run) and writes a
+// fresh result record that ParseResult's last-record-wins scan picks up.
+func (o *OpencodeRuntime) Resume(ctx context.Context, sessionID string, sink runtime.EventSink, logFile io.Writer) (int, error) {
+	if sessionID == "" {
+		return 0, fmt.Errorf("opencode: Resume: empty session id")
+	}
+	baseURL, err := o.resolveServer(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	client := opencodesdk.NewClient(option.WithBaseURL(baseURL))
+	return o.driveSession(ctx, client, baseURL, sessionID, resumeParams(), sink, logFile)
+}
+
+// resolveServer returns the base URL of the server to drive: an explicit
+// BaseURL override (tests) or the lazily-started shared server.
+func (o *OpencodeRuntime) resolveServer(ctx context.Context, env map[string]string) (string, error) {
+	if o.BaseURL != "" {
+		return o.BaseURL, nil
+	}
+	return sharedManager.ensure(ctx, o.binPath(), env)
+}
+
+// driveSession runs one prompt against an existing session: it streams live
+// progress to sink while Session.Prompt blocks, then appends the canonical
+// result record to logFile. Shared by Run (fresh session) and Resume (existing
+// session). exitCode is 0 on success, 1 when the prompt errors or the assistant
+// message carries an error.
+func (o *OpencodeRuntime) driveSession(ctx context.Context, client *opencodesdk.Client, baseURL, sessionID string, params opencodesdk.SessionPromptParams, sink runtime.EventSink, logFile io.Writer) (int, error) {
 	streamCtx, stopStream := context.WithCancel(ctx)
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)
-		streamEvents(streamCtx, baseURL, sess.ID, sink, logFile)
+		streamEvents(streamCtx, baseURL, sessionID, sink, logFile)
 	}()
 
-	resp, promptErr := client.Session.Prompt(ctx, sess.ID, promptParams(inv, dir))
+	resp, promptErr := client.Session.Prompt(ctx, sessionID, params)
 
 	stopStream()
 	<-streamDone
@@ -165,7 +196,7 @@ func (o *OpencodeRuntime) Run(ctx context.Context, inv runtime.Invocation, sink 
 
 	writeLogRecord(logFile, logRecord{
 		Marker:    resultMarker,
-		SessionID: sess.ID,
+		SessionID: sessionID,
 		ExitCode:  exitCode,
 		Info:      info,
 		Parts:     parts,
@@ -175,6 +206,22 @@ func (o *OpencodeRuntime) Run(ctx context.Context, inv runtime.Invocation, sink 
 		return exitCode, fmt.Errorf("opencode: prompt: %w", promptErr)
 	}
 	return exitCode, nil
+}
+
+// resumePrompt nudges the model to continue an interrupted session. The session
+// already holds the original task and any partial progress, so no task context
+// is repeated here.
+const resumePrompt = "Continue the task from where you left off; the previous turn was interrupted before it finished."
+
+func resumeParams() opencodesdk.SessionPromptParams {
+	return opencodesdk.SessionPromptParams{
+		Parts: opencodesdk.F([]opencodesdk.SessionPromptParamsPartUnion{
+			opencodesdk.TextPartInputParam{
+				Type: opencodesdk.F(opencodesdk.TextPartInputTypeText),
+				Text: opencodesdk.F(resumePrompt),
+			},
+		}),
+	}
 }
 
 // promptParams maps a runtime.Invocation onto opencode's SessionPromptParams.
@@ -237,14 +284,4 @@ func writeLogRecord(w io.Writer, rec logRecord) {
 		_, _ = w.Write(data)
 		_, _ = w.Write([]byte("\n"))
 	}
-}
-
-// Resume is not yet implemented.
-func (o *OpencodeRuntime) Resume(_ context.Context, _ string, _ runtime.EventSink, _ io.Writer) (int, error) {
-	return 0, runtime.ErrNotSupported
-}
-
-// ExtractBailReport is not yet implemented.
-func (o *OpencodeRuntime) ExtractBailReport(_ *runtime.Result, _ string) *runtime.BailReport {
-	return nil
 }
