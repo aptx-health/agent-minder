@@ -3,7 +3,6 @@ package opencode
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -100,19 +99,6 @@ func TestPrepareAgentDef_Errors(t *testing.T) {
 	}
 	if err := o.PrepareAgentDef(ctx, runtime.Workspace{Dir: dir}, runtime.AgentDefinition{Name: "x", Body: nil}); err == nil {
 		t.Error("expected error for empty body")
-	}
-}
-
-// TestStubbedMethodsNotSupported covers the methods still stubbed for #540
-// (Resume/ExtractBailReport). Run (#538) and ParseResult/ClassifyOutcome (#539)
-// are implemented and exercised by the pure-logic and live tests.
-func TestStubbedMethodsNotSupported(t *testing.T) {
-	o := New()
-	if _, err := o.Resume(context.Background(), "sid", nil, nil); !errors.Is(err, runtime.ErrNotSupported) {
-		t.Errorf("Resume err = %v, want ErrNotSupported", err)
-	}
-	if got := o.ExtractBailReport(nil, ""); got != nil {
-		t.Errorf("ExtractBailReport = %+v, want nil", got)
 	}
 }
 

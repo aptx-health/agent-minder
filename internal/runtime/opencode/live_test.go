@@ -101,6 +101,26 @@ func TestLiveRun(t *testing.T) {
 		exit, sink.steps, sink.toolStarts, sink.toolEnds, sink.caps, log.Len())
 	t.Logf("parsed: session=%s turns=%d costUSD=%.6f finalText=%q",
 		res.SessionID, res.NumTurns, res.TotalCostUSD, truncate(res.FinalText, 60))
+
+	// Exercise the real Resume path: continue the same session and confirm it
+	// produces a fresh result record that ParseResult recovers.
+	var rlog bytes.Buffer
+	rexit, rerr := rt.Resume(ctx, res.SessionID, &recordingSink{}, &rlog)
+	if rerr != nil {
+		t.Fatalf("Resume error: %v", rerr)
+	}
+	rpath := filepath.Join(t.TempDir(), "resume.log")
+	if err := os.WriteFile(rpath, rlog.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rres, err := rt.ParseResult(rpath)
+	if err != nil || rres == nil {
+		t.Fatalf("Resume ParseResult: res=%v err=%v", rres, err)
+	}
+	if rres.SessionID != res.SessionID {
+		t.Errorf("Resume session = %s, want same session %s", rres.SessionID, res.SessionID)
+	}
+	t.Logf("resume: exit=%d finalText=%q", rexit, truncate(rres.FinalText, 60))
 }
 
 func envOr(k, def string) string {
