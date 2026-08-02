@@ -32,12 +32,15 @@ this yet; it is the decomposition map.
 The spine of the project. Hard rule: characterize before you refactor, refactor
 before you extend.
 
-### Wave 0 — Characterization (blocks the extraction; do first)
+### Wave 0 — Behavioral test scaffold (blocks the extraction; do first)
+
+Lightweight TDD. See [Behavioral test plan](#m1-behavioral-test-plan-lightweight-tdd)
+below for the full test list and the assert-on-serialized-surfaces discipline.
 
 | Task | Scope | Deliverable |
 |---|---|---|
-| M1-01 Foreground char tests | `cmd/deploy.go` foreground path | Golden tests pinning jobs.yaml load, subscription-map print, event-stream output, Ctrl-C shutdown of deployment + agents |
-| M1-02 Daemon + route char tests | `internal/daemon` | Snapshot current `/status`, `/jobs`, `/jobs/{id}/log` response shapes so v1 cannot silently break them |
+| M1-01 Green anchor suite (Bucket A) | `cmd/deploy.go`, `internal/daemon` | Passing tests pinning jobs.yaml load, subscription-map, cron persistence, clean shutdown, and legacy route shapes; plus the startup-summary compute/print seam. Guards every later refactor |
+| M1-02 Red spec suite (Bucket B) | `internal/scheduler`, `internal/supervisor`, `internal/db` | Red (or skipped) behavioral specs for the automation-correctness gaps, asserted via SQL/summary. Each Wave-2/3 task removes its skip to go green |
 
 ### Wave 1 — Coordinator extraction (structural, behavior-preserving)
 
@@ -93,6 +96,51 @@ before you extend.
 
 Waves 2 and 3 parallelize heavily once the Coordinator lands (04/05). Critical
 path: 01 → 03 → 04 → 17 → 19 → 20/21 → 24.
+
+### M1 behavioral test plan (lightweight TDD)
+
+Write these before/alongside implementation as an executable spec. The harness
+already supports it: `t.TempDir()` + `db.NewStore` for real isolated SQLite (no
+mocks), `TestHooks` on `SlotContext` to drive a full job lifecycle with no
+git/GitHub/agent, `doRequest` + `httptest` for black-box HTTP, and the
+`TestScenarios` table pattern for observable-outcome assertions.
+
+**Discipline — assert on serialized surfaces, not future Go symbols.** A red test
+must compile today and fail at runtime, then go green when the task lands. So
+assert through SQL (`SELECT source_type FROM jobs …`), the API JSON body as an
+untyped map, emitted event summaries, `GetSchedules` rows, or stdout — never a
+Go struct/field that does not exist yet. Anything referencing a not-yet-existing
+type has to wait; anything on JSON/SQL/events/stdout can be authored first.
+
+**Bucket A — green anchors (pass today; lock the refactor).** Must stay green
+through the Coordinator extraction (M1-03/04/05).
+
+| Test | Asserts (behavioral) | Locks |
+|---|---|---|
+| `TestForeground_ReportsSubscriptions` | jobs.yaml with a cron + a trigger → startup summary lists both | gate #3 |
+| `TestForeground_CronPersists` | loading that config writes the `job_schedules` row (`GetSchedules`) | current behavior |
+| `TestShutdown_StopsCleanly` | `cancel()` + `Stop()` → `Done()` closes, no goroutine leak | gate #4 |
+| `TestLegacyRoutes_Shapes` | golden JSON for `/status`, `/jobs`, `/jobs/{id}`, `/jobs/{id}/log` via httptest | gate #7 |
+
+**Bucket B — red spec (fail today; drive the fixes).**
+
+| Test | Asserts | Drives | Surface |
+|---|---|---|---|
+| `TestMilestoneTrigger_Installs` | `milestone:v2` trigger becomes an active route/automation, not just valid | M1-06 | routes / summary |
+| `TestTriggerOverrides_Carried` | trigger with budget/turn override → activated job's `max_budget_usd`/`max_turns` equal it | M1-07 | SQL on `jobs` |
+| `TestScheduleScopedToDeployment` | same schedule name in two deployments stays independent; last-run survives re-sync | M1-08 | SQL on `job_schedules` |
+| `TestRemovedAutomation_Disabled` | drop a job from jobs.yaml, reconcile → its automation disabled, not orphaned | M1-09 | SQL / summary |
+| `TestJobProvenance_Recorded` | trigger-activated job records `source_type='trigger'`, `source_name=<name>` | M1-11 | SQL on `jobs` |
+
+`/api/v1` golden contract tests are deliberately excluded from this initial set;
+they land with M1-19 once the envelope exists (see Resolved decisions in the
+plan doc — Go types are the contract source).
+
+**Required seam.** `printStartupSummary` prints straight to stdout. Split the
+computation (config → `[]Automation`/`[]TriggerRoute`) from the printing so
+`TestForeground_ReportsSubscriptions` and `TestMilestoneTrigger_Installs` assert
+on the returned value. That split is the first honest step of the Coordinator
+extraction, so it is not throwaway.
 
 ---
 
@@ -196,10 +244,14 @@ per additive model rather than a batch — keeps each reviewable and matches the
 "never edit an existing migration" rule. Each of M1-08/10/11/12/15/18 carries
 its own migration + `TestClaudeMDSchemaVersion` bump.
 
+**Resolved.** API contract source of truth is Go types in `internal/controlapi`
+with golden-JSON tests, not OpenAPI (2026-08-01; see plan doc Resolved
+decisions). This unblocks M1-19 scoping and keeps `/api/v1` golden tests out of
+the Wave-0 red set until the envelope exists.
+
 **Open decisions that gate scoping.** Resolve before writing the affected
 issues:
 
-- API contract as Go types vs OpenAPI vs both → shapes M1-19.
 - Managed workers child-process vs in-process → shapes M3-09/10.
 
 **Autopilot sequencing.** Minder's own supervisor does not sequence prose

@@ -1,7 +1,7 @@
 # Minder Control Plane and Operator UI Plan
 
 Status: proposed
-Last updated: 2026-07-30
+Last updated: 2026-08-01
 
 ## Summary
 
@@ -286,6 +286,11 @@ Collection endpoints use stable envelopes and cursor pagination. Event
 streaming uses SSE with event IDs, heartbeats, `after`/`Last-Event-ID` resume,
 and snapshot resynchronization.
 
+The contract source of truth is Go types in `internal/controlapi` with
+`encoding/json` tags, guarded by golden-JSON tests (see Resolved decisions). An
+OpenAPI document is generated from those types only when an out-of-repo consumer
+(e.g. a future browser UI) needs it.
+
 `/api/v1/meta` advertises version, instance identity, mode, and capabilities so
 clients can degrade cleanly when attached to older servers.
 
@@ -461,12 +466,22 @@ cleanly across disconnects and restarts, and never make managed mode mandatory.
 6. Consider a browser UI only after authentication, scoping, and command
    semantics are mature.
 
+## Resolved decisions
+
+- **API contract source of truth: Go types, not OpenAPI (2026-08-01).** The v1
+  contract lives as `internal/controlapi` structs with `encoding/json` tags,
+  guarded by golden-JSON tests. Every M1 client (foreground stdout, CLI, TUI) is
+  in-repo Go, so hand-maintained OpenAPI would be sync overhead with no consumer;
+  `/api/v1/meta` capability advertising covers version negotiation. OpenAPI is
+  generated from the Go types later, only if an out-of-repo consumer (browser UI)
+  appears. This defers `/api/v1` golden contract tests until M1-19 lands the
+  envelope, rather than pinning them during the correctness/refactor waves.
+
 ## Open decisions
 
 - Whether managed deployment workers remain child processes permanently or may
   optionally run in-process.
 - Event and log retention limits.
-- Whether the API contract is maintained as Go types, OpenAPI, or both.
 - Remote endpoint discovery and credential/profile storage.
 - Redaction rules for command/tool summaries and raw logs.
 - The boundary between exact usage, runtime-provided estimates, and
