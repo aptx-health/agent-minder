@@ -175,6 +175,11 @@ func TestLiveToolUse(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("expected exit 0, got %d; log:\n%s", exit, log.String())
 	}
+	if p := os.Getenv("OPENCODE_LIVE_LOG"); p != "" {
+		_ = os.WriteFile(p, log.Bytes(), 0o644)
+		t.Logf("wrote mirrored event log to %s", p)
+	}
+
 	// Both signals below are best-effort (model- and translator-dependent). The
 	// HARD guarantee this test enforces is "no approval stall": Run returned nil
 	// with exit 0 above; a gated "ask" with no responder would instead hang until
