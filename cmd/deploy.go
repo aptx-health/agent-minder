@@ -340,11 +340,7 @@ func runForeground(deployID string) error {
 		if err := sched.SyncSchedules(); err != nil {
 			fmt.Printf("Warning: sync schedules: %v\n", err)
 		}
-		for _, def := range cfg.Jobs {
-			if labels := def.TriggerLabels(); len(labels) > 0 {
-				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime, Model: def.Model})
-			}
-		}
+		routes = triggerRoutesFromConfig(cfg)
 		if len(routes) > 0 {
 			sup.SetTriggerRoutes(routes)
 		}
@@ -354,7 +350,7 @@ func runForeground(deployID string) error {
 	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil || hasTriggers)
 
 	// --- Startup summary ---
-	printStartupSummary(deploy, routes, store, deployID)
+	printStartupSummary(computeStartupSummary(deploy, routes, store, deployID))
 
 	// Handle signals.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -464,12 +460,8 @@ func runDaemon(deployID string) error {
 			fmt.Printf("Warning: sync schedules: %v\n", err)
 		}
 
-		// Extract trigger routes and cron schedules for display.
-		for _, def := range cfg.Jobs {
-			if labels := def.TriggerLabels(); len(labels) > 0 {
-				routes = append(routes, supervisor.TriggerRoute{Labels: labels, Agent: def.Agent, Runtime: def.Runtime, Model: def.Model})
-			}
-		}
+		// Extract trigger routes for the supervisor and startup summary.
+		routes = triggerRoutesFromConfig(cfg)
 		if len(routes) > 0 {
 			sup.SetTriggerRoutes(routes)
 		}
@@ -479,7 +471,7 @@ func runDaemon(deployID string) error {
 	hasTriggers := len(routes) > 0
 	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil || hasTriggers)
 
-	printStartupSummary(deploy, routes, store, deployID)
+	printStartupSummary(computeStartupSummary(deploy, routes, store, deployID))
 
 	if len(jobs) == 0 && deploy.Mode == "issues" && sched == nil {
 		fmt.Println("Note: daemon started but no jobs found. Waiting for watch events or manual job creation.")
@@ -560,33 +552,111 @@ func resolveOwnerRepo(repoDir string) (string, string, error) {
 	return owner, repo, nil
 }
 
-func printStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute, store *db.Store, deployID string) {
-	fmt.Println("Subscriptions:")
+type startupAutomationKind string
+
+const (
+	startupAutomationWatch   startupAutomationKind = "watch"
+	startupAutomationTrigger startupAutomationKind = "trigger"
+	startupAutomationCron    startupAutomationKind = "cron"
+)
+
+// startupAutomation is the computed, printable view of an active automation.
+// Keeping this data separate from stdout lets the coordinator extraction reuse
+// and test the loaded subscription map without capturing process output.
+type startupAutomation struct {
+	Kind       startupAutomationKind
+	Name       string
+	Expression string
+	Labels     []string
+	Agent      string
+	Runtime    string
+	NextRunAt  time.Time
+	HasNextRun bool
+}
+
+// triggerRoutesFromConfig computes the label routes installed in the
+// supervisor from a validated jobs.yaml config.
+func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
+	var routes []supervisor.TriggerRoute
+	if cfg == nil {
+		return routes
+	}
+
+	for _, def := range cfg.Jobs {
+		if labels := def.TriggerLabels(); len(labels) > 0 {
+			routes = append(routes, supervisor.TriggerRoute{
+				Labels:  labels,
+				Agent:   def.Agent,
+				Runtime: def.Runtime,
+				Model:   def.Model,
+			})
+		}
+	}
+	return routes
+}
+
+// computeStartupSummary snapshots the active watch, trigger, and cron
+// automations. Database read errors intentionally produce no cron entries,
+// matching the historical best-effort startup summary behavior.
+func computeStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute, store *db.Store, deployID string) []startupAutomation {
+	automations := make([]startupAutomation, 0, len(routes)+1)
 	if deploy.WatchFilter.Valid && deploy.WatchFilter.String != "" {
-		fmt.Printf("  Watch: %s → autopilot\n", deploy.WatchFilter.String)
+		automations = append(automations, startupAutomation{
+			Kind:       startupAutomationWatch,
+			Expression: deploy.WatchFilter.String,
+			Agent:      "autopilot",
+		})
 	}
-	for _, r := range routes {
-		runtimeSuffix := ""
-		if r.Runtime != "" {
-			runtimeSuffix = fmt.Sprintf(" via %s", r.Runtime)
-		}
-		fmt.Printf("  Trigger: label:%s → %s%s\n", strings.Join(r.Labels, ","), r.Agent, runtimeSuffix)
+	for _, route := range routes {
+		automations = append(automations, startupAutomation{
+			Kind:    startupAutomationTrigger,
+			Labels:  append([]string(nil), route.Labels...),
+			Agent:   route.Agent,
+			Runtime: route.Runtime,
+		})
 	}
+
 	schedules, _ := store.GetEnabledSchedules(deployID)
-	for _, s := range schedules {
-		if s.CronExpr.Valid {
+	for _, schedule := range schedules {
+		if !schedule.CronExpr.Valid {
+			continue
+		}
+		automations = append(automations, startupAutomation{
+			Kind:       startupAutomationCron,
+			Name:       schedule.Name,
+			Expression: schedule.CronExpr.String,
+			Agent:      schedule.Agent,
+			Runtime:    schedule.Runtime.String,
+			NextRunAt:  schedule.NextRunAt.Time,
+			HasNextRun: schedule.NextRunAt.Valid,
+		})
+	}
+	return automations
+}
+
+// printStartupSummary is deliberately a thin stdout adapter over the computed
+// subscription map.
+func printStartupSummary(automations []startupAutomation) {
+	fmt.Println("Subscriptions:")
+	for _, automation := range automations {
+		runtimeSuffix := ""
+		if automation.Runtime != "" {
+			runtimeSuffix = fmt.Sprintf(" via %s", automation.Runtime)
+		}
+		switch automation.Kind {
+		case startupAutomationWatch:
+			fmt.Printf("  Watch: %s → %s\n", automation.Expression, automation.Agent)
+		case startupAutomationTrigger:
+			fmt.Printf("  Trigger: label:%s → %s%s\n", strings.Join(automation.Labels, ","), automation.Agent, runtimeSuffix)
+		case startupAutomationCron:
 			next := ""
-			if s.NextRunAt.Valid {
-				next = s.NextRunAt.Time.Format("Mon 15:04 UTC")
+			if automation.HasNextRun {
+				next = automation.NextRunAt.Format("Mon 15:04 UTC")
 			}
-			runtimeSuffix := ""
-			if s.Runtime.Valid {
-				runtimeSuffix = fmt.Sprintf(" via %s", s.Runtime.String)
-			}
-			fmt.Printf("  Cron: %s (%s) → %s%s [next: %s]\n", s.Name, s.CronExpr.String, s.Agent, runtimeSuffix, next)
+			fmt.Printf("  Cron: %s (%s) → %s%s [next: %s]\n", automation.Name, automation.Expression, automation.Agent, runtimeSuffix, next)
 		}
 	}
-	if len(routes) == 0 && len(schedules) == 0 && (!deploy.WatchFilter.Valid || deploy.WatchFilter.String == "") {
+	if len(automations) == 0 {
 		fmt.Println("  (none)")
 	}
 }
