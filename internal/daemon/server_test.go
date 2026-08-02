@@ -59,6 +59,127 @@ func doRequest(t *testing.T, srv *Server, method, path string) *httptest.Respons
 	return rr
 }
 
+func TestLegacyRoutes_Shapes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, store := testServer(t)
+
+	logPath := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(logPath, []byte("planning\nworking\n"), 0o600); err != nil {
+		t.Fatalf("write agent log: %v", err)
+	}
+	job := &db.Job{
+		DeploymentID: "test-deploy",
+		Agent:        "autopilot",
+		Name:         "issue-42",
+		IssueNumber:  42,
+		IssueTitle:   sql.NullString{String: "Fix auth", Valid: true},
+		Owner:        "acme",
+		Repo:         "widgets",
+		Status:       db.StatusQueued,
+	}
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	if _, err := store.DB().Exec("UPDATE jobs SET agent_log = ? WHERE id = ?", logPath, job.ID); err != nil {
+		t.Fatalf("set agent log: %v", err)
+	}
+
+	status := decodeJSONResponse(t, doRequest(t, srv, "GET", "/status"))
+	statusObject, ok := status.(map[string]any)
+	if !ok {
+		t.Fatalf("/status returned %T, want a JSON object", status)
+	}
+	if _, ok := statusObject["uptime_sec"]; !ok {
+		t.Fatal("/status omitted uptime_sec")
+	}
+	if _, ok := statusObject["started_at"]; !ok {
+		t.Fatal("/status omitted started_at")
+	}
+	statusObject["uptime_sec"] = float64(0)
+	statusObject["started_at"] = "<timestamp>"
+	assertGoldenJSON(t, "/status", statusObject, `{
+  "deploy_id": "test-deploy",
+  "alive": false,
+  "pid": 0,
+  "budget_paused": false,
+  "uptime_sec": 0,
+  "started_at": "<timestamp>",
+  "total_spent": 0,
+  "total_budget": 25,
+  "config": {
+    "max_agents": 3,
+    "max_turns": 50,
+    "max_budget": 5,
+    "runtime": "claude-code",
+    "model": "sonnet",
+    "skip_label": "no-agent",
+    "auto_merge": false,
+    "base_branch": "main"
+  }
+}`)
+
+	const jobGolden = `{
+  "id": 1,
+  "agent": "autopilot",
+  "name": "issue-42",
+  "title": "Fix auth",
+  "issue_number": 42,
+  "issue_title": "Fix auth",
+  "owner": "acme",
+  "repo": "widgets",
+  "status": "queued",
+  "runtime": "claude-code",
+  "cost_usd": 0
+}`
+	jobs := decodeJSONResponse(t, doRequest(t, srv, "GET", "/jobs"))
+	assertGoldenJSON(t, "/jobs", jobs, "["+jobGolden+"]")
+
+	jobResponse := decodeJSONResponse(t, doRequest(t, srv, "GET", fmt.Sprintf("/jobs/%d", job.ID)))
+	assertGoldenJSON(t, "/jobs/{id}", jobResponse, jobGolden)
+
+	logResponse := doRequest(t, srv, "GET", fmt.Sprintf("/jobs/%d/log", job.ID))
+	assertGoldenJSON(t, "/jobs/{id}/log", map[string]any{
+		"status":       logResponse.Code,
+		"content_type": logResponse.Header().Get("Content-Type"),
+		"body":         logResponse.Body.String(),
+	}, `{
+  "status": 200,
+  "content_type": "text/plain; charset=utf-8",
+  "body": "planning\nworking\n"
+}`)
+}
+
+func decodeJSONResponse(t *testing.T, rr *httptest.ResponseRecorder) any {
+	t.Helper()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("response status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+	}
+	var value any
+	if err := json.Unmarshal(rr.Body.Bytes(), &value); err != nil {
+		t.Fatalf("decode JSON response: %v; body: %s", err, rr.Body.String())
+	}
+	return value
+}
+
+func assertGoldenJSON(t *testing.T, route string, got any, golden string) {
+	t.Helper()
+	var want any
+	if err := json.Unmarshal([]byte(golden), &want); err != nil {
+		t.Fatalf("invalid %s golden JSON: %v", route, err)
+	}
+	gotJSON, err := json.MarshalIndent(got, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal %s response: %v", route, err)
+	}
+	wantJSON, err := json.MarshalIndent(want, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal %s golden response: %v", route, err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("%s response shape changed\n got: %s\nwant: %s", route, gotJSON, wantJSON)
+	}
+}
+
 func TestHandleStatus(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -345,8 +466,8 @@ func TestHandleJobLog(t *testing.T) {
 func TestHandleStop(t *testing.T) {
 	srv, _ := testServer(t)
 
-	stopped := false
-	srv.StopDaemon = func() { stopped = true }
+	stopped := make(chan struct{})
+	srv.StopDaemon = func() { close(stopped) }
 
 	rr := doRequest(t, srv, "POST", "/stop")
 	if rr.Code != http.StatusOK {
@@ -360,9 +481,9 @@ func TestHandleStop(t *testing.T) {
 	if resp["status"] != "stopping" {
 		t.Errorf("status = %q, want %q", resp["status"], "stopping")
 	}
-	// StopDaemon is called in a goroutine; give it a moment.
-	time.Sleep(10 * time.Millisecond)
-	if !stopped {
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
 		t.Error("StopDaemon callback was not invoked")
 	}
 }

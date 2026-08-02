@@ -1,12 +1,64 @@
 package supervisor
 
 import (
+	"context"
 	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
 )
+
+func TestShutdown_StopsCleanly(t *testing.T) {
+	conn, err := db.Open(filepath.Join(t.TempDir(), "minder.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	store := db.NewStore(conn)
+	deploy := &db.Deployment{
+		ID:             "shutdown-test",
+		RepoDir:        t.TempDir(),
+		Owner:          "acme",
+		Repo:           "widgets",
+		Mode:           "watch",
+		MaxAgents:      1,
+		MaxTurns:       50,
+		MaxBudgetUSD:   5,
+		Runtime:        "claude-code",
+		TotalBudgetUSD: 25,
+		BaseBranch:     "main",
+	}
+	if err := store.CreateDeployment(deploy); err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+
+	sup := New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, "")
+	sup.SetDaemonMode(true)
+	sup.fetchFn = func() error { return nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sup.Launch(ctx)
+	cancel()
+
+	stopReturned := make(chan struct{})
+	go func() {
+		sup.Stop()
+		close(stopReturned)
+	}()
+
+	select {
+	case <-stopReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return after cancellation")
+	}
+	select {
+	case <-sup.Done():
+	default:
+		t.Fatal("Done remained open after Stop returned")
+	}
+}
 
 // newTestSupervisor creates a Supervisor with pre-populated running jobs for testing.
 func newTestSupervisor(t *testing.T, jobIDs []int64) *Supervisor {
