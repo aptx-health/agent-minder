@@ -52,6 +52,73 @@ func TestBuildEnrollAgentCommandCodex(t *testing.T) {
 	}
 }
 
+func TestBuildEnrollAgentCommandOpenCode(t *testing.T) {
+	binDir := t.TempDir()
+	writeStubExe(t, binDir, "opencode")
+	t.Setenv("PATH", binDir)
+	// No OPENCODE_MODEL → the --model flag is omitted and opencode uses its own
+	// configured default.
+	t.Setenv("OPENCODE_MODEL", "")
+
+	cmd, err := buildEnrollAgentCommand(runtimepkg.NameOpenCode, "/tmp/repo", "system prompt")
+	if err != nil {
+		t.Fatalf("buildEnrollAgentCommand: %v", err)
+	}
+	got := strings.Join(cmd.Args, " ")
+	for _, want := range []string{"opencode", "/tmp/repo", "--prompt", "system prompt", "Begin the onboarding interview"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("opencode args missing %q: %v", want, cmd.Args)
+		}
+	}
+	if strings.Contains(got, "--model") {
+		t.Fatalf("expected no --model flag when OPENCODE_MODEL is unset: %v", cmd.Args)
+	}
+	if cmd.Dir != "/tmp/repo" {
+		t.Fatalf("Dir = %q, want /tmp/repo", cmd.Dir)
+	}
+}
+
+func TestBuildEnrollAgentCommandOpenCodeModel(t *testing.T) {
+	binDir := t.TempDir()
+	writeStubExe(t, binDir, "opencode")
+	t.Setenv("PATH", binDir)
+	t.Setenv("OPENCODE_MODEL", "anthropic/claude-sonnet-4-6")
+
+	cmd, err := buildEnrollAgentCommand(runtimepkg.NameOpenCode, "/tmp/repo", "system prompt")
+	if err != nil {
+		t.Fatalf("buildEnrollAgentCommand: %v", err)
+	}
+	got := strings.Join(cmd.Args, " ")
+	if !strings.Contains(got, "--model anthropic/claude-sonnet-4-6") {
+		t.Fatalf("opencode args missing model flag: %v", cmd.Args)
+	}
+}
+
+func TestBuildEnrollAgentCommandOpenCodeBadModel(t *testing.T) {
+	binDir := t.TempDir()
+	writeStubExe(t, binDir, "opencode")
+	t.Setenv("PATH", binDir)
+	t.Setenv("OPENCODE_MODEL", "bad model name") // spaces are rejected
+
+	if _, err := buildEnrollAgentCommand(runtimepkg.NameOpenCode, "/tmp/repo", "system prompt"); err == nil {
+		t.Fatal("expected error for malformed OPENCODE_MODEL, got nil")
+	}
+}
+
+func TestOnboardingModel(t *testing.T) {
+	t.Setenv("OPENCODE_MODEL", "openrouter/x")
+	if got := onboardingModel(runtimepkg.NameOpenCode); got != "openrouter/x" {
+		t.Fatalf("opencode onboarding model = %q, want openrouter/x", got)
+	}
+	// Other runtimes carry their own built-in default → empty (omit the flag).
+	if got := onboardingModel(runtimepkg.NameClaudeCode); got != "" {
+		t.Fatalf("claude-code onboarding model = %q, want empty", got)
+	}
+	if got := onboardingModel(runtimepkg.NameCodex); got != "" {
+		t.Fatalf("codex onboarding model = %q, want empty", got)
+	}
+}
+
 func TestBuildEnrollSystemPromptHarnessAware(t *testing.T) {
 	info := &discovery.RepoInfo{
 		Path: "/tmp/repo",

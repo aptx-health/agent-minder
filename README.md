@@ -271,7 +271,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 | `minder agents list\|show\|add` | List, inspect, or create agent definitions |
 | `minder checkout [issue]` | Check out an agent's worktree for review (interactive picker, `--remote`) |
 | `minder logs [issue]` | View agent log output (interactive picker, `--follow`, `--remote`, `--raw`) |
-| `minder enroll [repo-dir]` | Scan a repo and generate onboarding config (`--runtime` selects Claude or Codex for onboarding) |
+| `minder enroll [repo-dir]` | Scan a repo and generate onboarding config (`--runtime` selects Claude, Codex, or opencode for onboarding; opencode reads `OPENCODE_MODEL`) |
 
 ### Deploy flags
 

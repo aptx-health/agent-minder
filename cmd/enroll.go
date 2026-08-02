@@ -188,6 +188,26 @@ func buildEnrollAgentCommand(runtimeName, repoDir, systemPrompt string) (*exec.C
 			"--ask-for-approval", "on-request",
 			prompt)
 
+	case runtime.NameOpenCode:
+		opencodePath, err := exec.LookPath("opencode")
+		if err != nil {
+			return nil, fmt.Errorf("install opencode and re-run 'minder enroll --runtime opencode' to complete setup: %w", err)
+		}
+		model := onboardingModel(runtime.NameOpenCode)
+		if err := runtime.ValidateModelName(model); err != nil {
+			return nil, fmt.Errorf("OPENCODE_MODEL: %w", err)
+		}
+		// opencode has no --append-system-prompt; fold the system prompt into the
+		// initial message like the Codex arm. The repo dir is the positional
+		// project argument, and permissions are approved interactively (no --auto)
+		// to match the Codex on-request posture.
+		prompt := systemPrompt + "\n\n" + beginPrompt
+		args := []string{repoDir, "--prompt", prompt}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		agentCmd = exec.Command(opencodePath, args...)
+
 	default:
 		return nil, fmt.Errorf("unsupported onboarding runtime %q", runtimeName)
 	}
@@ -197,6 +217,22 @@ func buildEnrollAgentCommand(runtimeName, repoDir, systemPrompt string) (*exec.C
 	agentCmd.Stdout = os.Stdout
 	agentCmd.Stderr = os.Stderr
 	return agentCmd, nil
+}
+
+// onboardingModel resolves the model the onboarding agent should run under for
+// the given runtime. Claude Code and Codex ship a built-in default model, so an
+// empty string tells buildEnrollAgentCommand to omit the model flag and let the
+// CLI choose. opencode is model-agnostic and has no implicit default, so it reads
+// OPENCODE_MODEL (a provider/model reference, e.g. "anthropic/claude-sonnet-4-6",
+// matching the BYOA env-var auth path); when unset, the flag is still omitted and
+// opencode falls back to its own configured default from `opencode auth`/config.
+func onboardingModel(runtimeName string) string {
+	switch runtimeName {
+	case runtime.NameOpenCode:
+		return runtime.NormalizeModelName(os.Getenv("OPENCODE_MODEL"))
+	default:
+		return ""
+	}
 }
 
 func buildEnrollSystemPrompt(info *discovery.RepoInfo, filePath, agentReport, onboardingRuntime string) string {
