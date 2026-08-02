@@ -123,6 +123,70 @@ func TestLiveRun(t *testing.T) {
 	t.Logf("resume: exit=%d finalText=%q", rexit, truncate(rres.FinalText, 60))
 }
 
+// TestLiveToolUse verifies headless permission autonomy end-to-end: it drives a
+// prompt that must invoke a tool (write a file) through minder's OWN managed
+// server — New() with no BaseURL, so server.ensure() injects the
+// defaultHeadlessPermission policy — and asserts the run completes without
+// stalling on an approval gate. If permissions were left at opencode's
+// interactive "ask", Session.Prompt would hang until the context deadline and
+// this test would fail on timeout.
+//
+// Opt-in and model-dependent (the model must actually emit a tool call):
+//
+//	OPENCODE_LIVE=1
+//	OPENCODE_DIR    working directory holding provider config (also the write target)
+//	OPENCODE_MODEL  provider/model reference
+func TestLiveToolUse(t *testing.T) {
+	if os.Getenv("OPENCODE_LIVE") != "1" {
+		t.Skip("set OPENCODE_LIVE=1 to run the live opencode tool-use test")
+	}
+	dir := os.Getenv("OPENCODE_DIR")
+	model := os.Getenv("OPENCODE_MODEL")
+	if dir == "" || model == "" {
+		t.Fatal("OPENCODE_DIR and OPENCODE_MODEL are required")
+	}
+
+	fileName := "minder-tooluse.txt"
+	target := filepath.Join(dir, fileName)
+	_ = os.Remove(target)
+	t.Cleanup(func() { _ = os.Remove(target) })
+
+	// New() (no BaseURL) → the shared manager starts a server and injects the
+	// headless permission policy; this is the path we want to exercise.
+	rt := New()
+	sink := &recordingSink{}
+	var log bytes.Buffer
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	prompt := "Use your file-writing tool to create a file named " + fileName +
+		" in the current directory containing exactly the text OK. Do not ask for confirmation."
+
+	exit, err := rt.Run(ctx, runtime.Invocation{
+		Workspace: runtime.Workspace{Dir: dir},
+		AgentName: "build",
+		Model:     model,
+		Prompt:    prompt,
+	}, sink, &log)
+	if err != nil {
+		t.Fatalf("Run error (a stall on approval surfaces as a deadline here): %v", err)
+	}
+	if exit != 0 {
+		t.Fatalf("expected exit 0, got %d; log:\n%s", exit, log.String())
+	}
+	// Both signals below are best-effort (model- and translator-dependent). The
+	// HARD guarantee this test enforces is "no approval stall": Run returned nil
+	// with exit 0 above; a gated "ask" with no responder would instead hang until
+	// the context deadline and fail before reaching here.
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Logf("tool-written file not found (%v); model likely did not call the write tool", statErr)
+	} else {
+		t.Logf("tool wrote %s successfully — permissions did not stall", target)
+	}
+	t.Logf("run: exit=%d toolStarts=%d logBytes=%d", exit, sink.toolStarts, log.Len())
+}
+
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

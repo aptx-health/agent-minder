@@ -59,6 +59,10 @@ func (m *serverManager) ensure(ctx context.Context, bin string, env map[string]s
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	// Inject the headless-autonomous permission policy so tool actions don't
+	// stall on approval (no interactive approver exists in minder's model). Only
+	// applied when the operator hasn't already set OPENCODE_PERMISSION.
+	cmd.Env = withHeadlessPermission(cmd.Env)
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("opencode: start serve: %w", err)
 	}
