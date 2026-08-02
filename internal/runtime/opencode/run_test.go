@@ -151,6 +151,49 @@ func TestTranslatorEvents(t *testing.T) {
 	}
 }
 
+// TestTranslatorToolTerminalFirst covers a tool whose first observed event is
+// already terminal (fast tool, or a pending/running event lost to a stream
+// reconnect). OnToolStart must still fire so start/end stay balanced — the
+// regression behind an observed live run reporting a written file but zero tool
+// starts.
+func TestTranslatorToolTerminalFirst(t *testing.T) {
+	sink := &recordingSink{}
+	tr := &translator{sink: sink, tools: map[string]bool{}}
+
+	evt := sseEvent{Type: "message.part.updated"}
+	p := &ssePart{Type: "tool", Tool: "write", CallID: "call-x"}
+	p.State.Status = "completed"
+	evt.Properties.Part = p
+	tr.handle(evt)
+
+	if sink.toolStarts != 1 {
+		t.Errorf("toolStarts = %d, want 1 (synthesized for terminal-first tool)", sink.toolStarts)
+	}
+	if sink.toolEnds != 1 {
+		t.Errorf("toolEnds = %d, want 1", sink.toolEnds)
+	}
+	if sink.lastTool != "write" {
+		t.Errorf("lastTool = %q, want write", sink.lastTool)
+	}
+
+	// A subsequent duplicate terminal event for the same call must not re-fire a
+	// start (dedup entry was cleared, but callID reuse in one message is rare and
+	// each terminal event is one tool end).
+	sink2 := &recordingSink{}
+	tr2 := &translator{sink: sink2, tools: map[string]bool{"call-y": true}}
+	e2 := sseEvent{Type: "message.part.updated"}
+	p2 := &ssePart{Type: "tool", Tool: "bash", CallID: "call-y"}
+	p2.State.Status = "error"
+	e2.Properties.Part = p2
+	tr2.handle(e2)
+	if sink2.toolStarts != 0 {
+		t.Errorf("toolStarts = %d, want 0 (start already fired for call-y)", sink2.toolStarts)
+	}
+	if sink2.toolEnds != 1 {
+		t.Errorf("toolEnds = %d, want 1", sink2.toolEnds)
+	}
+}
+
 func TestTranslatorFiltersOtherSessions(t *testing.T) {
 	// streamEvents filters by sessionID before calling handle; verify handle
 	// itself does not require a session and that a nil sink is safe.

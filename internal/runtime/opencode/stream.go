@@ -134,9 +134,14 @@ func (t *translator) handleTool(p *ssePart) {
 	defer t.mu.Unlock()
 	switch p.State.Status {
 	case "completed", "error":
-		if t.tools[p.CallID] {
-			delete(t.tools, p.CallID)
+		// If no pending/running event was ever seen for this call — a fast tool
+		// whose first observed event is already terminal, or an early event lost
+		// to a stream reconnect — synthesize the start so OnToolStart/OnToolEnd
+		// stay balanced. Without this, a tool that ran still reports zero starts.
+		if p.CallID == "" || !t.tools[p.CallID] {
+			t.sink.OnToolStart(toolLabel(p), toolSummary(p, 80))
 		}
+		delete(t.tools, p.CallID)
 		t.sink.OnToolEnd()
 	default: // pending, running
 		if p.CallID != "" && t.tools[p.CallID] {
