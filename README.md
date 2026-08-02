@@ -105,7 +105,7 @@ minder jobs run weekly-deps        # manual trigger
 The doer runtime is selected in this order:
 
 1. Job-level `runtime:` in `.agent-minder/jobs.yaml` for scheduled or trigger-created jobs.
-2. Explicit `minder deploy --runtime <claude-code|codex>`.
+2. Explicit `minder deploy --runtime <claude-code|codex|opencode>`.
 3. Repo default in `.agent-minder/config.yaml`:
 
 ```yaml
@@ -114,6 +114,49 @@ runtime: codex
 
 4. User default in `~/.agent-minder/config.yaml`.
 5. Built-in default: `claude-code`.
+
+### opencode runtime
+
+opencode (`--runtime opencode`) is model-agnostic: it drives any provider through
+[models.dev](https://models.dev) behind a shared `opencode serve` process. Select
+it like any runtime — `--runtime opencode`, a job's `runtime: opencode`, or a
+repo/user `config.yaml`.
+
+**Model.** opencode has no built-in default model, so specify one as `provider/model`:
+
+```yaml
+# .agent-minder/jobs.yaml
+weekly-deps:
+  schedule: "0 9 * * 1"
+  agent: dependency-updater
+  runtime: opencode
+  model: openrouter/anthropic/claude-3.5-sonnet   # provider/model
+```
+
+Other valid forms: `anthropic/claude-3-5-sonnet`, `ollama/llama3.3`, a local
+OpenAI-compatible provider like `localmlx/…`. For onboarding, `minder enroll
+--runtime opencode` reads the model from the `OPENCODE_MODEL` env var.
+
+**Auth (provider env vars).** Set your provider key in the environment where
+`minder deploy` runs; it is inherited by the `opencode serve` process:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...      # or ANTHROPIC_API_KEY, OPENAI_API_KEY, ...
+minder deploy --repo . --runtime opencode --foreground
+```
+
+Provider credentials are read once when the shared server starts, so treat them
+as deployment-level. `opencode auth login` (which writes to opencode's own config)
+is an optional alternative and also works.
+
+**Budget.** opencode has no spend-cap flag. Minder enforces the per-job budget
+itself, checking accumulated real USD cost (`AssistantMessage.cost`) between
+messages and stopping the job once it is exceeded.
+
+**Permissions.** Jobs run headless-autonomous — minder injects a default
+`OPENCODE_PERMISSION` policy (edit/write/bash/webfetch allowed, worktree boundary
+enforced) so tool use does not stall on an approval prompt. Set `OPENCODE_PERMISSION`
+yourself to override.
 
 ### Built-in agent types
 
@@ -279,7 +322,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 |------|---------|-------------|
 | `--repo <dir>` | `.` | Repository directory |
 | `--agent <name>` | `autopilot` | Agent type to use |
-| `--runtime <name>` | hierarchy | Doer runtime override (`claude-code` or `codex`) |
+| `--runtime <name>` | hierarchy | Doer runtime override (`claude-code`, `codex`, or `opencode`) |
 | `--watch <filter>` | — | Watch for issues (`label:<name>` or `milestone:<name>`) |
 | `--serve <addr>` | — | Start HTTP API (e.g., `:7749`) |
 | `--foreground` | — | Don't daemonize |
@@ -310,6 +353,9 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 | `MINDER_LOG` | `~/.agent-minder/debug.log` | Debug log path |
 | `MINDER_DEBUG` | — | Enable structured JSON debug logging |
 | `MINDER_API_KEY` | — | API key for remote daemon access |
+| `OPENCODE_MODEL` | — | `provider/model` for `minder enroll --runtime opencode` |
+| `OPENCODE_PERMISSION` | headless default | Override opencode's tool-permission policy (inline JSON) |
+| `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, … | — | Provider keys for the opencode runtime (inherited by `opencode serve`) |
 
 ## Development
 
