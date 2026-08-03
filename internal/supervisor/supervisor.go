@@ -434,6 +434,12 @@ func (s *Supervisor) Stop() {
 	if s.done != nil {
 		<-s.done
 	}
+
+	// In-flight work has drained; reap any process-level runtime resources
+	// (e.g. opencode's shared `opencode serve`). Decoupled via the registry so
+	// the supervisor never imports a concrete runtime package; stateless
+	// runtimes register no hook and this no-ops.
+	runtimepkg.ShutdownAll()
 }
 
 func (s *Supervisor) emitEvent(typ, summary string, taskID int64) {
