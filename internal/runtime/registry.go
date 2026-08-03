@@ -27,8 +27,9 @@ const DefaultName = NameClaudeCode
 type Factory func() AgentRuntime
 
 var (
-	registryMu sync.RWMutex
-	factories  = map[string]Factory{}
+	registryMu    sync.RWMutex
+	factories     = map[string]Factory{}
+	shutdownHooks []func()
 )
 
 // Register associates name with factory. Intended to be called from a runtime
@@ -47,6 +48,35 @@ func Register(name string, factory Factory) {
 		panic("runtime: duplicate Register for " + name)
 	}
 	factories[name] = factory
+}
+
+// RegisterShutdown registers a process-level teardown hook for a runtime that
+// owns shared resources beyond a single Run — e.g. opencode's shared
+// `opencode serve` process. Hooks run when ShutdownAll is called on clean
+// shutdown. Stateless runtimes (claude-code, codex) are per-process and need
+// not register one. Intended to be called from a runtime adapter's init(); a
+// nil fn is ignored.
+func RegisterShutdown(fn func()) {
+	if fn == nil {
+		return
+	}
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	shutdownHooks = append(shutdownHooks, fn)
+}
+
+// ShutdownAll invokes every registered runtime teardown hook. It is safe to
+// call when no runtime allocated shared resources — hooks guard their own nil
+// case — and safe to call more than once. Shutdown-path callers (the supervisor
+// on Stop, the daemon on teardown) invoke it once in-flight work has drained.
+func ShutdownAll() {
+	registryMu.RLock()
+	hooks := make([]func(), len(shutdownHooks))
+	copy(hooks, shutdownHooks)
+	registryMu.RUnlock()
+	for _, fn := range hooks {
+		fn()
+	}
 }
 
 // KnownNames returns the registered runtime identifiers in a stable sorted

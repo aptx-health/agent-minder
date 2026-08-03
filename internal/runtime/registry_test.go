@@ -192,6 +192,47 @@ func TestValidateModelName(t *testing.T) {
 	}
 }
 
+func TestShutdownAllInvokesHooksInOrder(t *testing.T) {
+	registryMu.Lock()
+	saved := shutdownHooks
+	shutdownHooks = nil
+	registryMu.Unlock()
+	t.Cleanup(func() {
+		registryMu.Lock()
+		shutdownHooks = saved
+		registryMu.Unlock()
+	})
+
+	var order []string
+	RegisterShutdown(func() { order = append(order, "a") })
+	RegisterShutdown(nil) // ignored, must not panic or add an entry
+	RegisterShutdown(func() { order = append(order, "b") })
+
+	ShutdownAll()
+	if got := strings.Join(order, ","); got != "a,b" {
+		t.Fatalf("hooks ran in order %q, want %q", got, "a,b")
+	}
+
+	// Safe to call more than once (shutdown paths may overlap).
+	ShutdownAll()
+	if got := strings.Join(order, ","); got != "a,b,a,b" {
+		t.Fatalf("second ShutdownAll order %q, want %q", got, "a,b,a,b")
+	}
+}
+
+func TestShutdownAllNoHooksIsSafe(t *testing.T) {
+	registryMu.Lock()
+	saved := shutdownHooks
+	shutdownHooks = nil
+	registryMu.Unlock()
+	t.Cleanup(func() {
+		registryMu.Lock()
+		shutdownHooks = saved
+		registryMu.Unlock()
+	})
+	ShutdownAll() // must not panic with no registered hooks
+}
+
 func TestRegisterRejectsDuplicate(t *testing.T) {
 	resetRegistry(t)
 	defer func() {

@@ -67,6 +67,9 @@ type logRecord struct {
 
 func init() {
 	runtime.Register(Name, func() runtime.AgentRuntime { return New() })
+	// Reap the shared `opencode serve` on clean process teardown. Safe when no
+	// server was ever started (Shutdown handles the nil case).
+	runtime.RegisterShutdown(Shutdown)
 }
 
 // Name returns the runtime identifier.
