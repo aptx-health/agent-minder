@@ -41,17 +41,16 @@ before you extend.
 | M1-06 Install `milestone:*` triggers | #566 | ✅ done (merged #574); spec green |
 | M1-07 Carry trigger budget/turn overrides | #567 | ✅ done (merged #572); spec green |
 | M1-09 Disable removed automations | #568 | ✅ done (merged #573); spec green |
+| M1-08 Scope schedules to deployment | #570 | ✅ done (merged); spec green — schema now v9, `job_schedules` PK `(deployment_id, name)` |
+| M1-11 Record job provenance | #571 | 🔄 in flight (`agent-ready`) — migration v9→v10 |
 | M1-03 Extract `internal/coordinator` (+ rewire foreground) | #569 | ⬜ open — structural, drive solo (not concurrent autopilot) |
-| M1-08 Scope schedules to deployment | #570 | ⬜ open — migration (v9); one migration at a time |
-| M1-11 Record job provenance | #571 | ⬜ open — migration (v9); one migration at a time |
 
 Not yet filed (created when their deps clear): M1-04 folded into #569; M1-05
 (rewire daemon, dep #569); Wave 3–6 durable-model/event/API tasks (M1-10, 12–24).
 
 Red-spec checklist: `TestMilestoneTrigger_Installs`, `TestTriggerOverrides_Carried`,
-`TestRemovedAutomation_Disabled` now **pass**; `TestScheduleScopedToDeployment`
-(M1-08) and `TestJobProvenance_Recorded` (M1-11) still **skip** until their tasks
-land.
+`TestRemovedAutomation_Disabled`, `TestScheduleScopedToDeployment` now **pass**;
+only `TestJobProvenance_Recorded` (M1-11) still **skips** until #571 lands.
 
 **Dispatch rules:** only dependency-free roots get the `agent-ready` label
 (autopilot). #570 and #571 both bump `schemaVersion` v8→v9 — never dispatch two
