@@ -625,6 +625,14 @@ func (s *Store) DeleteSchedule(name string) error {
 	return err
 }
 
+// SetScheduleEnabled toggles the enabled flag for a schedule within a deployment.
+func (s *Store) SetScheduleEnabled(deploymentID, name string, enabled bool) error {
+	_, err := s.db.Exec(
+		"UPDATE job_schedules SET enabled = ? WHERE deployment_id = ? AND name = ?",
+		enabled, deploymentID, name)
+	return err
+}
+
 // RenameRepo updates all references from oldOwner/oldRepo to newOwner/newRepo
 // across deployments, jobs, and onboarding tables. Returns the total number of
 // rows updated.

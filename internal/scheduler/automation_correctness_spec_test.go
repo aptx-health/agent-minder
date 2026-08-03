@@ -67,8 +67,6 @@ jobs:
 }
 
 func TestRemovedAutomation_Disabled(t *testing.T) {
-	t.Skip("M1-09: disable jobs.yaml automations removed during reconciliation")
-
 	store := testStore(t)
 	deploy := createAutomationSpecDeployment(t, store, "removed-automation")
 	initial := parseAutomationSpecConfig(t, `
