@@ -79,10 +79,10 @@ func (s *Store) UpdateDeploymentCarriedCost(id string, cost float64) error {
 // CreateJob inserts a new job.
 func (s *Store) CreateJob(j *Job) error {
 	res, err := s.db.Exec(`INSERT INTO jobs
-		(deployment_id, agent, name, runtime, model, issue_number, issue_title, issue_body,
+		(deployment_id, agent, name, runtime, model, max_turns, max_budget_usd, issue_number, issue_title, issue_body,
 		 owner, repo, status, dependencies, stages_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.IssueNumber, j.IssueTitle, j.IssueBody,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.MaxTurns, j.MaxBudgetOv, j.IssueNumber, j.IssueTitle, j.IssueBody,
 		j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON)
 	if err != nil {
 		return err

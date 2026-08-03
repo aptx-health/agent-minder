@@ -23,10 +23,12 @@ type WatchFilter struct {
 // When an issue has ALL matching labels (AND logic), it's routed to the
 // specified agent instead of the default autopilot.
 type TriggerRoute struct {
-	Labels  []string // GitHub labels to match (AND logic)
-	Agent   string   // agent type to use
-	Runtime string   // optional job-level runtime override
-	Model   string   // optional job-level model override
+	Labels   []string // GitHub labels to match (AND logic)
+	Agent    string   // agent type to use
+	Runtime  string   // optional job-level runtime override
+	Model    string   // optional job-level model override
+	Budget   float64  // optional job-level max budget (USD) override
+	MaxTurns int      // optional job-level max turns override
 }
 
 // SetTriggerRoutes configures label→agent routing from jobs.yaml triggers.
@@ -240,6 +242,8 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 		Name:         fmt.Sprintf("%s-issue-%d", agent, issue.Number),
 		Runtime:      sql.NullString{String: route.Runtime, Valid: route.Runtime != ""},
 		Model:        sql.NullString{String: route.Model, Valid: route.Model != ""},
+		MaxTurns:     sql.NullInt64{Int64: int64(route.MaxTurns), Valid: route.MaxTurns > 0},
+		MaxBudgetOv:  sql.NullFloat64{Float64: route.Budget, Valid: route.Budget > 0},
 		IssueNumber:  issue.Number,
 		IssueTitle:   sql.NullString{String: issue.Title, Valid: true},
 		IssueBody:    sql.NullString{String: body, Valid: body != ""},
