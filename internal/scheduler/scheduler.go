@@ -72,6 +72,24 @@ func (s *Scheduler) SyncSchedules() error {
 		}
 	}
 
+	// Reconcile removals: disable any persisted schedule for this deployment
+	// whose definition no longer exists in jobs.yaml, so it stops firing.
+	existing, err := s.store.GetSchedules(s.deployID)
+	if err != nil {
+		return fmt.Errorf("load existing schedules: %w", err)
+	}
+	for _, sched := range existing {
+		if _, ok := s.config.Jobs[sched.Name]; ok {
+			continue // still defined in config
+		}
+		if !sched.Enabled {
+			continue // already disabled
+		}
+		if err := s.store.SetScheduleEnabled(s.deployID, sched.Name, false); err != nil {
+			return fmt.Errorf("disable removed schedule %q: %w", sched.Name, err)
+		}
+	}
+
 	return nil
 }
 

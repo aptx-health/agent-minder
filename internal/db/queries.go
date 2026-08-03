@@ -79,10 +79,10 @@ func (s *Store) UpdateDeploymentCarriedCost(id string, cost float64) error {
 // CreateJob inserts a new job.
 func (s *Store) CreateJob(j *Job) error {
 	res, err := s.db.Exec(`INSERT INTO jobs
-		(deployment_id, agent, name, runtime, model, issue_number, issue_title, issue_body,
+		(deployment_id, agent, name, runtime, model, max_turns, max_budget_usd, issue_number, issue_title, issue_body,
 		 owner, repo, status, dependencies, stages_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.IssueNumber, j.IssueTitle, j.IssueBody,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.MaxTurns, j.MaxBudgetOv, j.IssueNumber, j.IssueTitle, j.IssueBody,
 		j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON)
 	if err != nil {
 		return err
@@ -622,6 +622,14 @@ func (s *Store) UpdateScheduleRun(name string, lastRun, nextRun time.Time) error
 // DeleteSchedule removes a schedule.
 func (s *Store) DeleteSchedule(name string) error {
 	_, err := s.db.Exec("DELETE FROM job_schedules WHERE name = ?", name)
+	return err
+}
+
+// SetScheduleEnabled toggles the enabled flag for a schedule within a deployment.
+func (s *Store) SetScheduleEnabled(deploymentID, name string, enabled bool) error {
+	_, err := s.db.Exec(
+		"UPDATE job_schedules SET enabled = ? WHERE deployment_id = ? AND name = ?",
+		enabled, deploymentID, name)
 	return err
 }
 

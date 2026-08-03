@@ -586,10 +586,12 @@ func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 		switch {
 		case len(def.TriggerLabels()) > 0:
 			routes = append(routes, supervisor.TriggerRoute{
-				Labels:  def.TriggerLabels(),
-				Agent:   def.Agent,
-				Runtime: def.Runtime,
-				Model:   def.Model,
+				Labels:   def.TriggerLabels(),
+				Agent:    def.Agent,
+				Runtime:  def.Runtime,
+				Model:    def.Model,
+				Budget:   def.Budget,
+				MaxTurns: def.MaxTurns,
 			})
 		case def.TriggerMilestone() != "":
 			routes = append(routes, supervisor.TriggerRoute{
@@ -597,6 +599,8 @@ func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 				Agent:     def.Agent,
 				Runtime:   def.Runtime,
 				Model:     def.Model,
+				Budget:    def.Budget,
+				MaxTurns:  def.MaxTurns,
 			})
 		}
 	}

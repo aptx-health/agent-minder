@@ -13,8 +13,6 @@ import (
 )
 
 func TestTriggerOverrides_Carried(t *testing.T) {
-	t.Skip("M1-07: carry trigger budget and turn overrides into activated jobs")
-
 	store, deploy, route, issue := setupTriggerActivationSpec(t)
 	activateTriggerForSpec(t, store, deploy, route, issue)
 
