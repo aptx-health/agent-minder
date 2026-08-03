@@ -582,10 +582,11 @@ func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 		return routes
 	}
 
-	for _, def := range cfg.Jobs {
+	for name, def := range cfg.Jobs {
 		switch {
 		case len(def.TriggerLabels()) > 0:
 			routes = append(routes, supervisor.TriggerRoute{
+				Name:     name,
 				Labels:   def.TriggerLabels(),
 				Agent:    def.Agent,
 				Runtime:  def.Runtime,
@@ -595,6 +596,7 @@ func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 			})
 		case def.TriggerMilestone() != "":
 			routes = append(routes, supervisor.TriggerRoute{
+				Name:      name,
 				Milestone: def.TriggerMilestone(),
 				Agent:     def.Agent,
 				Runtime:   def.Runtime,

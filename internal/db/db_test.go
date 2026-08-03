@@ -488,6 +488,15 @@ func TestV8toV9ScheduleMigration(t *testing.T) {
 	v8Schedules := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (8);
+CREATE TABLE jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	deployment_id TEXT NOT NULL,
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL,
+	owner TEXT NOT NULL DEFAULT '',
+	repo TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'queued'
+);
 CREATE TABLE job_schedules (
 	name TEXT PRIMARY KEY,
 	deployment_id TEXT NOT NULL,
@@ -538,6 +547,66 @@ VALUES ('nightly', 'd1', '0 2 * * *', 'maintainer', 1, '2026-07-31 02:00:00');
 	}
 	if !sched.LastRunAt.Valid {
 		t.Fatal("last_run_at not preserved through v8→v9 migration")
+	}
+}
+
+func TestV9toV10ProvenanceMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migrate910.db")
+
+	// Build a v9 database with a jobs row that predates the provenance columns.
+	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open v9 db: %v", err)
+	}
+	v9 := `
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version VALUES (9);
+CREATE TABLE jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	deployment_id TEXT NOT NULL,
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL,
+	owner TEXT NOT NULL DEFAULT '',
+	repo TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'queued'
+);
+INSERT INTO jobs (deployment_id, agent, name, status)
+VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
+`
+	if _, err := conn.Exec(v9); err != nil {
+		t.Fatalf("create v9 jobs: %v", err)
+	}
+	_ = conn.Close()
+
+	conn2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (migration): %v", err)
+	}
+	defer func() { _ = conn2.Close() }()
+
+	var version int
+	_ = conn2.Get(&version, "SELECT version FROM schema_version")
+	if version != schemaVersion {
+		t.Errorf("got schema version %d, want %d", version, schemaVersion)
+	}
+
+	// Pre-existing row survives with NULL provenance columns.
+	var srcType, srcName, srcRef sql.NullString
+	if err := conn2.QueryRow(
+		`SELECT source_type, source_name, source_ref FROM jobs WHERE name = 'autopilot-issue-1'`,
+	).Scan(&srcType, &srcName, &srcRef); err != nil {
+		t.Fatalf("query provenance columns: %v", err)
+	}
+	if srcType.Valid || srcName.Valid || srcRef.Valid {
+		t.Errorf("expected NULL provenance for pre-existing row, got %v/%v/%v", srcType, srcName, srcRef)
+	}
+
+	// New columns are writable.
+	if _, err := conn2.Exec(
+		`UPDATE jobs SET source_type = 'trigger', source_name = 'nightly' WHERE name = 'autopilot-issue-1'`,
+	); err != nil {
+		t.Fatalf("write provenance: %v", err)
 	}
 }
 

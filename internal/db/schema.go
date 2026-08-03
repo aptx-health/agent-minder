@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 9
+const schemaVersion = 10
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS jobs (
 	-- Budget overrides
 	max_turns INTEGER,
 	max_budget_usd REAL,
+
+	-- Provenance (what automation activated this job)
+	source_type TEXT,
+	source_name TEXT,
+	source_ref TEXT,
 
 	-- Timestamps
 	queued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -329,6 +334,18 @@ PRAGMA foreign_keys = ON;
 UPDATE schema_version SET version = 9;
 `
 
+// migrateV9toV10 records job provenance: which automation activated a job.
+// source_type identifies the activation kind ('trigger'), source_name the
+// automation's name, and source_ref an optional pointer to the matched
+// condition (e.g. the trigger filter expression). All nullable so existing
+// rows and manually-created jobs remain valid.
+const migrateV9toV10 = `
+ALTER TABLE jobs ADD COLUMN source_type TEXT;
+ALTER TABLE jobs ADD COLUMN source_name TEXT;
+ALTER TABLE jobs ADD COLUMN source_ref TEXT;
+UPDATE schema_version SET version = 10;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -410,6 +427,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV8toV9); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v8→v9: %w", err)
+			}
+		}
+		if version < 10 {
+			if _, err := db.Exec(migrateV9toV10); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v9→v10: %w", err)
 			}
 		}
 	} else if !hasVersion {
