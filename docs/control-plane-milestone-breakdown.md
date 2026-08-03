@@ -1,12 +1,12 @@
 # Control Plane Milestone Task Breakdown
 
-Status: proposed
+Status: in progress (M1 underway)
 Last updated: 2026-08-01
 
 Companion to [`control-plane-and-tui-plan.md`](control-plane-and-tui-plan.md). This
 document decomposes milestones M1–M3 (GitHub milestones 20, 21, 22) into
-issue-sized tasks with sequencing and dependencies. No issues are created from
-this yet; it is the decomposition map.
+issue-sized tasks with sequencing and dependencies. Live progress is tracked in
+the M1 status block below.
 
 ## Grounding — confirmed code seams
 
@@ -31,6 +31,31 @@ this yet; it is the decomposition map.
 
 The spine of the project. Hard rule: characterize before you refactor, refactor
 before you extend.
+
+### Status (2026-08-01)
+
+| Task | Issue | State |
+|---|---|---|
+| M1-01 Green anchor suite | #559 | ✅ done (merged #562) |
+| M1-02 Red spec suite | #560 | ✅ done (merged #564) — 5 skips, one per correctness task |
+| M1-06 Install `milestone:*` triggers | #566 | ✅ done (merged #574); spec green |
+| M1-07 Carry trigger budget/turn overrides | #567 | ✅ done (merged #572); spec green |
+| M1-09 Disable removed automations | #568 | ✅ done (merged #573); spec green |
+| M1-03 Extract `internal/coordinator` (+ rewire foreground) | #569 | ⬜ open — structural, drive solo (not concurrent autopilot) |
+| M1-08 Scope schedules to deployment | #570 | ⬜ open — migration (v9); one migration at a time |
+| M1-11 Record job provenance | #571 | ⬜ open — migration (v9); one migration at a time |
+
+Not yet filed (created when their deps clear): M1-04 folded into #569; M1-05
+(rewire daemon, dep #569); Wave 3–6 durable-model/event/API tasks (M1-10, 12–24).
+
+Red-spec checklist: `TestMilestoneTrigger_Installs`, `TestTriggerOverrides_Carried`,
+`TestRemovedAutomation_Disabled` now **pass**; `TestScheduleScopedToDeployment`
+(M1-08) and `TestJobProvenance_Recorded` (M1-11) still **skip** until their tasks
+land.
+
+**Dispatch rules:** only dependency-free roots get the `agent-ready` label
+(autopilot). #570 and #571 both bump `schemaVersion` v8→v9 — never dispatch two
+migration tasks concurrently; label one, let it merge, rebase the next to v10.
 
 ### Wave 0 — Behavioral test scaffold (blocks the extraction; do first)
 
