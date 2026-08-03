@@ -190,7 +190,7 @@ func (s *Scheduler) fireSchedule(sched *db.JobSchedule) {
 		return
 	}
 	nextRun := cron.NextAfter(now)
-	_ = s.store.UpdateScheduleRun(sched.Name, now, nextRun)
+	_ = s.store.UpdateScheduleRun(s.deployID, sched.Name, now, nextRun)
 }
 
 // jobAlreadyActive checks if a job matching this schedule name is queued or running.
@@ -215,7 +215,7 @@ func (s *Scheduler) jobAlreadyActive(scheduleName string) bool {
 // RunOnce fires a specific schedule immediately, regardless of its cron timing.
 // Returns the created job ID, or an error.
 func (s *Scheduler) RunOnce(name string) (int64, error) {
-	sched, err := s.store.GetSchedule(name)
+	sched, err := s.store.GetSchedule(s.deployID, name)
 	if err != nil {
 		return 0, fmt.Errorf("schedule %q not found", name)
 	}
@@ -250,7 +250,7 @@ func (s *Scheduler) RunOnce(name string) (int64, error) {
 		cron, _ := ParseCron(sched.CronExpr.String)
 		if cron != nil {
 			nextRun := cron.NextAfter(now)
-			_ = s.store.UpdateScheduleRun(name, now, nextRun)
+			_ = s.store.UpdateScheduleRun(s.deployID, name, now, nextRun)
 		}
 	}
 

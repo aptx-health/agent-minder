@@ -109,7 +109,7 @@ jobs:
 	_ = s.SyncSchedules()
 
 	// Set next_run_at to the past so it's due.
-	_ = store.UpdateScheduleRun("test-job", time.Time{}, time.Now().UTC().Add(-time.Minute))
+	_ = store.UpdateScheduleRun("test-sched", "test-job", time.Time{}, time.Now().UTC().Add(-time.Minute))
 
 	// Tick should fire the schedule.
 	s.tick()
@@ -133,7 +133,7 @@ jobs:
 	}
 
 	// Verify schedule was updated.
-	sched, _ := store.GetSchedule("test-job")
+	sched, _ := store.GetSchedule("test-sched", "test-job")
 	if !sched.LastRunAt.Valid {
 		t.Error("last_run_at not set")
 	}

@@ -42,7 +42,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **Agent command:** `claude --agent <name> -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var.
 
-### DB schema (internal/db) — currently v8
+### DB schema (internal/db) — currently v9
 
 **deployments**: id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns, max_budget_usd, runtime, analyzer_model, skip_label, auto_merge, review_enabled, review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch, started_at
 
@@ -56,9 +56,9 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **repo_onboarding**: repo_dir (PK), owner, repo, yaml_content, validation_status, validation_failures, scanned_at
 
-**job_schedules**: name (PK), deployment_id, cron_expr, trigger_expr, agent, description, budget, max_turns, runtime, model, enabled, last_run_at, next_run_at, created_at
+**job_schedules**: name, deployment_id, cron_expr, trigger_expr, agent, description, budget, max_turns, runtime, model, enabled, last_run_at, next_run_at, created_at — PK (deployment_id, name)
 
-Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents), v4→v5 (add last_helpful_at/last_unhelpful_at to lessons for decay-weighted scoring), v5→v6 (deployments.runtime), v6→v7 (per-job and per-schedule runtime overrides), v7→v8 (per-job and per-schedule model overrides).
+Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents), v4→v5 (add last_helpful_at/last_unhelpful_at to lessons for decay-weighted scoring), v5→v6 (deployments.runtime), v6→v7 (per-job and per-schedule runtime overrides), v7→v8 (per-job and per-schedule model overrides), v8→v9 (job_schedules PK rescoped from name-only to (deployment_id, name), preserving last-run history).
 
 Schema changes go in `internal/db/schema.go`: increment `schemaVersion`, add a migration guard, and never edit an existing migration constant. `TestClaudeMDSchemaVersion` in `internal/supervisor` asserts the version documented above matches the constant.
 

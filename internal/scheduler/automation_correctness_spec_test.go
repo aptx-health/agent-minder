@@ -9,8 +9,6 @@ import (
 )
 
 func TestScheduleScopedToDeployment(t *testing.T) {
-	t.Skip("M1-08: scope schedules to deployment and preserve last-run during reconciliation")
-
 	store := testStore(t)
 	first := createAutomationSpecDeployment(t, store, "schedule-scope-a")
 	second := createAutomationSpecDeployment(t, store, "schedule-scope-b")

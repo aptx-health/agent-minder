@@ -575,11 +575,25 @@ func (s *Store) GetOnboarding(repoDir string) (*RepoOnboarding, error) {
 
 // --- Job Schedules ---
 
-// UpsertSchedule inserts or updates a job schedule.
+// UpsertSchedule inserts or updates a job schedule, keyed by
+// (deployment_id, name). On conflict it refreshes the definition columns but
+// preserves last_run_at and created_at, so re-syncing a config never discards
+// last-run history.
 func (s *Store) UpsertSchedule(js *JobSchedule) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO job_schedules
+	_, err := s.db.Exec(`INSERT INTO job_schedules
 		(name, deployment_id, cron_expr, trigger_expr, agent, runtime, model, description, budget, max_turns, enabled, next_run_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(deployment_id, name) DO UPDATE SET
+			cron_expr = excluded.cron_expr,
+			trigger_expr = excluded.trigger_expr,
+			agent = excluded.agent,
+			runtime = excluded.runtime,
+			model = excluded.model,
+			description = excluded.description,
+			budget = excluded.budget,
+			max_turns = excluded.max_turns,
+			enabled = excluded.enabled,
+			next_run_at = excluded.next_run_at`,
 		js.Name, js.DeploymentID, js.CronExpr, js.TriggerExpr,
 		js.Agent, js.Runtime, js.Model, js.Description, js.Budget, js.MaxTurns, js.Enabled, js.NextRunAt)
 	return err
@@ -601,27 +615,29 @@ func (s *Store) GetEnabledSchedules(deploymentID string) ([]*JobSchedule, error)
 	return schedules, err
 }
 
-// GetSchedule retrieves a single schedule by name.
-func (s *Store) GetSchedule(name string) (*JobSchedule, error) {
+// GetSchedule retrieves a single schedule scoped to a deployment.
+func (s *Store) GetSchedule(deploymentID, name string) (*JobSchedule, error) {
 	var js JobSchedule
-	err := s.db.Get(&js, "SELECT * FROM job_schedules WHERE name = ?", name)
+	err := s.db.Get(&js,
+		"SELECT * FROM job_schedules WHERE deployment_id = ? AND name = ?", deploymentID, name)
 	if err != nil {
 		return nil, err
 	}
 	return &js, nil
 }
 
-// UpdateScheduleRun records that a schedule just fired.
-func (s *Store) UpdateScheduleRun(name string, lastRun, nextRun time.Time) error {
+// UpdateScheduleRun records that a schedule just fired, scoped to a deployment.
+func (s *Store) UpdateScheduleRun(deploymentID, name string, lastRun, nextRun time.Time) error {
 	_, err := s.db.Exec(
-		"UPDATE job_schedules SET last_run_at = ?, next_run_at = ? WHERE name = ?",
-		lastRun, nextRun, name)
+		"UPDATE job_schedules SET last_run_at = ?, next_run_at = ? WHERE deployment_id = ? AND name = ?",
+		lastRun, nextRun, deploymentID, name)
 	return err
 }
 
-// DeleteSchedule removes a schedule.
-func (s *Store) DeleteSchedule(name string) error {
-	_, err := s.db.Exec("DELETE FROM job_schedules WHERE name = ?", name)
+// DeleteSchedule removes a schedule scoped to a deployment.
+func (s *Store) DeleteSchedule(deploymentID, name string) error {
+	_, err := s.db.Exec(
+		"DELETE FROM job_schedules WHERE deployment_id = ? AND name = ?", deploymentID, name)
 	return err
 }
 

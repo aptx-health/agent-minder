@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS repo_onboarding (
 );
 
 CREATE TABLE IF NOT EXISTS job_schedules (
-	name TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
 	deployment_id TEXT NOT NULL,
 	cron_expr TEXT,
 	trigger_expr TEXT,
@@ -152,7 +152,8 @@ CREATE TABLE IF NOT EXISTS job_schedules (
 	enabled INTEGER DEFAULT 1,
 	last_run_at DATETIME,
 	next_run_at DATETIME,
-	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (deployment_id, name)
 );
 `
 
@@ -289,6 +290,45 @@ ALTER TABLE job_schedules ADD COLUMN model TEXT;
 UPDATE schema_version SET version = 8;
 `
 
+// migrateV8toV9 rescopes job_schedules identity from name-only to
+// (deployment_id, name) so two deployments can share a schedule name without
+// colliding. Last-run history is preserved by copying every existing row into
+// the recreated table.
+const migrateV8toV9 = `
+PRAGMA foreign_keys = OFF;
+
+DROP TABLE IF EXISTS job_schedules_new;
+CREATE TABLE job_schedules_new (
+	name TEXT NOT NULL,
+	deployment_id TEXT NOT NULL,
+	cron_expr TEXT,
+	trigger_expr TEXT,
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	description TEXT,
+	budget REAL,
+	max_turns INTEGER,
+	enabled INTEGER DEFAULT 1,
+	last_run_at DATETIME,
+	next_run_at DATETIME,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (deployment_id, name)
+);
+
+INSERT INTO job_schedules_new SELECT
+	name, deployment_id, cron_expr, trigger_expr, agent, runtime, model,
+	description, budget, max_turns, enabled, last_run_at, next_run_at, created_at
+FROM job_schedules;
+
+DROP TABLE job_schedules;
+ALTER TABLE job_schedules_new RENAME TO job_schedules;
+
+PRAGMA foreign_keys = ON;
+
+UPDATE schema_version SET version = 9;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -364,6 +404,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV7toV8); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v7→v8: %w", err)
+			}
+		}
+		if version < 9 {
+			if _, err := db.Exec(migrateV8toV9); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v8→v9: %w", err)
 			}
 		}
 	} else if !hasVersion {

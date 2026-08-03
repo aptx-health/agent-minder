@@ -475,6 +475,72 @@ INSERT INTO tasks (deployment_id, issue_number, owner, repo, status) VALUES ('d1
 	}
 }
 
+func TestV8toV9ScheduleMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migrate89.db")
+
+	// Build a v8 database with the old name-only PK on job_schedules and a row
+	// carrying last-run history.
+	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open v8 db: %v", err)
+	}
+	v8Schedules := `
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version VALUES (8);
+CREATE TABLE job_schedules (
+	name TEXT PRIMARY KEY,
+	deployment_id TEXT NOT NULL,
+	cron_expr TEXT,
+	trigger_expr TEXT,
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	description TEXT,
+	budget REAL,
+	max_turns INTEGER,
+	enabled INTEGER DEFAULT 1,
+	last_run_at DATETIME,
+	next_run_at DATETIME,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO job_schedules (name, deployment_id, cron_expr, agent, enabled, last_run_at)
+VALUES ('nightly', 'd1', '0 2 * * *', 'maintainer', 1, '2026-07-31 02:00:00');
+`
+	if _, err := conn.Exec(v8Schedules); err != nil {
+		t.Fatalf("create v8 schedules: %v", err)
+	}
+	_ = conn.Close()
+
+	conn2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (migration): %v", err)
+	}
+	defer func() { _ = conn2.Close() }()
+
+	var version int
+	_ = conn2.Get(&version, "SELECT version FROM schema_version")
+	if version != schemaVersion {
+		t.Errorf("got schema version %d, want %d", version, schemaVersion)
+	}
+
+	// The composite PK must be in place: same name across two deployments coexists.
+	if _, err := conn2.Exec(`INSERT INTO job_schedules (name, deployment_id, cron_expr, agent, enabled)
+		VALUES ('nightly', 'd2', '0 2 * * *', 'maintainer', 1)`); err != nil {
+		t.Fatalf("insert same-name schedule for second deployment: %v", err)
+	}
+
+	// Last-run history from the v8 row must survive the migration.
+	store := NewStore(conn2)
+	sched, err := store.GetSchedule("d1", "nightly")
+	if err != nil {
+		t.Fatalf("GetSchedule after migration: %v", err)
+	}
+	if !sched.LastRunAt.Valid {
+		t.Fatal("last_run_at not preserved through v8→v9 migration")
+	}
+}
+
 func TestRenameRepo(t *testing.T) {
 	s := testStore(t)
 
