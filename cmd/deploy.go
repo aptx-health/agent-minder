@@ -585,10 +585,12 @@ func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 	for _, def := range cfg.Jobs {
 		if labels := def.TriggerLabels(); len(labels) > 0 {
 			routes = append(routes, supervisor.TriggerRoute{
-				Labels:  labels,
-				Agent:   def.Agent,
-				Runtime: def.Runtime,
-				Model:   def.Model,
+				Labels:   labels,
+				Agent:    def.Agent,
+				Runtime:  def.Runtime,
+				Model:    def.Model,
+				Budget:   def.Budget,
+				MaxTurns: def.MaxTurns,
 			})
 		}
 	}
