@@ -7,8 +7,6 @@ import (
 )
 
 func TestMilestoneTrigger_Installs(t *testing.T) {
-	t.Skip("M1-06: install milestone:* triggers as active automations")
-
 	deploy, store, _ := setupAutomationTest(t)
 	cfg, err := scheduler.ParseConfig([]byte(`
 jobs:

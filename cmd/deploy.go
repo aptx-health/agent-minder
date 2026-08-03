@@ -583,12 +583,20 @@ func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 	}
 
 	for _, def := range cfg.Jobs {
-		if labels := def.TriggerLabels(); len(labels) > 0 {
+		switch {
+		case len(def.TriggerLabels()) > 0:
 			routes = append(routes, supervisor.TriggerRoute{
-				Labels:  labels,
+				Labels:  def.TriggerLabels(),
 				Agent:   def.Agent,
 				Runtime: def.Runtime,
 				Model:   def.Model,
+			})
+		case def.TriggerMilestone() != "":
+			routes = append(routes, supervisor.TriggerRoute{
+				Milestone: def.TriggerMilestone(),
+				Agent:     def.Agent,
+				Runtime:   def.Runtime,
+				Model:     def.Model,
 			})
 		}
 	}
@@ -609,10 +617,11 @@ func computeStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRou
 	}
 	for _, route := range routes {
 		automations = append(automations, startupAutomation{
-			Kind:    startupAutomationTrigger,
-			Labels:  append([]string(nil), route.Labels...),
-			Agent:   route.Agent,
-			Runtime: route.Runtime,
+			Kind:       startupAutomationTrigger,
+			Expression: route.FilterString(),
+			Labels:     append([]string(nil), route.Labels...),
+			Agent:      route.Agent,
+			Runtime:    route.Runtime,
 		})
 	}
 
@@ -647,7 +656,7 @@ func printStartupSummary(automations []startupAutomation) {
 		case startupAutomationWatch:
 			fmt.Printf("  Watch: %s → %s\n", automation.Expression, automation.Agent)
 		case startupAutomationTrigger:
-			fmt.Printf("  Trigger: label:%s → %s%s\n", strings.Join(automation.Labels, ","), automation.Agent, runtimeSuffix)
+			fmt.Printf("  Trigger: %s → %s%s\n", automation.Expression, automation.Agent, runtimeSuffix)
 		case startupAutomationCron:
 			next := ""
 			if automation.HasNextRun {
