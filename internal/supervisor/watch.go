@@ -23,12 +23,23 @@ type WatchFilter struct {
 // When an issue has ALL matching labels (AND logic), it's routed to the
 // specified agent instead of the default autopilot.
 type TriggerRoute struct {
-	Labels   []string // GitHub labels to match (AND logic)
-	Agent    string   // agent type to use
-	Runtime  string   // optional job-level runtime override
-	Model    string   // optional job-level model override
-	Budget   float64  // optional job-level max budget (USD) override
-	MaxTurns int      // optional job-level max turns override
+	Labels    []string // GitHub labels to match (AND logic)
+	Milestone string   // GitHub milestone to match (mutually exclusive with Labels)
+	Agent     string   // agent type to use
+	Runtime   string   // optional job-level runtime override
+	Model     string   // optional job-level model override
+	Budget    float64  // optional job-level max budget (USD) override
+	MaxTurns  int      // optional job-level max turns override
+}
+
+// FilterString returns the watch-filter form of this route ("milestone:<name>"
+// or "label:<a>,<b>"), matching the syntax pollFilter and ParseWatchFilter
+// understand. Milestone routes take precedence when both fields are set.
+func (r TriggerRoute) FilterString() string {
+	if r.Milestone != "" {
+		return "milestone:" + r.Milestone
+	}
+	return "label:" + strings.Join(r.Labels, ",")
 }
 
 // SetTriggerRoutes configures label→agent routing from jobs.yaml triggers.
@@ -122,11 +133,13 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	s.mu.Unlock()
 
 	for _, route := range routes {
-		issues := s.pollFilter(ctx, ghClient, "label:"+strings.Join(route.Labels, ","))
+		issues := s.pollFilter(ctx, ghClient, route.FilterString())
 		totalPolled += len(issues)
 		for _, issue := range issues {
-			// Skip if a more-specific route should handle this issue.
-			if s.resolveRouteForIssue(issue.Labels).Agent != route.Agent {
+			// Skip if a more-specific label route should handle this issue.
+			// Milestone routes match on the milestone directly, so label-based
+			// specificity resolution does not apply to them.
+			if len(route.Labels) > 0 && s.resolveRouteForIssue(issue.Labels).Agent != route.Agent {
 				continue
 			}
 			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {

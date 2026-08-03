@@ -52,6 +52,19 @@ func (j *JobDef) TriggerLabels() []string {
 	return nil
 }
 
+// TriggerMilestone returns the milestone name if this is a milestone trigger.
+// Returns "" for non-milestone triggers.
+func (j *JobDef) TriggerMilestone() string {
+	if !j.IsTrigger() {
+		return ""
+	}
+	parts := strings.SplitN(j.Trigger, ":", 2)
+	if len(parts) == 2 && parts[0] == "milestone" {
+		return parts[1]
+	}
+	return ""
+}
+
 // ParsedSchedule returns the parsed cron expression, or nil if not scheduled.
 func (j *JobDef) ParsedSchedule() (*CronExpr, error) {
 	if j.Schedule == "" {
