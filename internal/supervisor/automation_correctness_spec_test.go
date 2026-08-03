@@ -33,8 +33,6 @@ func TestTriggerOverrides_Carried(t *testing.T) {
 }
 
 func TestJobProvenance_Recorded(t *testing.T) {
-	t.Skip("M1-11: record trigger job provenance in jobs.source_type and jobs.source_name")
-
 	store, deploy, route, issue := setupTriggerActivationSpec(t)
 	activateTriggerForSpec(t, store, deploy, route, issue)
 

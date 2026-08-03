@@ -81,6 +81,11 @@ type Job struct {
 	MaxTurns    sql.NullInt64   `db:"max_turns"`
 	MaxBudgetOv sql.NullFloat64 `db:"max_budget_usd"`
 
+	// Provenance (which automation activated this job, nullable).
+	SourceType sql.NullString `db:"source_type"` // e.g., "trigger"
+	SourceName sql.NullString `db:"source_name"` // automation name
+	SourceRef  sql.NullString `db:"source_ref"`  // optional matched condition (e.g., trigger filter)
+
 	// Timestamps.
 	QueuedAt    sql.NullTime `db:"queued_at"`
 	StartedAt   sql.NullTime `db:"started_at"`

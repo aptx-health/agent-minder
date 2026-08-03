@@ -23,6 +23,7 @@ type WatchFilter struct {
 // When an issue has ALL matching labels (AND logic), it's routed to the
 // specified agent instead of the default autopilot.
 type TriggerRoute struct {
+	Name      string   // automation name (jobs.yaml key), recorded as job provenance
 	Labels    []string // GitHub labels to match (AND logic)
 	Milestone string   // GitHub milestone to match (mutually exclusive with Labels)
 	Agent     string   // agent type to use
@@ -263,6 +264,9 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 		Owner:        s.owner,
 		Repo:         s.repo,
 		Status:       db.StatusQueued,
+		SourceType:   sql.NullString{String: "trigger", Valid: true},
+		SourceName:   sql.NullString{String: route.Name, Valid: route.Name != ""},
+		SourceRef:    sql.NullString{String: route.FilterString(), Valid: route.Name != ""},
 	}
 
 	if err := s.store.CreateJob(j); err != nil {
