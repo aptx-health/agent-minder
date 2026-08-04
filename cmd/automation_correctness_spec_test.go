@@ -3,6 +3,7 @@ package cmd
 import (
 	"testing"
 
+	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 )
 
@@ -18,10 +19,10 @@ jobs:
 		t.Fatalf("parse milestone trigger config: %v", err)
 	}
 
-	routes := triggerRoutesFromConfig(cfg)
-	automations := computeStartupSummary(deploy, routes, store, deploy.ID)
+	routes := coordinator.TriggerRoutesFromConfig(cfg)
+	automations := coordinator.ComputeAutomations(deploy, routes, store, deploy.ID)
 	for _, automation := range automations {
-		if automation.Kind == startupAutomationTrigger && automation.Expression == "milestone:v2" {
+		if automation.Kind == coordinator.AutomationTrigger && automation.Expression == "milestone:v2" {
 			return
 		}
 	}
