@@ -431,35 +431,28 @@ func runDaemon(deployID string) error {
 		}
 	}
 
-	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
-	if rt, err := selectRuntime(deploy.Runtime); err != nil {
+	rt, err := selectRuntime(deploy.Runtime)
+	if err != nil {
 		return err
-	} else if rt != nil {
-		sup.SetRuntime(rt)
 	}
 
-	// Load jobs.yaml scheduler if available.
-	var sched *scheduler.Scheduler
-	var routes []supervisor.TriggerRoute
-	cfgPath := scheduler.ConfigPath(deploy.RepoDir)
-	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
-		sched = scheduler.New(store, deployID, deploy.Owner, deploy.Repo, cfg)
-		if err := sched.SyncSchedules(); err != nil {
-			fmt.Printf("Warning: sync schedules: %v\n", err)
-		}
-
-		// Extract trigger routes for the supervisor and startup summary.
-		routes = coordinator.TriggerRoutesFromConfig(cfg)
-		if len(routes) > 0 {
-			sup.SetTriggerRoutes(routes)
-		}
+	coord, err := coordinator.New(coordinator.Options{
+		Store:   store,
+		Deploy:  deploy,
+		GHToken: ghToken,
+		Runtime: rt,
+	})
+	if err != nil {
+		return err
+	}
+	if w := coord.SyncWarning(); w != nil {
+		fmt.Printf("Warning: sync schedules: %v\n", w)
 	}
 
-	// Daemon mode if watch, or if we have schedules/triggers to evaluate.
-	hasTriggers := len(routes) > 0
-	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil || hasTriggers)
+	sup := coord.Supervisor()
+	sched := coord.Scheduler()
 
-	printStartupSummary(coordinator.ComputeAutomations(deploy, routes, store, deployID))
+	printStartupSummary(coord.Snapshot())
 
 	if len(jobs) == 0 && deploy.Mode == "issues" && sched == nil {
 		fmt.Println("Note: daemon started but no jobs found. Waiting for watch events or manual job creation.")
@@ -472,7 +465,7 @@ func runDaemon(deployID string) error {
 	go func() {
 		<-sigCh
 		cancel()
-		sup.Stop()
+		coord.Stop()
 	}()
 
 	// Start HTTP API if configured.
@@ -482,7 +475,7 @@ func runDaemon(deployID string) error {
 			DeployID: deployID,
 			APIKey:   flagAPIKey,
 		})
-		srv.StopDaemon = func() { cancel(); sup.Stop() }
+		srv.StopDaemon = func() { cancel(); coord.Stop() }
 		srv.BudgetResume = sup.ResumeBudget
 		srv.IsBudgetPaused = sup.IsBudgetPaused
 
@@ -504,15 +497,7 @@ func runDaemon(deployID string) error {
 		}
 	}
 
-	_ = completer // used above
-
-	// Start scheduler loop if we have schedules.
-	if sched != nil {
-		go sched.Run(ctx)
-	}
-
-	sup.Launch(ctx)
-	<-sup.Done()
+	coord.Run(ctx)
 
 	return nil
 }
