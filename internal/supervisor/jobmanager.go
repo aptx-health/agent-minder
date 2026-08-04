@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
+	"github.com/aptx-health/agent-minder/internal/eventbus"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
 	"github.com/aptx-health/agent-minder/internal/lesson"
@@ -1170,7 +1171,7 @@ func NewTestSupervisor(store *db.Store, deploy *db.Deployment, repoDir string) *
 		repo:      deploy.Repo,
 		running:   make(map[int64]*runState),
 		maxAgents: deploy.MaxAgents,
-		events:    make(chan Event, 256),
+		events:    eventbus.New[Event](256),
 		ghClientFactory: func(token string) *ghpkg.Client {
 			return ghpkg.NewClient("") // no-op client (no token = all calls fail gracefully)
 		},
@@ -1188,17 +1189,21 @@ func (s *Supervisor) RegisterTestJob(job *db.Job) {
 	}
 }
 
-// DrainEvents reads all buffered events from the supervisor channel.
+// DrainEvents returns all events currently retained by the supervisor bus.
+// It exists for test harnesses; production consumers should use Subscribe.
 func (s *Supervisor) DrainEvents() []Event {
-	var events []Event
-	for {
-		select {
-		case e := <-s.events:
-			events = append(events, e)
-		default:
-			return events
-		}
+	s.eventDrainMu.Lock()
+	defer s.eventDrainMu.Unlock()
+	replayed, err := s.eventBus().Replay(s.eventDrainCursor)
+	if err != nil {
+		return nil
 	}
+	events := make([]Event, len(replayed))
+	for i, event := range replayed {
+		events[i] = event.Value
+		s.eventDrainCursor = event.Cursor
+	}
+	return events
 }
 
 // dirExists returns true if the path exists and is a directory.

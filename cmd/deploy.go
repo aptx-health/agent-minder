@@ -373,9 +373,15 @@ func runForeground(deployID string) error {
 		fmt.Printf("  API: http://localhost%s\n", flagServe)
 	}
 
-	// Print events in foreground mode.
+	// Print events in foreground mode through an independent bus subscription.
+	events, err := sup.Subscribe(0)
+	if err != nil {
+		return fmt.Errorf("subscribe to supervisor events: %w", err)
+	}
+	defer events.Close()
 	go func() {
-		for evt := range sup.Events() {
+		for event := range events.Events() {
+			evt := event.Value
 			fmt.Printf("[%s] %s: %s\n", evt.Time.Format("15:04:05"), evt.Type, evt.Summary)
 		}
 	}()

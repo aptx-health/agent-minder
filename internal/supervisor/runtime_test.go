@@ -196,12 +196,6 @@ func TestExecuteCodeStage_RuntimeLiveStatus(t *testing.T) {
 	}
 	mgr := NewDefaultJobManager(sc, contract)
 
-	// Drain emitted events in the background to keep the channel from blocking.
-	go func() {
-		for range sup.Events() {
-		}
-	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -295,11 +289,6 @@ func TestExecuteCodeStage_OpenCodeIntegration(t *testing.T) {
 	defer func() { _ = logFile.Close() }()
 
 	mgr := NewDefaultJobManager(sc, &AgentContract{Name: "autopilot", Output: "pr"})
-	go func() {
-		for range sup.Events() {
-		}
-	}()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
