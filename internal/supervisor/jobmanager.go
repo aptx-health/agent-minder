@@ -349,11 +349,103 @@ func (s *Supervisor) newSlotContext(jobID int64, job *db.Job) *SlotContext {
 type DefaultJobManager struct {
 	sc       *SlotContext
 	contract *AgentContract
+	attempts map[string]int // stage name → executions so far (for run attempt numbering)
 }
 
 // NewDefaultJobManager creates a job manager that executes the contract's stage pipeline.
 func NewDefaultJobManager(sc *SlotContext, contract *AgentContract) *DefaultJobManager {
-	return &DefaultJobManager{sc: sc, contract: contract}
+	return &DefaultJobManager{sc: sc, contract: contract, attempts: map[string]int{}}
+}
+
+// beginAgentRun inserts a durable agent_runs row for a starting stage execution
+// and registers it so live-status updates persist step progress. Returns the
+// run ID, or 0 if the row could not be written (run tracking is best-effort and
+// never fails the stage).
+func (m *DefaultJobManager) beginAgentRun(stageName, agentName string, inv runtimepkg.Invocation) int64 {
+	sc := m.sc
+	if sc.Store == nil {
+		return 0
+	}
+	m.attempts[stageName]++
+	run := &db.AgentRun{
+		JobID:        sc.Job.ID,
+		Stage:        stageName,
+		Attempt:      m.attempts[stageName],
+		Agent:        agentName,
+		Runtime:      sql.NullString{String: sc.Job.EffectiveRuntime(sc.Deploy), Valid: true},
+		Model:        toNullStr(inv.Model),
+		MaxTurns:     sql.NullInt64{Int64: int64(inv.Limits.MaxTurns), Valid: inv.Limits.MaxTurns > 0},
+		MaxBudgetUSD: sql.NullFloat64{Float64: inv.Limits.MaxBudgetUSD, Valid: inv.Limits.MaxBudgetUSD > 0},
+		LogPath:      toNullStr(sc.LogPath),
+	}
+	if err := sc.Store.StartAgentRun(run); err != nil {
+		debugLog("agent run start failed", "job", sc.Job.ID, "stage", stageName, "error", err.Error())
+		return 0
+	}
+	if sc.sup != nil {
+		sc.sup.beginAgentRunTracking(sc.Job.ID, run.ID)
+	}
+	return run.ID
+}
+
+// finishAgentRun writes the terminal state of a run row from the stage outcome
+// and the runtime result, and stops live-status tracking for it.
+func (m *DefaultJobManager) finishAgentRun(runID int64, result *runtimepkg.Result, res stageResult) {
+	if runID == 0 {
+		return
+	}
+	sc := m.sc
+	steps := 0
+	if sc.sup != nil {
+		steps = sc.sup.endAgentRunTracking(sc.Job.ID)
+	}
+	if sc.Store == nil {
+		return
+	}
+	fin := db.AgentRunResult{
+		Status:        runStatusFor(res),
+		StopReason:    res.reason,
+		FailureDetail: res.detail,
+		StepCount:     steps,
+	}
+	if result != nil {
+		fin.SessionID = result.SessionID
+		fin.FinalText = result.FinalText
+		fin.FinalTurns = result.NumTurns
+		fin.CostUSD = result.TotalCostUSD
+		if fin.StopReason == "" {
+			fin.StopReason = result.StopReason
+		}
+	}
+	if err := sc.Store.CompleteAgentRun(runID, fin); err != nil {
+		debugLog("agent run complete failed", "job", sc.Job.ID, "run", runID, "error", err.Error())
+	}
+}
+
+// runStatusFor maps a stageResult onto a durable agent-run status.
+func runStatusFor(res stageResult) string {
+	switch {
+	case res.usageLimit:
+		return db.RunStatusUsageLimit
+	case res.manual:
+		return db.RunStatusManual
+	case res.bailed:
+		return db.RunStatusBailed
+	case res.failed:
+		return db.RunStatusFailed
+	case res.success:
+		return db.RunStatusSuccess
+	default:
+		return db.RunStatusFailed
+	}
+}
+
+// toNullStr maps an empty string to a NULL sql.NullString.
+func toNullStr(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
 }
 
 // Run executes the job's stage pipeline.
@@ -604,7 +696,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 // and detects the PR outcome. The runtime owns process execution, stream
 // parsing, classification, and bail extraction; the supervisor only adapts
 // results to its legacy structs and routes the stageResult.
-func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageContract, agentName string, logFile *os.File, feedbackPrompt string) stageResult {
+func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageContract, agentName string, logFile *os.File, feedbackPrompt string) (res stageResult) {
 	sc := m.sc
 	job := sc.Job
 
@@ -628,7 +720,15 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	}
 
 	inv := runtimeInvocationFor(sc, agentName, prompt, lessonsPrompt)
-	exitCode, runResult, sink, runErr := sc.runStageThroughRuntime(ctx, inv, logFile)
+
+	// Record a durable run row for this stage attempt. finishAgentRun reads the
+	// final stageResult (named return) and the runtime result on the way out.
+	runID := m.beginAgentRun(stage.Name, agentName, inv)
+	var runResult *runtimepkg.Result
+	defer func() { m.finishAgentRun(runID, runResult, res) }()
+
+	exitCode, runResultRet, sink, runErr := sc.runStageThroughRuntime(ctx, inv, logFile)
+	runResult = runResultRet
 	result := adaptRuntimeResult(runResult)
 	usageLimit := sink.usageLimit || sc.HitUsageLimit() || isUsageLimitError(result)
 	sessionID := ""
@@ -869,7 +969,7 @@ func waitForUsageLimitReset(ctx context.Context, sc *SlotContext, attempt int) e
 }
 
 // executeReviewStage runs the review agent and extracts the assessment.
-func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageContract, logFile *os.File) stageResult {
+func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageContract, logFile *os.File) (res stageResult) {
 	sc := m.sc
 	job := sc.Job
 
@@ -902,7 +1002,12 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		return stageResult{success: false}
 	}
 	inv := runtimeInvocationFor(sc, agentName, prompt, "")
-	_, _, _, _ = sc.runStageThroughRuntime(ctx, inv, logFile)
+
+	runID := m.beginAgentRun(stage.Name, agentName, inv)
+	var runResult *runtimepkg.Result
+	defer func() { m.finishAgentRun(runID, runResult, res) }()
+
+	_, runResult, _, _ = sc.runStageThroughRuntime(ctx, inv, logFile)
 
 	// Extract structured assessment.
 	assessment := extractReviewAssessmentFromLog(ctx, sc.LogPath, job, sc.sup, sc.Hooks)

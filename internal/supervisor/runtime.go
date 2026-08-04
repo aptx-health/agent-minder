@@ -26,12 +26,24 @@ func newLiveStatusSink(sup *Supervisor, jobID int64) *liveStatusSink {
 }
 
 // OnAssistantStep advances the step counter so minder status / TUI surface
-// progress while the agent works.
+// progress while the agent works, and persists live progress to the active
+// agent_runs row so the read API sees it before the run ends.
 func (s *liveStatusSink) OnAssistantStep() {
 	s.sup.mu.Lock()
-	defer s.sup.mu.Unlock()
+	var runID int64
+	var steps int
 	if rs, ok := s.sup.running[s.jobID]; ok {
 		rs.liveStatus.StepCount++
+		rs.runStepCount++
+		runID = rs.currentRunID
+		steps = rs.runStepCount
+	}
+	s.sup.mu.Unlock()
+
+	// Persist outside the lock — the DB write serializes on the single-writer
+	// connection, and a failed touch must never stall the streaming reader.
+	if runID != 0 && s.sup.store != nil {
+		_ = s.sup.store.TouchAgentRun(runID, steps)
 	}
 }
 

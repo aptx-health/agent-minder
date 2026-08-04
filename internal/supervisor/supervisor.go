@@ -80,6 +80,32 @@ type runState struct {
 	stoppedByUser bool
 	hitUsageLimit bool // set by the runtime's EventSink on usage-limit events
 	liveStatus    LiveStatus
+	currentRunID  int64 // active agent_runs row for the current stage (0 if none)
+	runStepCount  int   // assistant steps observed for the current run (reset per run)
+}
+
+// beginAgentRunTracking records the agent_runs row that live-status updates
+// should touch and resets the per-run step counter.
+func (s *Supervisor) beginAgentRunTracking(jobID, runID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rs, ok := s.running[jobID]; ok {
+		rs.currentRunID = runID
+		rs.runStepCount = 0
+	}
+}
+
+// endAgentRunTracking clears the active run row and returns the final per-run
+// step count.
+func (s *Supervisor) endAgentRunTracking(jobID int64) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rs, ok := s.running[jobID]; ok {
+		steps := rs.runStepCount
+		rs.currentRunID = 0
+		return steps
+	}
+	return 0
 }
 
 // Supervisor manages concurrent agent jobs.

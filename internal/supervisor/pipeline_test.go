@@ -1136,6 +1136,78 @@ func TestPipeline_NoCaptureWithoutFlag(t *testing.T) {
 	}
 }
 
+// TestPipeline_WritesAgentRuns verifies the supervisor records a durable
+// agent_runs row per stage execution, capturing the terminal status, exact
+// final turns, cost, and session, plus a separate row for the review stage.
+func TestPipeline_WritesAgentRuns(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) { d.ReviewEnabled = true })
+
+	h.hooks.DetectPRFn = func(ctx context.Context) int { return 100 }
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
+		return 0, &runtimepkg.Result{
+			SessionID:    "sess-" + inv.AgentName,
+			NumTurns:     9,
+			TotalCostUSD: 0.21,
+			FinalText:    "done",
+			StopReason:   "end_turn",
+		}, false, nil
+	}
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{Risk: "low-risk", Summary: "Clean"}
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 77
+		j.Name = "issue-77"
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	// One code run + one auto-appended review run.
+	if len(runs) != 2 {
+		t.Fatalf("got %d agent runs, want 2: %+v", len(runs), runs)
+	}
+
+	code := runs[0]
+	if code.Stage != "run" || code.Agent != "autopilot" || code.Attempt != 1 {
+		t.Errorf("code run identity = %s/%s/%d, want run/autopilot/1", code.Stage, code.Agent, code.Attempt)
+	}
+	if code.Status != db.RunStatusSuccess {
+		t.Errorf("code run status = %q, want success", code.Status)
+	}
+	if code.FinalTurns != 9 || code.CostUSD != 0.21 {
+		t.Errorf("code run turns/cost = %d/%v, want 9/0.21", code.FinalTurns, code.CostUSD)
+	}
+	if code.SessionID.String != "sess-autopilot" {
+		t.Errorf("code run session = %q, want sess-autopilot", code.SessionID.String)
+	}
+	if !code.Runtime.Valid || code.Runtime.String == "" {
+		t.Errorf("code run runtime not recorded: %+v", code.Runtime)
+	}
+	if !code.CompletedAt.Valid {
+		t.Error("code run completed_at should be set")
+	}
+
+	review := runs[1]
+	if review.Agent != "reviewer" {
+		t.Errorf("second run agent = %q, want reviewer", review.Agent)
+	}
+	if review.Status != db.RunStatusSuccess {
+		t.Errorf("review run status = %q, want success", review.Status)
+	}
+}
+
 // --- Utilities ---
 
 func truncate(s string, n int) string {

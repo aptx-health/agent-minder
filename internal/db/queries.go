@@ -314,6 +314,92 @@ func (s *Store) TotalSpend(deploymentID string) (float64, error) {
 	return cost, nil
 }
 
+// --- Agent Runs ---
+
+// StartAgentRun inserts a new agent_runs row for a starting (job, stage,
+// attempt) and populates r.ID. started_at and last_activity_at are set to now.
+func (s *Store) StartAgentRun(r *AgentRun) error {
+	now := time.Now().UTC()
+	if r.Status == "" {
+		r.Status = RunStatusRunning
+	}
+	res, err := s.db.Exec(`INSERT INTO agent_runs
+		(job_id, stage, attempt, agent, runtime, model, session_id, status,
+		 max_turns, max_budget_usd, log_path, started_at, last_activity_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.JobID, r.Stage, r.Attempt, r.Agent, r.Runtime, r.Model, r.SessionID,
+		r.Status, r.MaxTurns, r.MaxBudgetUSD, r.LogPath, now, now)
+	if err != nil {
+		return err
+	}
+	id, _ := res.LastInsertId()
+	r.ID = id
+	r.StartedAt = sql.NullTime{Time: now, Valid: true}
+	r.LastActivityAt = sql.NullTime{Time: now, Valid: true}
+	return nil
+}
+
+// TouchAgentRun records live progress for an in-flight run: it advances the
+// step count and refreshes last_activity_at. Called as the runtime streams
+// assistant steps, so the read API can surface progress before the run ends.
+func (s *Store) TouchAgentRun(id int64, stepCount int) error {
+	_, err := s.db.Exec(
+		"UPDATE agent_runs SET step_count = ?, last_activity_at = ? WHERE id = ?",
+		stepCount, time.Now().UTC(), id)
+	return err
+}
+
+// CompleteAgentRun finalizes a run row with its terminal status, stop reason,
+// session, exact final turns, cost, final text, and step count.
+func (s *Store) CompleteAgentRun(id int64, f AgentRunResult) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`UPDATE agent_runs SET
+		status = ?, stop_reason = ?, failure_detail = ?, session_id = ?,
+		final_text = ?, final_turns = ?, cost_usd = ?, step_count = ?,
+		last_activity_at = ?, completed_at = ? WHERE id = ?`,
+		f.Status, toNullString(f.StopReason), toNullString(f.FailureDetail),
+		toNullString(f.SessionID), toNullString(f.FinalText),
+		f.FinalTurns, f.CostUSD, f.StepCount, now, now, id)
+	return err
+}
+
+// AgentRunResult carries the terminal fields written when a run completes.
+type AgentRunResult struct {
+	Status        string
+	StopReason    string
+	FailureDetail string
+	SessionID     string
+	FinalText     string
+	FinalTurns    int
+	CostUSD       float64
+	StepCount     int
+}
+
+// GetAgentRuns returns all runs for a job, oldest first.
+func (s *Store) GetAgentRuns(jobID int64) ([]*AgentRun, error) {
+	var runs []*AgentRun
+	err := s.db.Select(&runs, "SELECT * FROM agent_runs WHERE job_id = ? ORDER BY id", jobID)
+	return runs, err
+}
+
+// GetAgentRun returns a single run by ID.
+func (s *Store) GetAgentRun(id int64) (*AgentRun, error) {
+	var r AgentRun
+	err := s.db.Get(&r, "SELECT * FROM agent_runs WHERE id = ?", id)
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// toNullString maps an empty string to NULL, otherwise a valid string.
+func toNullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: s, Valid: true}
+}
+
 // --- Dep Graph ---
 
 // SaveDepGraph saves or replaces the dependency graph for a deployment.

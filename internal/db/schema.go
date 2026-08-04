@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 10
+const schemaVersion = 11
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -160,6 +160,46 @@ CREATE TABLE IF NOT EXISTS job_schedules (
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (deployment_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id INTEGER NOT NULL REFERENCES jobs(id),
+
+	-- Identity within the job.
+	stage TEXT NOT NULL,
+	attempt INTEGER NOT NULL DEFAULT 1,
+
+	-- What ran.
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	session_id TEXT,
+
+	-- Outcome.
+	status TEXT NOT NULL DEFAULT 'running',
+	stop_reason TEXT,
+	failure_detail TEXT,
+
+	-- Progress vs. final truth.
+	step_count INTEGER DEFAULT 0,
+	final_turns INTEGER DEFAULT 0,
+	cost_usd REAL DEFAULT 0.0,
+
+	-- Effective limits for this run.
+	max_turns INTEGER,
+	max_budget_usd REAL,
+
+	-- Output + log identity.
+	final_text TEXT,
+	log_path TEXT,
+
+	-- Timestamps.
+	started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	last_activity_at DATETIME,
+	completed_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_job ON agent_runs(job_id);
 `
 
 // migrateV1toV2 migrates a v1 database (tasks table) to v2 (jobs table).
@@ -346,6 +386,38 @@ ALTER TABLE jobs ADD COLUMN source_ref TEXT;
 UPDATE schema_version SET version = 10;
 `
 
+// migrateV10toV11 adds the agent_runs table: one durable row per
+// (job, stage, attempt) capturing the agent, runtime, model, session, live
+// progress vs. final turns, cost, effective limits, final text, and log
+// identity. Additive — existing rows are untouched.
+const migrateV10toV11 = `
+CREATE TABLE IF NOT EXISTS agent_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id INTEGER NOT NULL REFERENCES jobs(id),
+	stage TEXT NOT NULL,
+	attempt INTEGER NOT NULL DEFAULT 1,
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	session_id TEXT,
+	status TEXT NOT NULL DEFAULT 'running',
+	stop_reason TEXT,
+	failure_detail TEXT,
+	step_count INTEGER DEFAULT 0,
+	final_turns INTEGER DEFAULT 0,
+	cost_usd REAL DEFAULT 0.0,
+	max_turns INTEGER,
+	max_budget_usd REAL,
+	final_text TEXT,
+	log_path TEXT,
+	started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	last_activity_at DATETIME,
+	completed_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_job ON agent_runs(job_id);
+UPDATE schema_version SET version = 11;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -433,6 +505,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV9toV10); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v9→v10: %w", err)
+			}
+		}
+		if version < 11 {
+			if _, err := db.Exec(migrateV10toV11); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v10→v11: %w", err)
 			}
 		}
 	} else if !hasVersion {
