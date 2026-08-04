@@ -4,36 +4,32 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/aptx-health/agent-minder/internal/eventbus"
 )
 
 // drainEvents reads all currently-buffered events without blocking.
 func drainEvents(s *Supervisor) []Event {
-	var out []Event
-	for {
-		select {
-		case e := <-s.events:
-			out = append(out, e)
-		default:
-			return out
-		}
-	}
+	return s.DrainEvents()
 }
 
 // waitForEvent reads up to one event with a short deadline. Returns ok=false if none arrived.
 func waitForEvent(s *Supervisor, d time.Duration) (Event, bool) {
-	select {
-	case e := <-s.events:
-		return e, true
-	case <-time.After(d):
-		return Event{}, false
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if events := s.DrainEvents(); len(events) > 0 {
+			return events[0], true
+		}
+		time.Sleep(time.Millisecond)
 	}
+	return Event{}, false
 }
 
 func newNetTestSupervisor() *Supervisor {
 	s := &Supervisor{
 		running:   make(map[int64]*runState),
 		maxAgents: 3,
-		events:    make(chan Event, 32),
+		events:    eventbus.New[Event](32),
 	}
 	return s
 }

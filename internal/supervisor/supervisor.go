@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
+	"github.com/aptx-health/agent-minder/internal/eventbus"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
 	"github.com/aptx-health/agent-minder/internal/reaper"
@@ -135,7 +136,10 @@ type Supervisor struct {
 	offlineSince       time.Time
 	offlineBackoffIdx  int
 	nextProbeAt        time.Time
-	events             chan Event
+	eventBusOnce       sync.Once
+	events             *eventbus.Bus[Event]
+	eventDrainMu       sync.Mutex
+	eventDrainCursor   uint64
 	parentCtx          context.Context
 	cancel             context.CancelFunc
 	done               chan struct{}
@@ -192,7 +196,7 @@ func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken s
 		ghToken:     ghToken,
 		running:     make(map[int64]*runState),
 		maxAgents:   maxAgents,
-		events:      make(chan Event, 64),
+		events:      eventbus.New[Event](eventbus.DefaultSubscriberBuffer),
 		sparedLogAt: make(map[int64]time.Time),
 	}
 	s.fetchFn = func() error { return gitpkg.Fetch(s.repoDir) }
@@ -213,8 +217,20 @@ func (s *Supervisor) SetDaemonMode(daemon bool) {
 	s.daemonMode = daemon
 }
 
-// Events returns the event channel.
-func (s *Supervisor) Events() <-chan Event { return s.events }
+// Subscribe returns supervisor events strictly after afterCursor, followed by
+// live events. Each caller receives an independent subscription.
+func (s *Supervisor) Subscribe(afterCursor uint64) (*eventbus.Subscription[Event], error) {
+	return s.eventBus().Subscribe(afterCursor)
+}
+
+func (s *Supervisor) eventBus() *eventbus.Bus[Event] {
+	s.eventBusOnce.Do(func() {
+		if s.events == nil {
+			s.events = eventbus.New[Event](eventbus.DefaultSubscriberBuffer)
+		}
+	})
+	return s.events
+}
 
 // Done returns a channel that closes when the supervisor exits.
 func (s *Supervisor) Done() <-chan struct{} { return s.done }
@@ -470,9 +486,8 @@ func (s *Supervisor) Stop() {
 
 func (s *Supervisor) emitEvent(typ, summary string, taskID int64) {
 	evt := Event{Time: time.Now(), Type: typ, Summary: summary, TaskID: taskID}
-	select {
-	case s.events <- evt:
-	default:
+	if _, err := s.eventBus().Publish(evt); err != nil {
+		debugLog("publish supervisor event", "type", typ, "task_id", taskID, "error", err)
 	}
 }
 
