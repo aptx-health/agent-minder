@@ -610,6 +610,169 @@ VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
 	}
 }
 
+func TestAgentRunCRUD(t *testing.T) {
+	s := testStore(t)
+
+	d := &Deployment{
+		ID: "run-deploy", RepoDir: "/tmp/repo", Owner: "aptx-health", Repo: "agent-minder",
+		Mode: "issues", MaxAgents: 1, MaxTurns: 50, MaxBudgetUSD: 5, BaseBranch: "main",
+	}
+	if err := s.CreateDeployment(d); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	j := &Job{
+		DeploymentID: "run-deploy", Agent: "autopilot", Name: "issue-42",
+		IssueNumber: 42, Owner: "aptx-health", Repo: "agent-minder", Status: StatusRunning,
+	}
+	if err := s.CreateJob(j); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	run := &AgentRun{
+		JobID:        j.ID,
+		Stage:        "code",
+		Attempt:      1,
+		Agent:        "autopilot",
+		Runtime:      sql.NullString{String: "claude-code", Valid: true},
+		Model:        sql.NullString{String: "sonnet", Valid: true},
+		MaxTurns:     sql.NullInt64{Int64: 50, Valid: true},
+		MaxBudgetUSD: sql.NullFloat64{Float64: 5, Valid: true},
+		LogPath:      sql.NullString{String: "/tmp/log", Valid: true},
+	}
+	if err := s.StartAgentRun(run); err != nil {
+		t.Fatalf("StartAgentRun: %v", err)
+	}
+	if run.ID == 0 {
+		t.Fatal("StartAgentRun did not populate ID")
+	}
+
+	// Live progress updates step_count + last_activity_at.
+	if err := s.TouchAgentRun(run.ID, 7); err != nil {
+		t.Fatalf("TouchAgentRun: %v", err)
+	}
+	got, err := s.GetAgentRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRun: %v", err)
+	}
+	if got.Status != RunStatusRunning {
+		t.Errorf("status = %q, want running", got.Status)
+	}
+	if got.StepCount != 7 {
+		t.Errorf("step_count = %d, want 7", got.StepCount)
+	}
+	if !got.LastActivityAt.Valid {
+		t.Error("last_activity_at should be set after Touch")
+	}
+	if got.CompletedAt.Valid {
+		t.Error("completed_at should be NULL before completion")
+	}
+
+	// Completion writes terminal truth.
+	err = s.CompleteAgentRun(run.ID, AgentRunResult{
+		Status:     RunStatusSuccess,
+		StopReason: "end_turn",
+		SessionID:  "sess-1",
+		FinalText:  "opened PR",
+		FinalTurns: 12,
+		CostUSD:    0.34,
+		StepCount:  10,
+	})
+	if err != nil {
+		t.Fatalf("CompleteAgentRun: %v", err)
+	}
+	got, err = s.GetAgentRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRun after complete: %v", err)
+	}
+	if got.Status != RunStatusSuccess {
+		t.Errorf("status = %q, want success", got.Status)
+	}
+	if got.FinalTurns != 12 || got.StepCount != 10 {
+		t.Errorf("final_turns=%d step_count=%d, want 12/10", got.FinalTurns, got.StepCount)
+	}
+	if got.CostUSD != 0.34 {
+		t.Errorf("cost_usd = %v, want 0.34", got.CostUSD)
+	}
+	if got.SessionID.String != "sess-1" || got.StopReason.String != "end_turn" {
+		t.Errorf("session/stop = %q/%q, want sess-1/end_turn", got.SessionID.String, got.StopReason.String)
+	}
+	if !got.CompletedAt.Valid {
+		t.Error("completed_at should be set after completion")
+	}
+
+	// A second attempt of the same stage coexists and is listed after the first.
+	run2 := &AgentRun{JobID: j.ID, Stage: "code", Attempt: 2, Agent: "autopilot"}
+	if err := s.StartAgentRun(run2); err != nil {
+		t.Fatalf("StartAgentRun attempt 2: %v", err)
+	}
+	runs, err := s.GetAgentRuns(j.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("GetAgentRuns returned %d rows, want 2", len(runs))
+	}
+	if runs[0].Attempt != 1 || runs[1].Attempt != 2 {
+		t.Errorf("attempts out of order: %d, %d", runs[0].Attempt, runs[1].Attempt)
+	}
+}
+
+func TestV10toV11AgentRunsMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migrate1011.db")
+
+	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open v10 db: %v", err)
+	}
+	v10 := `
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version VALUES (10);
+CREATE TABLE jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	deployment_id TEXT NOT NULL,
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL,
+	owner TEXT NOT NULL DEFAULT '',
+	repo TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'queued'
+);
+INSERT INTO jobs (deployment_id, agent, name, status)
+VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
+`
+	if _, err := conn.Exec(v10); err != nil {
+		t.Fatalf("create v10 db: %v", err)
+	}
+	_ = conn.Close()
+
+	c2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (migration): %v", err)
+	}
+	defer func() { _ = c2.Close() }()
+
+	var version int
+	_ = c2.Get(&version, "SELECT version FROM schema_version")
+	if version != schemaVersion {
+		t.Errorf("got schema version %d, want %d", version, schemaVersion)
+	}
+
+	// The agent_runs table exists and pre-existing job rows survive untouched.
+	store := NewStore(c2)
+	runs, err := store.GetAgentRuns(1)
+	if err != nil {
+		t.Fatalf("GetAgentRuns after migration: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Errorf("expected no runs on migrated db, got %d", len(runs))
+	}
+	if _, err := c2.Exec(
+		`INSERT INTO agent_runs (job_id, stage, attempt, agent, status)
+		 VALUES (1, 'code', 1, 'autopilot', 'running')`); err != nil {
+		t.Fatalf("insert into migrated agent_runs: %v", err)
+	}
+}
+
 func TestRenameRepo(t *testing.T) {
 	s := testStore(t)
 

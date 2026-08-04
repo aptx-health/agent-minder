@@ -207,6 +207,59 @@ type JobSchedule struct {
 	CreatedAt    time.Time       `db:"created_at"`
 }
 
+// AgentRun is a durable record of a single agent execution within a job: one
+// row per (job, stage, attempt). It captures per-run truth — agent, runtime,
+// model, session, live step count vs. exact final turns, cost, effective
+// limits, final text, and log identity — that the aggregate jobs row and raw
+// logs cannot express when a job spans several stages, retries, or resumes.
+type AgentRun struct {
+	ID    int64  `db:"id"`
+	JobID int64  `db:"job_id"`
+	Stage string `db:"stage"`
+
+	// Attempt counts executions of the same stage (retries, resumes) starting at 1.
+	Attempt int `db:"attempt"`
+
+	// What ran.
+	Agent     string         `db:"agent"`
+	Runtime   sql.NullString `db:"runtime"`
+	Model     sql.NullString `db:"model"`
+	SessionID sql.NullString `db:"session_id"`
+
+	// Outcome.
+	Status        string         `db:"status"` // running/success/failed/bailed/manual/usage_limit
+	StopReason    sql.NullString `db:"stop_reason"`
+	FailureDetail sql.NullString `db:"failure_detail"`
+
+	// Progress vs. final truth.
+	StepCount  int     `db:"step_count"`  // live assistant steps observed for this run
+	FinalTurns int     `db:"final_turns"` // exact turn count from the runtime result
+	CostUSD    float64 `db:"cost_usd"`
+
+	// Effective limits applied to this run.
+	MaxTurns     sql.NullInt64   `db:"max_turns"`
+	MaxBudgetUSD sql.NullFloat64 `db:"max_budget_usd"`
+
+	// Output + log identity.
+	FinalText sql.NullString `db:"final_text"`
+	LogPath   sql.NullString `db:"log_path"`
+
+	// Timestamps.
+	StartedAt      sql.NullTime `db:"started_at"`
+	LastActivityAt sql.NullTime `db:"last_activity_at"`
+	CompletedAt    sql.NullTime `db:"completed_at"`
+}
+
+// Agent run status constants.
+const (
+	RunStatusRunning    = "running"
+	RunStatusSuccess    = "success"
+	RunStatusFailed     = "failed"
+	RunStatusBailed     = "bailed"
+	RunStatusManual     = "manual"
+	RunStatusUsageLimit = "usage_limit"
+)
+
 // RepoOnboarding stores cached onboarding YAML for a repository.
 type RepoOnboarding struct {
 	RepoDir            string         `db:"repo_dir"`
