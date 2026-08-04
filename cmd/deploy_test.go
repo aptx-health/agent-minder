@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/db"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 )
@@ -64,13 +65,13 @@ func setupAutomationTest(t *testing.T) (*db.Deployment, *db.Store, *scheduler.Co
 
 func TestForeground_ReportsSubscriptions(t *testing.T) {
 	deploy, store, cfg := setupAutomationTest(t)
-	routes := triggerRoutesFromConfig(cfg)
+	routes := coordinator.TriggerRoutesFromConfig(cfg)
 	sched := scheduler.New(store, deploy.ID, deploy.Owner, deploy.Repo, cfg)
 	if err := sched.SyncSchedules(); err != nil {
 		t.Fatalf("sync schedules: %v", err)
 	}
 
-	automations := computeStartupSummary(deploy, routes, store, deploy.ID)
+	automations := coordinator.ComputeAutomations(deploy, routes, store, deploy.ID)
 	if len(automations) != 2 {
 		t.Fatalf("startup summary has %d automations, want 2: %#v", len(automations), automations)
 	}
@@ -78,7 +79,7 @@ func TestForeground_ReportsSubscriptions(t *testing.T) {
 	var foundTrigger, foundCron bool
 	for _, automation := range automations {
 		switch automation.Kind {
-		case startupAutomationTrigger:
+		case coordinator.AutomationTrigger:
 			foundTrigger = true
 			if got, want := automation.Labels, []string{"agent-ready", "backend"}; !equalStrings(got, want) {
 				t.Errorf("trigger labels = %v, want %v", got, want)
@@ -86,7 +87,7 @@ func TestForeground_ReportsSubscriptions(t *testing.T) {
 			if automation.Agent != "autopilot" || automation.Runtime != "opencode" {
 				t.Errorf("trigger target = %s via %s, want autopilot via opencode", automation.Agent, automation.Runtime)
 			}
-		case startupAutomationCron:
+		case coordinator.AutomationCron:
 			foundCron = true
 			if automation.Name != "nightly-maintenance" || automation.Expression != "0 2 * * *" {
 				t.Errorf("cron = %s (%s), want nightly-maintenance (0 2 * * *)", automation.Name, automation.Expression)

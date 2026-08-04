@@ -12,6 +12,7 @@ import (
 
 	"github.com/aptx-health/agent-minder/internal/auth"
 	"github.com/aptx-health/agent-minder/internal/claudecli"
+	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/daemon"
 	"github.com/aptx-health/agent-minder/internal/db"
 	gitpkg "github.com/aptx-health/agent-minder/internal/git"
@@ -323,34 +324,28 @@ func runForeground(deployID string) error {
 
 	ghToken, _ := auth.GetToken()
 
-	// Create supervisor.
-	sup := supervisor.New(store, deploy, deploy.RepoDir, deploy.Owner, deploy.Repo, ghToken)
-	if rt, err := selectRuntime(deploy.Runtime); err != nil {
+	rt, err := selectRuntime(deploy.Runtime)
+	if err != nil {
 		return err
-	} else if rt != nil {
-		sup.SetRuntime(rt)
 	}
 
-	// Load jobs.yaml scheduler and trigger routes.
-	var sched *scheduler.Scheduler
-	var routes []supervisor.TriggerRoute
-	cfgPath := scheduler.ConfigPath(deploy.RepoDir)
-	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
-		sched = scheduler.New(store, deployID, deploy.Owner, deploy.Repo, cfg)
-		if err := sched.SyncSchedules(); err != nil {
-			fmt.Printf("Warning: sync schedules: %v\n", err)
-		}
-		routes = triggerRoutesFromConfig(cfg)
-		if len(routes) > 0 {
-			sup.SetTriggerRoutes(routes)
-		}
+	coord, err := coordinator.New(coordinator.Options{
+		Store:   store,
+		Deploy:  deploy,
+		GHToken: ghToken,
+		Runtime: rt,
+	})
+	if err != nil {
+		return err
+	}
+	if w := coord.SyncWarning(); w != nil {
+		fmt.Printf("Warning: sync schedules: %v\n", w)
 	}
 
-	hasTriggers := len(routes) > 0
-	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil || hasTriggers)
+	sup := coord.Supervisor()
 
 	// --- Startup summary ---
-	printStartupSummary(computeStartupSummary(deploy, routes, store, deployID))
+	printStartupSummary(coord.Snapshot())
 
 	// Handle signals.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -360,7 +355,7 @@ func runForeground(deployID string) error {
 		<-sigCh
 		fmt.Println("\nStopping...")
 		cancel()
-		sup.Stop()
+		coord.Stop()
 	}()
 
 	// Start HTTP API if requested.
@@ -370,17 +365,12 @@ func runForeground(deployID string) error {
 			DeployID: deployID,
 			APIKey:   flagAPIKey,
 		})
-		srv.StopDaemon = func() { cancel(); sup.Stop() }
+		srv.StopDaemon = func() { cancel(); coord.Stop() }
 		srv.BudgetResume = sup.ResumeBudget
 		srv.IsBudgetPaused = sup.IsBudgetPaused
 
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 		fmt.Printf("  API: http://localhost%s\n", flagServe)
-	}
-
-	// Start scheduler if available.
-	if sched != nil {
-		go sched.Run(ctx)
 	}
 
 	// Print events in foreground mode.
@@ -391,9 +381,7 @@ func runForeground(deployID string) error {
 	}()
 
 	fmt.Println("Launching...")
-	sup.Launch(ctx)
-
-	<-sup.Done()
+	coord.Run(ctx)
 	fmt.Println("Done.")
 	return nil
 }
@@ -461,7 +449,7 @@ func runDaemon(deployID string) error {
 		}
 
 		// Extract trigger routes for the supervisor and startup summary.
-		routes = triggerRoutesFromConfig(cfg)
+		routes = coordinator.TriggerRoutesFromConfig(cfg)
 		if len(routes) > 0 {
 			sup.SetTriggerRoutes(routes)
 		}
@@ -471,7 +459,7 @@ func runDaemon(deployID string) error {
 	hasTriggers := len(routes) > 0
 	sup.SetDaemonMode(deploy.Mode == "watch" || sched != nil || hasTriggers)
 
-	printStartupSummary(computeStartupSummary(deploy, routes, store, deployID))
+	printStartupSummary(coordinator.ComputeAutomations(deploy, routes, store, deployID))
 
 	if len(jobs) == 0 && deploy.Mode == "issues" && sched == nil {
 		fmt.Println("Note: daemon started but no jobs found. Waiting for watch events or manual job creation.")
@@ -552,106 +540,9 @@ func resolveOwnerRepo(repoDir string) (string, string, error) {
 	return owner, repo, nil
 }
 
-type startupAutomationKind string
-
-const (
-	startupAutomationWatch   startupAutomationKind = "watch"
-	startupAutomationTrigger startupAutomationKind = "trigger"
-	startupAutomationCron    startupAutomationKind = "cron"
-)
-
-// startupAutomation is the computed, printable view of an active automation.
-// Keeping this data separate from stdout lets the coordinator extraction reuse
-// and test the loaded subscription map without capturing process output.
-type startupAutomation struct {
-	Kind       startupAutomationKind
-	Name       string
-	Expression string
-	Labels     []string
-	Agent      string
-	Runtime    string
-	NextRunAt  time.Time
-	HasNextRun bool
-}
-
-// triggerRoutesFromConfig computes the label routes installed in the
-// supervisor from a validated jobs.yaml config.
-func triggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
-	var routes []supervisor.TriggerRoute
-	if cfg == nil {
-		return routes
-	}
-
-	for name, def := range cfg.Jobs {
-		switch {
-		case len(def.TriggerLabels()) > 0:
-			routes = append(routes, supervisor.TriggerRoute{
-				Name:     name,
-				Labels:   def.TriggerLabels(),
-				Agent:    def.Agent,
-				Runtime:  def.Runtime,
-				Model:    def.Model,
-				Budget:   def.Budget,
-				MaxTurns: def.MaxTurns,
-			})
-		case def.TriggerMilestone() != "":
-			routes = append(routes, supervisor.TriggerRoute{
-				Name:      name,
-				Milestone: def.TriggerMilestone(),
-				Agent:     def.Agent,
-				Runtime:   def.Runtime,
-				Model:     def.Model,
-				Budget:    def.Budget,
-				MaxTurns:  def.MaxTurns,
-			})
-		}
-	}
-	return routes
-}
-
-// computeStartupSummary snapshots the active watch, trigger, and cron
-// automations. Database read errors intentionally produce no cron entries,
-// matching the historical best-effort startup summary behavior.
-func computeStartupSummary(deploy *db.Deployment, routes []supervisor.TriggerRoute, store *db.Store, deployID string) []startupAutomation {
-	automations := make([]startupAutomation, 0, len(routes)+1)
-	if deploy.WatchFilter.Valid && deploy.WatchFilter.String != "" {
-		automations = append(automations, startupAutomation{
-			Kind:       startupAutomationWatch,
-			Expression: deploy.WatchFilter.String,
-			Agent:      "autopilot",
-		})
-	}
-	for _, route := range routes {
-		automations = append(automations, startupAutomation{
-			Kind:       startupAutomationTrigger,
-			Expression: route.FilterString(),
-			Labels:     append([]string(nil), route.Labels...),
-			Agent:      route.Agent,
-			Runtime:    route.Runtime,
-		})
-	}
-
-	schedules, _ := store.GetEnabledSchedules(deployID)
-	for _, schedule := range schedules {
-		if !schedule.CronExpr.Valid {
-			continue
-		}
-		automations = append(automations, startupAutomation{
-			Kind:       startupAutomationCron,
-			Name:       schedule.Name,
-			Expression: schedule.CronExpr.String,
-			Agent:      schedule.Agent,
-			Runtime:    schedule.Runtime.String,
-			NextRunAt:  schedule.NextRunAt.Time,
-			HasNextRun: schedule.NextRunAt.Valid,
-		})
-	}
-	return automations
-}
-
 // printStartupSummary is deliberately a thin stdout adapter over the computed
-// subscription map.
-func printStartupSummary(automations []startupAutomation) {
+// subscription map assembled by the coordinator.
+func printStartupSummary(automations []coordinator.Automation) {
 	fmt.Println("Subscriptions:")
 	for _, automation := range automations {
 		runtimeSuffix := ""
@@ -659,11 +550,11 @@ func printStartupSummary(automations []startupAutomation) {
 			runtimeSuffix = fmt.Sprintf(" via %s", automation.Runtime)
 		}
 		switch automation.Kind {
-		case startupAutomationWatch:
+		case coordinator.AutomationWatch:
 			fmt.Printf("  Watch: %s → %s\n", automation.Expression, automation.Agent)
-		case startupAutomationTrigger:
+		case coordinator.AutomationTrigger:
 			fmt.Printf("  Trigger: %s → %s%s\n", automation.Expression, automation.Agent, runtimeSuffix)
-		case startupAutomationCron:
+		case coordinator.AutomationCron:
 			next := ""
 			if automation.HasNextRun {
 				next = automation.NextRunAt.Format("Mon 15:04 UTC")
