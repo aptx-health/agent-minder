@@ -1,7 +1,7 @@
 # Control Plane Milestone Task Breakdown
 
-Status: in progress (M1 underway)
-Last updated: 2026-08-01
+Status: in progress (M1 ~half done)
+Last updated: 2026-08-03
 
 Companion to [`control-plane-and-tui-plan.md`](control-plane-and-tui-plan.md). This
 document decomposes milestones M1–M3 (GitHub milestones 20, 21, 22) into
@@ -32,29 +32,36 @@ the M1 status block below.
 The spine of the project. Hard rule: characterize before you refactor, refactor
 before you extend.
 
-### Status (2026-08-01)
+### Status (2026-08-03)
 
-| Task | Issue | State |
+Done — all merged to `main`; schema at **v11**; full suite green:
+
+| Task | Issue | Notes |
 |---|---|---|
-| M1-01 Green anchor suite | #559 | ✅ done (merged #562) |
-| M1-02 Red spec suite | #560 | ✅ done (merged #564) — 5 skips, one per correctness task |
-| M1-06 Install `milestone:*` triggers | #566 | ✅ done (merged #574); spec green |
-| M1-07 Carry trigger budget/turn overrides | #567 | ✅ done (merged #572); spec green |
-| M1-09 Disable removed automations | #568 | ✅ done (merged #573); spec green |
-| M1-08 Scope schedules to deployment | #570 | ✅ done (merged); spec green — schema now v9, `job_schedules` PK `(deployment_id, name)` |
-| M1-11 Record job provenance | #571 | 🔄 in flight (`agent-ready`) — migration v9→v10 |
-| M1-03 Extract `internal/coordinator` (+ rewire foreground) | #569 | ⬜ open — structural, drive solo (not concurrent autopilot) |
+| M1-01 Green anchor suite | #559 | anchors guard every later refactor |
+| M1-02 Red spec suite | #560 | 5 correctness specs, all now green |
+| M1-06 Install `milestone:*` triggers | #566 | |
+| M1-07 Carry trigger budget/turn overrides | #567 | |
+| M1-08 Scope schedules to deployment | #570 | migration v9, `job_schedules` PK `(deployment_id, name)` |
+| M1-09 Disable removed automations | #568 | |
+| M1-11 Record job provenance | #571 | migration v10 |
+| M1-03 Extract `internal/coordinator` (+ foreground) | #569 | anchors preserved post-refactor |
+| M1-05 Rewire daemon onto Coordinator | #582 | daemon + foreground now share the Coordinator |
+| M1-12 Durable agent-run/attempt records | #583 | migration v11, `agent_runs` table |
+| M1-17 `internal/eventbus` fan-out | #584 | cursor-based bus replaces the drop-channel (interactive handoff) |
 
-Not yet filed (created when their deps clear): M1-04 folded into #569; M1-05
-(rewire daemon, dep #569); Wave 3–6 durable-model/event/API tasks (M1-10, 12–24).
+**Half of M1 is complete:** Waves 0–1, all automation-correctness/provenance, the
+daemon rewire, agent-run records, and the event bus.
 
-Red-spec checklist: `TestMilestoneTrigger_Installs`, `TestTriggerOverrides_Carried`,
-`TestRemovedAutomation_Disabled`, `TestScheduleScopedToDeployment` now **pass**;
-only `TestJobProvenance_Recorded` (M1-11) still **skips** until #571 lands.
+Remaining M1 (not filed; **dispatch paused** — budget): M1-18 (persist typed
+events onto the bus, dep M1-17), M1-10 (automation snapshot), Wave 3 remainder
+M1-13/14/16 (build on M1-12's `agent_runs`), Wave 5 `/api/v1` read surface
+M1-19–23, Wave 6 exit gate M1-24.
 
-**Dispatch rules:** only dependency-free roots get the `agent-ready` label
-(autopilot). #570 and #571 both bump `schemaVersion` v8→v9 — never dispatch two
-migration tasks concurrently; label one, let it merge, rebase the next to v10.
+**Dispatch rules (for when work resumes):** only dependency-free roots get the
+`agent-ready` label (autopilot); migration tasks bump `schemaVersion` and must go
+one at a time; concurrency-subtle/interactive tasks (like the event bus) go to a
+Claude Code session with a primer, not autopilot.
 
 ### Wave 0 — Behavioral test scaffold (blocks the extraction; do first)
 
