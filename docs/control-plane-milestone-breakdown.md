@@ -8,6 +8,11 @@ document decomposes milestones M1–M3 (GitHub milestones 20, 21, 22) into
 issue-sized tasks with sequencing and dependencies. Live progress is tracked in
 the M1 status block below.
 
+An evidence-based audit of this breakdown against the code at `10bf29a`
+(exit-criterion status, contradictions, risks, and the recommended route
+forward) lives in
+[`research/fable-expedition/01-architecture-truth-map.md`](research/fable-expedition/01-architecture-truth-map.md).
+
 ## Grounding — confirmed code seams
 
 - `cmd/deploy.go` — `runForeground` (~L303) and `runDaemon` (~L406) each
