@@ -61,6 +61,7 @@ type Coordinator struct {
 	cfg    *scheduler.Config    // nil when no jobs.yaml is present
 	routes []supervisor.TriggerRoute
 
+	cancel      context.CancelFunc // cancels the context Start derived; nil before Start
 	syncWarning error
 }
 
@@ -99,10 +100,6 @@ func New(opts Options) (*Coordinator, error) {
 	return c, nil
 }
 
-// Supervisor exposes the assembled supervisor for wiring the HTTP API and
-// consuming events. The Coordinator retains ownership of its lifecycle.
-func (c *Coordinator) Supervisor() *supervisor.Supervisor { return c.sup }
-
 // Scheduler returns the loaded scheduler, or nil when no jobs.yaml is present.
 func (c *Coordinator) Scheduler() *scheduler.Scheduler { return c.sched }
 
@@ -120,8 +117,10 @@ func (c *Coordinator) Snapshot() []Automation {
 }
 
 // Start launches the scheduler loop (when present) and the supervisor. It does
-// not block.
+// not block. The context handed to both is a cancellable child of ctx so that
+// Stop alone halts the whole deployment.
 func (c *Coordinator) Start(ctx context.Context) {
+	ctx, c.cancel = context.WithCancel(ctx)
 	if c.sched != nil {
 		go c.sched.Run(ctx)
 	}
@@ -134,8 +133,14 @@ func (c *Coordinator) Run(ctx context.Context) {
 	<-c.sup.Done()
 }
 
-// Stop stops the supervisor and drains its in-flight work.
-func (c *Coordinator) Stop() { c.sup.Stop() }
+// Stop halts the deployment: cancels the scheduler and supervisor contexts and
+// drains the supervisor's in-flight work. Safe before Start and more than once.
+func (c *Coordinator) Stop() {
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.sup.Stop()
+}
 
 // TriggerRoutesFromConfig computes the label and milestone routes installed in
 // the supervisor from a validated jobs.yaml config.

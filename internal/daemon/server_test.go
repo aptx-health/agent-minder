@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/db"
 )
 
@@ -563,11 +564,24 @@ func TestHandleJobLog(t *testing.T) {
 	}
 }
 
+// stubProvider implements the control trio for handler tests. The embedded
+// interface panics on any other method, proving those routes never touch it.
+type stubProvider struct {
+	coordinator.StateProvider
+	stopped chan struct{}
+	resumed *bool
+	paused  bool
+}
+
+func (p *stubProvider) Stop()                { close(p.stopped) }
+func (p *stubProvider) ResumeBudget()        { *p.resumed = true }
+func (p *stubProvider) IsBudgetPaused() bool { return p.paused }
+
 func TestHandleStop(t *testing.T) {
 	srv, _ := testServer(t)
 
 	stopped := make(chan struct{})
-	srv.StopDaemon = func() { close(stopped) }
+	srv.Provider = &stubProvider{stopped: stopped}
 
 	rr := doRequest(t, srv, "POST", "/stop")
 	if rr.Code != http.StatusOK {
@@ -584,7 +598,7 @@ func TestHandleStop(t *testing.T) {
 	select {
 	case <-stopped:
 	case <-time.After(time.Second):
-		t.Error("StopDaemon callback was not invoked")
+		t.Error("provider Stop was not invoked")
 	}
 }
 
@@ -592,7 +606,7 @@ func TestHandleResume(t *testing.T) {
 	srv, _ := testServer(t)
 
 	resumed := false
-	srv.BudgetResume = func() { resumed = true }
+	srv.Provider = &stubProvider{resumed: &resumed}
 
 	rr := doRequest(t, srv, "POST", "/resume")
 	if rr.Code != http.StatusOK {
@@ -607,7 +621,7 @@ func TestHandleResume(t *testing.T) {
 		t.Errorf("status = %q, want %q", resp["status"], "resumed")
 	}
 	if !resumed {
-		t.Error("BudgetResume callback was not invoked")
+		t.Error("provider ResumeBudget was not invoked")
 	}
 }
 
