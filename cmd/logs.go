@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/aptx-health/agent-minder/internal/daemon"
 	"github.com/aptx-health/agent-minder/internal/db"
+	"github.com/aptx-health/agent-minder/internal/logresolve"
 	"github.com/aptx-health/agent-minder/internal/picker"
 	"github.com/spf13/cobra"
 )
@@ -33,19 +33,23 @@ Examples:
   minder logs --follow         # tail a running job
   minder logs -g spike         # filter to spike jobs
   minder logs -g 529           # find issue #529 or PR #529
-  minder logs --remote :7749   # stream from remote daemon`,
+  minder logs --remote :7749   # stream from remote daemon
+  minder logs #42 --stage review          # a specific stage's latest run
+  minder logs #42 --stage review --attempt 2  # a specific retry`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runLogs,
 }
 
 var (
-	flagLogsRepo   string
-	flagLogsJob    int64
-	flagLogsFollow bool
-	flagLogsRemote string
-	flagLogsKey    string
-	flagLogsRaw    bool
-	flagLogsGrep   string
+	flagLogsRepo    string
+	flagLogsJob     int64
+	flagLogsFollow  bool
+	flagLogsRemote  string
+	flagLogsKey     string
+	flagLogsRaw     bool
+	flagLogsGrep    string
+	flagLogsStage   string
+	flagLogsAttempt int
 )
 
 func init() {
@@ -57,6 +61,8 @@ func init() {
 	logsCmd.Flags().StringVar(&flagLogsKey, "api-key", "", "API key for remote access")
 	logsCmd.Flags().BoolVar(&flagLogsRaw, "raw", false, "Output raw stream-json (no formatting)")
 	logsCmd.Flags().StringVarP(&flagLogsGrep, "grep", "g", "", "Filter jobs by substring (matches issue, agent, title, PR, status)")
+	logsCmd.Flags().StringVar(&flagLogsStage, "stage", "", "Show the log for a specific pipeline stage (default: latest)")
+	logsCmd.Flags().IntVar(&flagLogsAttempt, "attempt", 0, "Show the log for a specific attempt of --stage (default: latest)")
 }
 
 func runLogs(cmd *cobra.Command, args []string) error {
@@ -150,35 +156,13 @@ func runLogsLocal(args []string) error {
 		}
 	}
 
-	// Find log path — try DB column first, then conventions.
-	logPath := job.AgentLog.String
-
-	if logPath == "" || !fileExists(logPath) {
-		home, _ := os.UserHomeDir()
-		base := filepath.Join(home, ".agent-minder", "agents")
-
-		// Try patterns in order: new format (agent-issue-N), old format (issue-N),
-		// and job name directly.
-		candidates := []string{
-			filepath.Join(base, fmt.Sprintf("%s-%s.log", job.DeploymentID, job.Name)),
+	sel := logresolve.Selector{Stage: flagLogsStage, Attempt: flagLogsAttempt}
+	logPath, _, err := logresolve.Resolve(store, job, sel)
+	if err != nil || !fileExists(logPath) {
+		if sel.IsZero() {
+			return fmt.Errorf("log not found for job %s (deploy %s)", job.Name, job.DeploymentID)
 		}
-		if job.IssueNumber > 0 {
-			candidates = append(candidates,
-				filepath.Join(base, fmt.Sprintf("%s-issue-%d.log", job.DeploymentID, job.IssueNumber)),
-			)
-		}
-
-		logPath = ""
-		for _, c := range candidates {
-			if fileExists(c) {
-				logPath = c
-				break
-			}
-		}
-	}
-
-	if logPath == "" {
-		return fmt.Errorf("log not found for job %s (deploy %s)", job.Name, job.DeploymentID)
+		return fmt.Errorf("log not found for job %s stage=%q attempt=%d", job.Name, sel.Stage, sel.Attempt)
 	}
 
 	f, err := os.Open(logPath)
