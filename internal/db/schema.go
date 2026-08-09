@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS deployments (
 	total_budget_usd REAL DEFAULT 25.0,
 	carried_cost_usd REAL DEFAULT 0.0,
 	base_branch TEXT DEFAULT 'main',
+	activation_policy TEXT NOT NULL DEFAULT 'automated',
 	started_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -234,6 +235,17 @@ CREATE TABLE IF NOT EXISTS event_log_meta (
 	truncated_through INTEGER NOT NULL DEFAULT 0,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+`
+
+// migrateV11toV12 persists the deployment-level activation policy
+// distinguishing explicit (only the supplied issues/proactive job),
+// automated (jobs.yaml triggers and cron schedules installed), and hybrid
+// (explicit work plus jobs.yaml automations) deployments. Existing rows
+// default to 'automated' to preserve the pre-migration behavior of
+// unconditionally loading jobs.yaml.
+const migrateV11toV12 = `
+ALTER TABLE deployments ADD COLUMN activation_policy TEXT NOT NULL DEFAULT 'automated';
+UPDATE schema_version SET version = 12;
 `
 
 // migrateV1toV2 migrates a v1 database (tasks table) to v2 (jobs table).
@@ -452,12 +464,12 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_job ON agent_runs(job_id);
 UPDATE schema_version SET version = 11;
 `
 
-// migrateV11toV12 adds the durable event log (Expedition IV): the events table
+// migrateV12toV13 adds the durable event log (Expedition IV): the events table
 // appended in the same transaction as the state change it describes
 // (store-first, R-1), plus event_log_meta holding the log epoch and retention
 // floor. Additive — existing rows are untouched. The epoch value itself is
 // bootstrapped in Go (ensureEventLogMeta) because SQL cannot generate it.
-const migrateV11toV12 = `
+const migrateV12toV13 = `
 CREATE TABLE IF NOT EXISTS events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	time DATETIME NOT NULL,
@@ -476,7 +488,7 @@ CREATE TABLE IF NOT EXISTS event_log_meta (
 	truncated_through INTEGER NOT NULL DEFAULT 0,
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
-UPDATE schema_version SET version = 12;
+UPDATE schema_version SET version = 13;
 `
 
 // DefaultDBPath returns the default database path for v2.
@@ -578,6 +590,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV11toV12); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v11→v12: %w", err)
+			}
+		}
+		if version < 13 {
+			if _, err := db.Exec(migrateV12toV13); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v12→v13: %w", err)
 			}
 		}
 	} else if !hasVersion {

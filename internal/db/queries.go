@@ -38,16 +38,23 @@ func (s *Store) CreateDeployment(d *Deployment) error {
 	if runtimeName == "" {
 		runtimeName = "claude-code"
 	}
+	policy := d.ActivationPolicy
+	if policy == "" {
+		// Preserves pre-migration behavior for callers that don't set an
+		// explicit policy: unconditionally load jobs.yaml automations.
+		policy = ActivationAutomated
+	}
 	_, err := s.db.Exec(`INSERT INTO deployments
 		(id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns,
 		 max_budget_usd, runtime, analyzer_model, skip_label, auto_merge, review_enabled,
-		 review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch,
+		 activation_policy)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ID, d.RepoDir, d.Owner, d.Repo, d.Mode, d.WatchFilter,
 		d.MaxAgents, d.MaxTurns, d.MaxBudgetUSD, runtimeName, d.AnalyzerModel,
 		d.SkipLabel, d.AutoMerge, d.ReviewEnabled,
 		d.ReviewMaxTurns, d.ReviewMaxBudget,
-		d.TotalBudgetUSD, d.CarriedCostUSD, d.BaseBranch)
+		d.TotalBudgetUSD, d.CarriedCostUSD, d.BaseBranch, policy)
 	return err
 }
 

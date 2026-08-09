@@ -331,17 +331,17 @@ func TestEventLogEpochRotatesAfterWALRecovery(t *testing.T) {
 	}
 }
 
-func TestV11toV12EventsMigration(t *testing.T) {
+func TestV12toV13EventsMigration(t *testing.T) {
 	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "migrate1112.db")
+	dbPath := filepath.Join(dir, "migrate1213.db")
 
 	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(1)")
 	if err != nil {
-		t.Fatalf("open v11 db: %v", err)
+		t.Fatalf("open v12 db: %v", err)
 	}
-	v11 := `
+	v12 := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
-INSERT INTO schema_version VALUES (11);
+INSERT INTO schema_version VALUES (12);
 CREATE TABLE jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL,
@@ -354,8 +354,8 @@ CREATE TABLE jobs (
 INSERT INTO jobs (deployment_id, agent, name, status)
 VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
 `
-	if _, err := conn.Exec(v11); err != nil {
-		t.Fatalf("create v11 db: %v", err)
+	if _, err := conn.Exec(v12); err != nil {
+		t.Fatalf("create v12 db: %v", err)
 	}
 	_ = conn.Close()
 
