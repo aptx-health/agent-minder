@@ -56,6 +56,14 @@ func Register(name string, factory Factory) {
 // shutdown. Stateless runtimes (claude-code, codex) are per-process and need
 // not register one. Intended to be called from a runtime adapter's init(); a
 // nil fn is ignored.
+//
+// This is only safe under topology invariant I-4 (process-global equals
+// deployment-global, see AgentRuntime doc comment and
+// docs/research/fable-expedition/02-worker-process-topology-adr.md §6): a
+// process-level hook is correct because one process hosts exactly one
+// Coordinator driving exactly one deployment. A resource that must be shared
+// *across* deployments on a host (I-5) must not be registered here — it
+// belongs outside the runtime as an externally configured service.
 func RegisterShutdown(fn func()) {
 	if fn == nil {
 		return

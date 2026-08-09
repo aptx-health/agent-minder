@@ -95,6 +95,10 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	if err := validateServeAPIKey(flagServe, flagAPIKey); err != nil {
+		return err
+	}
+
 	// If this is a daemon re-exec, run the daemon directly.
 	if flagDaemon && flagDeployID != "" {
 		if flagRuntime != "" {
@@ -301,6 +305,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func validateServeAPIKey(serveAddr, apiKey string) error {
+	if serveAddr != "" && strings.TrimSpace(apiKey) == "" {
+		return fmt.Errorf("--api-key is required when --serve is set")
+	}
+	return nil
+}
+
 // runForeground runs the supervisor in the current process.
 // Prepare() has already been called — jobs exist in the DB.
 func runForeground(deployID string) error {
@@ -344,8 +355,6 @@ func runForeground(deployID string) error {
 		fmt.Printf("Warning: sync schedules: %v\n", w)
 	}
 
-	sup := coord.Supervisor()
-
 	// --- Startup summary ---
 	printStartupSummary(coord.Snapshot())
 
@@ -367,24 +376,21 @@ func runForeground(deployID string) error {
 			DeployID: deployID,
 			APIKey:   flagAPIKey,
 		})
-		srv.StopDaemon = func() { cancel(); coord.Stop() }
-		srv.BudgetResume = sup.ResumeBudget
-		srv.IsBudgetPaused = sup.IsBudgetPaused
+		srv.Provider = coord
 
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 		fmt.Printf("  API: http://localhost%s\n", flagServe)
 	}
 
 	// Print events in foreground mode through an independent bus subscription.
-	events, err := sup.Subscribe(0)
+	events, err := coord.SubscribeEvents(0)
 	if err != nil {
 		return fmt.Errorf("subscribe to supervisor events: %w", err)
 	}
 	defer events.Close()
 	go func() {
 		for event := range events.Events() {
-			evt := event.Value
-			fmt.Printf("[%s] %s: %s\n", evt.Time.Format("15:04:05"), evt.Type, evt.Summary)
+			fmt.Printf("%s\n", event.Value.ForegroundLine())
 		}
 	}()
 
@@ -457,7 +463,6 @@ func runDaemon(deployID string) error {
 		fmt.Printf("Warning: sync schedules: %v\n", w)
 	}
 
-	sup := coord.Supervisor()
 	sched := coord.Scheduler()
 
 	printStartupSummary(coord.Snapshot())
@@ -483,9 +488,7 @@ func runDaemon(deployID string) error {
 			DeployID: deployID,
 			APIKey:   flagAPIKey,
 		})
-		srv.StopDaemon = func() { cancel(); coord.Stop() }
-		srv.BudgetResume = sup.ResumeBudget
-		srv.IsBudgetPaused = sup.IsBudgetPaused
+		srv.Provider = coord
 
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 	}

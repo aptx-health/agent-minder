@@ -142,7 +142,7 @@ sudo apt-get update && sudo apt-get install -y doppler
 doppler login
 
 # Run with Doppler-injected secrets
-doppler run -- agent-minder deploy watch --milestone "v1.0" --serve :7749
+doppler run -- agent-minder deploy watch --milestone "v1.0" --serve :7749 --api-key "$MINDER_API_KEY"
 ```
 
 Update the systemd unit's `ExecStart` to use `doppler run --` as a prefix.
@@ -224,7 +224,7 @@ sudo tailscale up
 
 # The daemon is now accessible at your Tailscale IP
 # No UFW rules needed — traffic goes over the Tailscale mesh
-curl http://100.x.y.z:7749/status
+curl -H "X-API-Key: $MINDER_API_KEY" http://100.x.y.z:7749/status
 ```
 
 Benefits:
@@ -249,7 +249,7 @@ SERVE_ADDR=127.0.0.1:7749
 The daemon exposes a `/status` endpoint:
 
 ```bash
-curl -H "Authorization: Bearer $MINDER_API_KEY" http://localhost:7749/status
+curl -H "X-API-Key: $MINDER_API_KEY" http://localhost:7749/status
 ```
 
 ### Useful journalctl Queries
@@ -286,7 +286,7 @@ agent-minder deploy list
 ### Metrics Endpoint
 
 ```bash
-curl -H "Authorization: Bearer $MINDER_API_KEY" http://localhost:7749/metrics
+curl -H "X-API-Key: $MINDER_API_KEY" http://localhost:7749/metrics
 ```
 
 Returns task counts, costs, and budget utilization — useful for Prometheus scraping or custom dashboards.

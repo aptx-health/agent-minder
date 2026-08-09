@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/db"
 )
+
+const testAPIKey = "test-api-key"
 
 func testServer(t *testing.T) (*Server, *db.Store) {
 	t.Helper()
@@ -47,6 +50,7 @@ func testServer(t *testing.T) (*Server, *db.Store) {
 	srv := NewServer(ServerConfig{
 		Store:    store,
 		DeployID: "test-deploy",
+		APIKey:   testAPIKey,
 	})
 	return srv, store
 }
@@ -54,6 +58,9 @@ func testServer(t *testing.T) (*Server, *db.Store) {
 func doRequest(t *testing.T, srv *Server, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
+	if srv.apiKey != "" {
+		req.Header.Set("X-API-Key", srv.apiKey)
+	}
 	rr := httptest.NewRecorder()
 	srv.middleware(srv.mux).ServeHTTP(rr, req)
 	return rr
@@ -373,8 +380,8 @@ func TestHandleJob_CrossDeploymentScoping(t *testing.T) {
 		t.Fatalf("CreateJob(b): %v", err)
 	}
 
-	srvA := NewServer(ServerConfig{Store: store, DeployID: "deploy-a"})
-	srvB := NewServer(ServerConfig{Store: store, DeployID: "deploy-b"})
+	srvA := NewServer(ServerConfig{Store: store, DeployID: "deploy-a", APIKey: testAPIKey})
+	srvB := NewServer(ServerConfig{Store: store, DeployID: "deploy-b", APIKey: testAPIKey})
 
 	// Each server can see its own job.
 	rr := doRequest(t, srvA, "GET", fmt.Sprintf("/jobs/%d", jobA.ID))
@@ -557,11 +564,24 @@ func TestHandleJobLog(t *testing.T) {
 	}
 }
 
+// stubProvider implements the control trio for handler tests. The embedded
+// interface panics on any other method, proving those routes never touch it.
+type stubProvider struct {
+	coordinator.StateProvider
+	stopped chan struct{}
+	resumed *bool
+	paused  bool
+}
+
+func (p *stubProvider) Stop()                { close(p.stopped) }
+func (p *stubProvider) ResumeBudget()        { *p.resumed = true }
+func (p *stubProvider) IsBudgetPaused() bool { return p.paused }
+
 func TestHandleStop(t *testing.T) {
 	srv, _ := testServer(t)
 
 	stopped := make(chan struct{})
-	srv.StopDaemon = func() { close(stopped) }
+	srv.Provider = &stubProvider{stopped: stopped}
 
 	rr := doRequest(t, srv, "POST", "/stop")
 	if rr.Code != http.StatusOK {
@@ -578,7 +598,7 @@ func TestHandleStop(t *testing.T) {
 	select {
 	case <-stopped:
 	case <-time.After(time.Second):
-		t.Error("StopDaemon callback was not invoked")
+		t.Error("provider Stop was not invoked")
 	}
 }
 
@@ -586,7 +606,7 @@ func TestHandleResume(t *testing.T) {
 	srv, _ := testServer(t)
 
 	resumed := false
-	srv.BudgetResume = func() { resumed = true }
+	srv.Provider = &stubProvider{resumed: &resumed}
 
 	rr := doRequest(t, srv, "POST", "/resume")
 	if rr.Code != http.StatusOK {
@@ -601,7 +621,7 @@ func TestHandleResume(t *testing.T) {
 		t.Errorf("status = %q, want %q", resp["status"], "resumed")
 	}
 	if !resumed {
-		t.Error("BudgetResume callback was not invoked")
+		t.Error("provider ResumeBudget was not invoked")
 	}
 }
 
@@ -633,13 +653,15 @@ func TestAPIKeyMiddleware(t *testing.T) {
 	})
 
 	// No key → 401.
-	rr := doRequest(t, srv, "GET", "/status")
+	req := httptest.NewRequest("GET", "/status", nil)
+	rr := httptest.NewRecorder()
+	srv.middleware(srv.mux).ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without key, got %d", rr.Code)
 	}
 
 	// Wrong key → 401.
-	req := httptest.NewRequest("GET", "/status", nil)
+	req = httptest.NewRequest("GET", "/status", nil)
 	req.Header.Set("X-API-Key", "wrong-key")
 	rr = httptest.NewRecorder()
 	srv.middleware(srv.mux).ServeHTTP(rr, req)
@@ -654,6 +676,28 @@ func TestAPIKeyMiddleware(t *testing.T) {
 	srv.middleware(srv.mux).ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 with correct key, got %d", rr.Code)
+	}
+}
+
+func TestAPIKeyMiddlewareRejectsUnconfiguredServer(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.apiKey = ""
+
+	rr := doRequest(t, srv, "GET", "/status")
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when API key is not configured, got %d", rr.Code)
+	}
+}
+
+func TestListenAndServeRequiresAPIKey(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+
+	err := srv.ListenAndServe("127.0.0.1:0")
+	if err == nil {
+		t.Fatal("expected ListenAndServe to reject a missing API key")
+	}
+	if err.Error() != "api key required" {
+		t.Fatalf("ListenAndServe error = %q, want %q", err.Error(), "api key required")
 	}
 }
 

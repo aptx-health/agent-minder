@@ -4,7 +4,7 @@ This guide walks through setting up the agent-minder Discord bot for monitoring 
 
 ## Prerequisites
 
-- A running deploy daemon with `--serve` enabled
+- A running deploy daemon with `--serve` and `--api-key` enabled
 - A Discord server where you have "Manage Server" permissions
 
 ## 1. Create a Discord Application
@@ -49,7 +49,7 @@ export DISCORD_BOT_TOKEN="your-bot-token"
 export DISCORD_CHANNEL_ID="123456789012345678"
 export DISCORD_GUILD_ID="987654321098765432"   # optional, for dev (faster command registration)
 export MINDER_REMOTE="your-vps:7749"
-export MINDER_API_KEY="your-api-key"           # if the daemon uses --api-key
+export MINDER_API_KEY="your-api-key"
 ```
 
 ### Run the bot

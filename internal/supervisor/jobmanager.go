@@ -102,7 +102,7 @@ type SlotContext struct {
 }
 
 // EmitEvent emits a supervisor event for this job.
-func (sc *SlotContext) EmitEvent(typ, summary string) {
+func (sc *SlotContext) EmitEvent(typ EventType, summary string) {
 	sc.sup.emitEvent(typ, summary, sc.Job.ID)
 }
 
@@ -282,7 +282,7 @@ func processLessonFeedback(sc *SlotContext, feedback []LessonFeedback) {
 	}
 	if applied > 0 {
 		sc.hasReviewerFeedback = true
-		sc.EmitEvent("info", fmt.Sprintf("Recorded reviewer feedback for %d lessons", applied))
+		sc.EmitEvent(EventInfo, fmt.Sprintf("Recorded reviewer feedback for %d lessons", applied))
 	}
 }
 
@@ -485,7 +485,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	job := sc.Job
 	contract := m.contract
 
-	sc.EmitEvent("started", formatJobStartedSummary(sc))
+	sc.EmitEvent(EventStarted, formatJobStartedSummary(sc))
 
 	// --- One-time setup ---
 
@@ -501,12 +501,12 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		} else if owner != nil {
 			detail := fmt.Sprintf("branch %s is already owned by active job #%d (status %s); refusing to reset its worktree",
 				sc.Branch, owner.ID, owner.Status)
-			sc.EmitEvent("error", fmt.Sprintf("Branch in use for %s: %s", sc.JobLabel(), detail))
+			sc.EmitEvent(EventError, fmt.Sprintf("Branch in use for %s: %s", sc.JobLabel(), detail))
 			_ = sc.Store.UpdateJobFailure(job.ID, "branch_in_use", detail)
 			return fmt.Errorf("branch in use: %s", detail)
 		}
 		if err := sc.SetupWorktree(); err != nil {
-			sc.EmitEvent("error", fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
+			sc.EmitEvent(EventError, fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
 			_ = sc.Store.UpdateJobFailure(job.ID, "worktree", err.Error())
 			return err
 		}
@@ -519,7 +519,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			agentName = job.Agent
 		}
 		if _, err := sc.EnsureAgentDef(AgentName(agentName)); err != nil {
-			sc.EmitEvent("error", fmt.Sprintf("Agent def error for %s/%s: %v", sc.JobLabel(), stage.Name, err))
+			sc.EmitEvent(EventError, fmt.Sprintf("Agent def error for %s/%s: %v", sc.JobLabel(), stage.Name, err))
 			_ = sc.Store.UpdateJobFailure(job.ID, "agent_def", err.Error())
 			return err
 		}
@@ -533,7 +533,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 	logFile, err := sc.OpenLogFile(false)
 	if err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Log file error for %s: %v", sc.JobLabel(), err))
+		sc.EmitEvent(EventError, fmt.Sprintf("Log file error for %s: %v", sc.JobLabel(), err))
 		_ = sc.Store.UpdateJobFailure(job.ID, "log", err.Error())
 		return err
 	}
@@ -568,7 +568,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		}
 
 		_ = sc.Store.UpdateJobStage(job.ID, stageName, "")
-		sc.EmitEvent("info", fmt.Sprintf("Stage %q started on %s (agent: %s)", stageName, sc.JobLabel(), agentName))
+		sc.EmitEvent(EventInfo, fmt.Sprintf("Stage %q started on %s (agent: %s)", stageName, sc.JobLabel(), agentName))
 
 		var result stageResult
 
@@ -599,7 +599,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			if len(assessment.Lessons) > 0 {
 				captured := captureLessonsFromAssessment(sc.Store, sc.Owner, sc.Repo, assessment)
 				if len(captured) > 0 {
-					sc.EmitEvent("info", fmt.Sprintf("Captured %d lessons from %s stage on %s",
+					sc.EmitEvent(EventInfo, fmt.Sprintf("Captured %d lessons from %s stage on %s",
 						len(captured), stageName, sc.JobLabel()))
 				}
 			}
@@ -608,7 +608,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		// Check for user stop.
 		if sc.WasStoppedByUser() {
 			_ = sc.Store.UpdateJobStatus(job.ID, db.StatusStopped)
-			sc.EmitEvent("stopped", fmt.Sprintf("Agent stopped by user on %s", sc.JobLabel()))
+			sc.EmitEvent(EventStopped, fmt.Sprintf("Agent stopped by user on %s", sc.JobLabel()))
 			return nil
 		}
 
@@ -626,7 +626,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 					// Context cancelled (daemon shutting down).
 					return nil
 				}
-				sc.EmitEvent("info", fmt.Sprintf("Resuming %s after usage limit wait (session: %s)",
+				sc.EmitEvent(EventInfo, fmt.Sprintf("Resuming %s after usage limit wait (session: %s)",
 					sc.JobLabel(), result.sessionID))
 
 				// Resume the same session with the runtime; on ErrNotSupported
@@ -670,7 +670,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 			// Exhausted retries — still hitting limit.
 			if result.usageLimit {
-				sc.EmitEvent("error", fmt.Sprintf("Usage limit: exhausted %d retries on %s, failing",
+				sc.EmitEvent(EventError, fmt.Sprintf("Usage limit: exhausted %d retries on %s, failing",
 					maxUsageLimitRetries, sc.JobLabel()))
 				return m.finalizeFailure(ctx, "usage_limit", fmt.Sprintf("exhausted %d usage-limit retries", maxUsageLimitRetries))
 			}
@@ -696,14 +696,14 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 		switch onFailure {
 		case "skip":
-			sc.EmitEvent("info", formatStageSkippedSummary(stageName, sc.JobLabel(), result))
+			sc.EmitEvent(EventInfo, formatStageSkippedSummary(stageName, sc.JobLabel(), result))
 			continue
 
 		case "retry":
 			// Retry: re-run the review's *previous* stage (code) with feedback.
 			// Only if the failure is from a review finding issues (not bail/exhaust).
 			if result.bailed || result.exhausted {
-				sc.EmitEvent("info", fmt.Sprintf("Stage %q failed on %s (bail/exhaust), not retrying", stageName, sc.JobLabel()))
+				sc.EmitEvent(EventInfo, fmt.Sprintf("Stage %q failed on %s (bail/exhaust), not retrying", stageName, sc.JobLabel()))
 				return m.finalizeBail(ctx)
 			}
 			maxRetries := stage.Retries
@@ -711,14 +711,14 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 				maxRetries = 1
 			}
 			if retryCount[stageName] >= maxRetries {
-				sc.EmitEvent("info", fmt.Sprintf("Stage %q max retries (%d) reached on %s", stageName, maxRetries, sc.JobLabel()))
+				sc.EmitEvent(EventInfo, fmt.Sprintf("Stage %q max retries (%d) reached on %s", stageName, maxRetries, sc.JobLabel()))
 				continue // move to next stage
 			}
 			retryCount[stageName]++
 
 			// Jump back to the previous stage (code) to apply review feedback.
 			if i > 0 && result.assessment != nil && len(result.assessment.Issues) > 0 {
-				sc.EmitEvent("info", fmt.Sprintf("Review found issues on %s, retrying code stage (attempt %d/%d)",
+				sc.EmitEvent(EventInfo, fmt.Sprintf("Review found issues on %s, retrying code stage (attempt %d/%d)",
 					sc.JobLabel(), retryCount[stageName], maxRetries))
 				lastReviewAssessment = result.assessment
 				i -= 2 // will be incremented to i-1 by the loop
@@ -759,7 +759,7 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	}
 	runtimeAvailable := rt != nil || (sc.Hooks != nil && sc.Hooks.RunStageFn != nil)
 	if !runtimeAvailable {
-		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for %s — bailing", sc.JobLabel()))
+		sc.EmitEvent(EventError, fmt.Sprintf("No runtime configured for %s — bailing", sc.JobLabel()))
 		return stageResult{success: false, bailed: true}
 	}
 
@@ -995,7 +995,7 @@ func waitForUsageLimitReset(ctx context.Context, sc *SlotContext, attempt int) e
 		wait = time.Duration(attempt) * usageLimitWaitDuration
 	}
 
-	sc.EmitEvent("waiting", fmt.Sprintf(
+	sc.EmitEvent(EventWaiting, fmt.Sprintf(
 		"Usage limit hit on %s — waiting %s before retry (attempt %d/%d)",
 		sc.JobLabel(), wait.Truncate(time.Minute), attempt, maxUsageLimitRetries))
 
@@ -1028,21 +1028,21 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		agentName = "reviewer"
 	}
 	if _, err := sc.EnsureAgentDef(AgentName(agentName)); err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Reviewer agent def error: %v", err))
+		sc.EmitEvent(EventError, fmt.Sprintf("Reviewer agent def error: %v", err))
 		return stageResult{success: false}
 	}
 
-	sc.EmitEvent("info", fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64))
+	sc.EmitEvent(EventInfo, fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64))
 	_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewing)
 
 	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
 	prompt := renderReviewContext(ctx, sc)
 	if rt, err := sc.sup.RuntimeForJob(job); err != nil {
-		sc.EmitEvent("error", fmt.Sprintf("Runtime config error for review of %s: %v", sc.JobLabel(), err))
+		sc.EmitEvent(EventError, fmt.Sprintf("Runtime config error for review of %s: %v", sc.JobLabel(), err))
 		return stageResult{success: false}
 	} else if rt == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
-		sc.EmitEvent("error", fmt.Sprintf("No runtime configured for review of %s", sc.JobLabel()))
+		sc.EmitEvent(EventError, fmt.Sprintf("No runtime configured for review of %s", sc.JobLabel()))
 		return stageResult{success: false}
 	}
 	inv := runtimeInvocationFor(sc, agentName, prompt, "")
@@ -1072,23 +1072,23 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		commentID, err = ghClient.CreateComment(ctx, sc.Owner, sc.Repo, int(job.PRNumber.Int64), commentBody)
 	}
 	if err != nil {
-		sc.EmitEvent("warning", fmt.Sprintf("Review comment failed for %s PR #%d: %v", sc.JobLabel(), job.PRNumber.Int64, err))
+		sc.EmitEvent(EventWarning, fmt.Sprintf("Review comment failed for %s PR #%d: %v", sc.JobLabel(), job.PRNumber.Int64, err))
 	} else {
 		reviewCommentID = commentID
 	}
 
 	_ = sc.Store.UpdateJobReview(job.ID, risk, reviewCommentID)
 
-	sc.EmitEvent("info", fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk))
+	sc.EmitEvent(EventInfo, fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk))
 	if assessment.Summary != "" {
-		sc.EmitEvent("info", fmt.Sprintf("Review: %s", assessment.Summary))
+		sc.EmitEvent(EventInfo, fmt.Sprintf("Review: %s", assessment.Summary))
 	}
 
 	// Auto-capture lessons.
 	if len(assessment.Lessons) > 0 {
 		captured := captureLessonsFromAssessment(sc.Store, sc.Owner, sc.Repo, assessment)
 		if len(captured) > 0 {
-			sc.EmitEvent("info", fmt.Sprintf("Captured %d lessons from review of %s", len(captured), sc.JobLabel()))
+			sc.EmitEvent(EventInfo, fmt.Sprintf("Captured %d lessons from review of %s", len(captured), sc.JobLabel()))
 		}
 	}
 
@@ -1125,7 +1125,7 @@ func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk str
 			_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
 		}
 		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewed)
-		sc.EmitEvent("completed", fmt.Sprintf("Pipeline complete for %s — PR #%d", sc.JobLabel(), job.PRNumber.Int64))
+		sc.EmitEvent(EventCompleted, fmt.Sprintf("Pipeline complete for %s — PR #%d", sc.JobLabel(), job.PRNumber.Int64))
 
 		// Auto-merge if configured and low-risk.
 		if sc.Deploy.AutoMerge && reviewRisk == "low-risk" {
@@ -1137,20 +1137,20 @@ func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk str
 			prBase, baseErr := sc.getPRBase(ctx, ghClient, prNum)
 			switch {
 			case baseErr != nil:
-				sc.EmitEvent("warning", fmt.Sprintf("Auto-merge skipped for PR #%d: could not verify base branch: %v", prNum, baseErr))
+				sc.EmitEvent(EventWarning, fmt.Sprintf("Auto-merge skipped for PR #%d: could not verify base branch: %v", prNum, baseErr))
 			case prBase != sc.BaseBranch:
-				sc.EmitEvent("info", fmt.Sprintf("Auto-merge skipped for PR #%d: base branch %q is not the deployment default %q", prNum, prBase, sc.BaseBranch))
+				sc.EmitEvent(EventInfo, fmt.Sprintf("Auto-merge skipped for PR #%d: base branch %q is not the deployment default %q", prNum, prBase, sc.BaseBranch))
 			default:
 				if err := sc.enableAutoMerge(ctx, ghClient, prNum, "merge"); err == nil {
-					sc.EmitEvent("info", fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", prNum))
+					sc.EmitEvent(EventInfo, fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", prNum))
 				} else {
-					sc.EmitEvent("warning", fmt.Sprintf("Auto-merge failed for PR #%d: %v", prNum, err))
+					sc.EmitEvent(EventWarning, fmt.Sprintf("Auto-merge failed for PR #%d: %v", prNum, err))
 				}
 			}
 		}
 	} else {
 		_ = sc.Store.CompleteJob(job.ID, db.StatusDone)
-		sc.EmitEvent("completed", fmt.Sprintf("Agent completed %s", sc.JobLabel()))
+		sc.EmitEvent(EventCompleted, fmt.Sprintf("Agent completed %s", sc.JobLabel()))
 	}
 
 	sc.RecordLessonOutcome(true)
@@ -1191,7 +1191,7 @@ func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
 	} else {
 		_ = sc.Store.CompleteJob(job.ID, db.StatusBailed)
 	}
-	sc.EmitEvent("bailed", fmt.Sprintf("Agent bailed on %s", sc.JobLabel()))
+	sc.EmitEvent(EventBailed, fmt.Sprintf("Agent bailed on %s", sc.JobLabel()))
 	sc.RecordLessonOutcome(false)
 
 	return nil
@@ -1217,7 +1217,7 @@ func (m *DefaultJobManager) finalizeFailure(ctx context.Context, reason, detail 
 
 	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
 	_ = sc.Store.CompleteJob(job.ID, db.StatusFailed)
-	sc.EmitEvent("error", fmt.Sprintf("Agent failed on %s: %s", sc.JobLabel(), detail))
+	sc.EmitEvent(EventError, fmt.Sprintf("Agent failed on %s: %s", sc.JobLabel(), detail))
 	sc.RecordLessonOutcome(false)
 
 	return nil
@@ -1243,7 +1243,7 @@ func (m *DefaultJobManager) finalizeManual(ctx context.Context, reason, detail s
 
 	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
 	_ = sc.Store.CompleteJob(job.ID, db.StatusManual)
-	sc.EmitEvent("manual", fmt.Sprintf("Agent needs manual follow-up on %s: %s", sc.JobLabel(), detail))
+	sc.EmitEvent(EventManual, fmt.Sprintf("Agent needs manual follow-up on %s: %s", sc.JobLabel(), detail))
 	sc.RecordLessonOutcome(false)
 
 	return nil
@@ -1332,7 +1332,7 @@ func NewTestSupervisor(store *db.Store, deploy *db.Deployment, repoDir string) *
 		repo:      deploy.Repo,
 		running:   make(map[int64]*runState),
 		maxAgents: deploy.MaxAgents,
-		events:    eventbus.New[Event](256),
+		events:    eventbus.New[Envelope](256),
 		ghClientFactory: func(token string) *ghpkg.Client {
 			return ghpkg.NewClient("") // no-op client (no token = all calls fail gracefully)
 		},
@@ -1361,7 +1361,7 @@ func (s *Supervisor) DrainEvents() []Event {
 	}
 	events := make([]Event, len(replayed))
 	for i, event := range replayed {
-		events[i] = event.Value
+		events[i] = event.Value.Legacy()
 		s.eventDrainCursor = event.Cursor
 	}
 	return events

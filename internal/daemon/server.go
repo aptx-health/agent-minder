@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/db"
 )
 
@@ -26,10 +27,11 @@ type Server struct {
 	mux       *http.ServeMux
 	srv       *http.Server
 
-	// Callbacks wired by the daemon.
-	StopDaemon     func()
-	BudgetResume   func()
-	IsBudgetPaused func() bool
+	// Provider is the Coordinator-owned control surface (DM-5), wired by the
+	// entry points. Handlers reach the deployment lifecycle only through it —
+	// never through *supervisor.Supervisor. Nil-safe: control routes no-op and
+	// status reports budget_paused=false, matching the unwired legacy behavior.
+	Provider coordinator.StateProvider
 }
 
 // ServerConfig holds configuration for the API server.
@@ -74,6 +76,10 @@ func NewServer(cfg ServerConfig) *Server {
 
 // ListenAndServe starts the server.
 func (s *Server) ListenAndServe(addr string) error {
+	if s.apiKey == "" {
+		return fmt.Errorf("api key required")
+	}
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -98,11 +104,9 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.apiKey != "" {
-			if !constantTimeEqual(r.Header.Get("X-API-Key"), s.apiKey) {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-				return
-			}
+		if s.apiKey == "" || !constantTimeEqual(r.Header.Get("X-API-Key"), s.apiKey) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
 		}
 
 		next.ServeHTTP(w, r)
@@ -130,8 +134,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 
 	alive, pid := IsRunning(s.deployID)
 	budgetPaused := false
-	if s.IsBudgetPaused != nil {
-		budgetPaused = s.IsBudgetPaused()
+	if s.Provider != nil {
+		budgetPaused = s.Provider.IsBudgetPaused()
 	}
 
 	spent, _ := s.store.TotalSpend(s.deployID)
@@ -297,15 +301,15 @@ func (s *Server) handleLessons(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, _ *http.Request) {
-	if s.StopDaemon != nil {
-		go s.StopDaemon()
+	if s.Provider != nil {
+		go s.Provider.Stop()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
 }
 
 func (s *Server) handleResume(w http.ResponseWriter, _ *http.Request) {
-	if s.BudgetResume != nil {
-		s.BudgetResume()
+	if s.Provider != nil {
+		s.Provider.ResumeBudget()
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "resumed"})
 }

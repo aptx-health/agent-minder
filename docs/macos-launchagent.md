@@ -111,7 +111,7 @@ agent-minder deploy list
 agent-minder deploy status <deploy-id>
 
 # If --serve is enabled, HTTP API
-curl -H "Authorization: Bearer $MINDER_API_KEY" http://localhost:7749/status
+curl -H "X-API-Key: $MINDER_API_KEY" http://localhost:7749/status
 ```
 
 ### Updating

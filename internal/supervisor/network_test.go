@@ -29,7 +29,7 @@ func newNetTestSupervisor() *Supervisor {
 	s := &Supervisor{
 		running:   make(map[int64]*runState),
 		maxAgents: 3,
-		events:    eventbus.New[Event](32),
+		events:    eventbus.New[Envelope](32),
 	}
 	return s
 }
