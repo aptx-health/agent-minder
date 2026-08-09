@@ -201,6 +201,144 @@ func TestSubscribeRejectsCursorAheadOfBus(t *testing.T) {
 	}
 }
 
+func TestLaggingSubscriberTruncatedWithoutAffectingOthers(t *testing.T) {
+	const (
+		retention  = 4
+		eventCount = 20
+	)
+	bus := NewWithRetention[int](1, retention)
+	t.Cleanup(bus.Close)
+
+	lagging, err := bus.Subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe lagging: %v", err)
+	}
+	live, err := bus.Subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe live: %v", err)
+	}
+	defer live.Close()
+
+	// The live subscriber reads each event as it is published, so it never
+	// falls behind retention; the lagging subscriber is never read at all.
+	for value := 1; value <= eventCount; value++ {
+		if _, err := bus.Publish(value); err != nil {
+			t.Fatalf("publish %d: %v", value, err)
+		}
+		select {
+		case event := <-live.Events():
+			if event.Cursor != uint64(value) || event.Value != value {
+				t.Fatalf("live event = {%d %d}, want {%d %d}", event.Cursor, event.Value, value, value)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("live subscriber stalled at event %d", value)
+		}
+	}
+
+	assertTruncatedClose(t, lagging)
+	if err := live.Err(); err != nil {
+		t.Fatalf("live subscriber Err() = %v, want nil", err)
+	}
+}
+
+func TestAbandonedSubscriptionReapedByTruncation(t *testing.T) {
+	bus := NewWithRetention[int](1, 2)
+	t.Cleanup(bus.Close)
+
+	// Abandoned: no reader, Close never called. Its delivery goroutine parks
+	// on a full channel until retention passes it.
+	abandoned, err := bus.Subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	for value := 1; value <= 10; value++ {
+		if _, err := bus.Publish(value); err != nil {
+			t.Fatalf("publish %d: %v", value, err)
+		}
+	}
+
+	assertTruncatedClose(t, abandoned)
+}
+
+func TestSubscribeBelowRetentionFloorReturnsTruncated(t *testing.T) {
+	bus := NewWithRetention[int](1, 2)
+	t.Cleanup(bus.Close)
+	for value := 1; value <= 5; value++ {
+		if _, err := bus.Publish(value); err != nil {
+			t.Fatalf("publish %d: %v", value, err)
+		}
+	}
+
+	// Events 1-3 are discarded; 4 and 5 remain, so cursors stay monotonic
+	// across truncation.
+	if cursor := bus.Cursor(); cursor != 5 {
+		t.Fatalf("Cursor() = %d, want 5", cursor)
+	}
+	for _, afterCursor := range []uint64{0, 2} {
+		if _, err := bus.Subscribe(afterCursor); !errors.Is(err, ErrTruncated) {
+			t.Fatalf("Subscribe(%d) error = %v, want ErrTruncated", afterCursor, err)
+		}
+	}
+
+	subscription, err := bus.Subscribe(3)
+	if err != nil {
+		t.Fatalf("Subscribe(3) at the retention floor: %v", err)
+	}
+	defer subscription.Close()
+	for want := 4; want <= 5; want++ {
+		select {
+		case event := <-subscription.Events():
+			if event.Cursor != uint64(want) || event.Value != want {
+				t.Fatalf("event = {%d %d}, want {%d %d}", event.Cursor, event.Value, want, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for retained event %d", want)
+		}
+	}
+}
+
+func TestReplayRespectsRetentionFloor(t *testing.T) {
+	bus := NewWithRetention[int](1, 2)
+	t.Cleanup(bus.Close)
+	for value := 1; value <= 5; value++ {
+		if _, err := bus.Publish(value); err != nil {
+			t.Fatalf("publish %d: %v", value, err)
+		}
+	}
+
+	if _, err := bus.Replay(0); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("Replay(0) error = %v, want ErrTruncated", err)
+	}
+	events, err := bus.Replay(3)
+	if err != nil {
+		t.Fatalf("Replay(3) at the retention floor: %v", err)
+	}
+	assertSequence(t, events, 4, 5)
+}
+
+// assertTruncatedClose drains a subscription until its channel closes and
+// asserts it terminated with ErrTruncated. The close proves the delivery
+// goroutine exited rather than parking forever.
+func assertTruncatedClose(t *testing.T, subscription *Subscription[int]) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, open := <-subscription.Events():
+			if open {
+				continue
+			}
+			if err := subscription.Err(); !errors.Is(err, ErrTruncated) {
+				t.Fatalf("Err() after truncated close = %v, want ErrTruncated", err)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for the truncated subscription to close")
+		}
+	}
+}
+
 func assertSequence(t *testing.T, events []Event[int], first, last int) {
 	t.Helper()
 	if len(events) != last-first+1 {
