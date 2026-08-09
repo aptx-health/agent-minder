@@ -61,8 +61,12 @@ var authStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Check if a GitHub token is configured",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-			fmt.Printf("GITHUB_TOKEN: set via environment (%s...%s)\n", tok[:4], tok[len(tok)-4:])
+		if tok, name := auth.EnvToken(); tok != "" {
+			if len(tok) >= 8 {
+				fmt.Printf("%s: set via environment (%s...%s)\n", name, tok[:4], tok[len(tok)-4:])
+			} else {
+				fmt.Printf("%s: set via environment\n", name)
+			}
 			return nil
 		}
 
@@ -79,6 +83,7 @@ var authStatusCmd = &cobra.Command{
 		fmt.Println("GITHUB_TOKEN: not configured")
 		fmt.Println("  Run: minder auth login")
 		fmt.Println("  Or:  export GITHUB_TOKEN=ghp_...")
+		fmt.Println("  Or:  export GH_TOKEN=ghp_...")
 		return nil
 	},
 }

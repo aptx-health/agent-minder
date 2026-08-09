@@ -55,6 +55,22 @@ minder status
 
 `--serve :7749` exposes the HTTP API so `minder checkout` and `minder status` can reach the daemon. The budget flags (`--max-turns 150 --budget 10 --total-budget 35`) leave headroom for complex jobs and work well if you're on Claude Max.
 
+## Platform support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| macOS amd64/arm64 | Supported | Primary development platform. Foreground, daemon, checkout, SQLite, keychain, and clipboard paths are expected to work. |
+| Linux amd64/arm64 | Supported | Used for VPS/systemd deployments. Clipboard copy in `minder checkout` requires `wl-clipboard`, `xclip`, `xsel`, or compatible WSL clipboard utilities. |
+| WSL2 | Supported as Linux | Use Linux setup steps inside the distro. Clipboard copy can use Windows `clip.exe`/PowerShell when available on PATH; otherwise the command prints the `cd` fallback. |
+| Windows native | Limited | Not release-supported today. SQLite, keyring, Bubble Tea, and clipboard dependencies have Windows support, but `internal/daemon` and `internal/reaper` still use Unix-only process APIs, so `GOOS=windows go test ./...` does not compile. Use WSL2 for full `minder deploy`/daemon workflows. |
+
+Verified support notes:
+
+- Clipboard code uses `github.com/atotto/clipboard`, not hardcoded `pbcopy`. That library has a native Windows implementation and Linux/WSL fallbacks for `wl-copy`, `xclip`, `xsel`, `clip.exe`, and PowerShell. If clipboard setup is missing, `minder checkout` prints a `cd <worktree>` fallback.
+- GitHub authentication accepts `GITHUB_TOKEN` first, then `GH_TOKEN`, then the token stored by `minder auth login`. `minder deploy` normalizes the selected token into `GITHUB_TOKEN` for daemon re-exec and agent subprocesses.
+- SQLite uses `modernc.org/sqlite`, a CGo-free driver. Windows users do not need MSYS2, MinGW, or another C compiler for SQLite.
+- The current TUI dependency is `github.com/charmbracelet/bubbletea v1.3.6`, which includes Windows console support and enables VT input/output. Because the native Windows binary does not compile yet, Windows Terminal support remains a dependency-level finding rather than an end-to-end verified native `minder` workflow.
+
 ## How it works
 
 ```
@@ -341,7 +357,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 | **Go 1.25+** | Build from source |
 | **git** | Worktree management, branch operations |
 | **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** | Agent execution (`claude --agent`) |
-| **`GITHUB_TOKEN`** | GitHub API access (via env var or `minder auth login`) |
+| **`GITHUB_TOKEN` or `GH_TOKEN`** | GitHub API access (via env var or `minder auth login`) |
 | **[gh CLI](https://cli.github.com/)** | Agents use `gh` for PR creation and issue management |
 
 ## Environment variables
@@ -349,6 +365,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GITHUB_TOKEN` | — | GitHub API token (or use `minder auth login`) |
+| `GH_TOKEN` | — | GitHub API token fallback when `GITHUB_TOKEN` is unset |
 | `MINDER_DB` | `~/.agent-minder/v2.db` | Database path |
 | `MINDER_LOG` | `~/.agent-minder/debug.log` | Debug log path |
 | `MINDER_DEBUG` | — | Enable structured JSON debug logging |
@@ -406,7 +423,7 @@ internal/
   claudecli/                 # Claude Code CLI wrapper
   github/                    # GitHub API client (go-github, ETag caching)
   git/                       # Git CLI wrappers
-  auth/                      # OS keyring integration (macOS Keychain, Linux libsecret)
+  auth/                      # OS keyring integration (macOS Keychain, Linux libsecret, Windows Credential Manager)
   lesson/                    # Lesson selection, injection, grooming
   onboarding/                # Repo scanning, onboarding YAML
   discovery/                 # Language/framework detection
