@@ -28,7 +28,10 @@ forward) lives in
 - `triggerRoutes` live in Supervisor memory (`watch.go`); cron schedules persist
   in `job_schedules` (name-only PK) — the automation-state + schedule-scoping
   gaps.
-- Schema is at v8; `cmd/tui.go` is a stub, `internal/tui/` does not exist yet.
+- Schema was at v8 when this grounding section was written; the M1 status
+  block below reflects the current state (schema v11 as of this update, see
+  `internal/db/schema.go:13`). `cmd/tui.go` is a stub, `internal/tui/` does not
+  exist yet.
 
 ---
 

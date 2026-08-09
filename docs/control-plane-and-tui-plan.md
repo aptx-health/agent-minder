@@ -3,6 +3,12 @@
 Status: proposed
 Last updated: 2026-08-01
 
+> **Note (2026-08-08):** The "Current architecture and seams" section below is
+> partly stale — five of its listed correctness gaps have since been fixed (see
+> the inline `Fixed:` annotations). `Status` remains `proposed`: the target
+> architecture, milestones, and API/TUI work described in the rest of this
+> document have not landed.
+
 ## Summary
 
 Minder will separate orchestration from presentation without replacing the
@@ -84,27 +90,42 @@ their ownership is fragmented:
   and provides the strongest operator workflow in the application.
 
 Several correctness gaps must be addressed before an automation or activity
-API can be authoritative:
+API can be authoritative. Several have since closed (marked `Fixed:` below);
+the rest are still open as of this update:
 
 - Trigger definitions are held in Supervisor memory while cron definitions are
   persisted.
 - `milestone:*` trigger definitions validate but are not installed as trigger
-  routes.
+  routes. **Fixed:** `internal/coordinator/coordinator.go` builds a watch route
+  from `def.TriggerMilestone()` alongside label routes.
 - Trigger-level budget and turn overrides are not carried into activated jobs.
+  **Fixed:** `internal/supervisor/watch.go` copies `route.MaxTurns`/`route.Budget`
+  onto the activated job.
 - Schedule identity is global by name rather than scoped to a deployment, and
-  replacement can discard last-run history.
+  replacement can discard last-run history. **Fixed:** schema v9 rescoped
+  `job_schedules`' primary key to `(deployment_id, name)`.
 - Removed definitions are not consistently disabled during reconciliation.
-- Job activation provenance is not persisted.
+  **Fixed:** `internal/scheduler.SyncSchedules` disables any persisted schedule
+  whose name no longer appears in `jobs.yaml` (`scheduler.go:75-91`).
+- Job activation provenance is not persisted. **Fixed:** schema v10 added
+  `source_type`/`source_name`/`source_ref` to `jobs`, written by trigger
+  activation; unifying that write across `CreateJob`/`BulkCreateJobs` is
+  tracked separately (#602, see
+  `docs/research/fable-expedition/03-integration-target-domain-review.md` §2.3).
 - Multi-stage jobs do not durably record the actual agent, attempt, session,
-  usage, and outcome for each stage.
+  usage, and outcome for each stage. **Fixed:** schema v11 added the
+  `agent_runs` table, one durable row per (job, stage, attempt).
 - Current tool/input data is cleared after tool completion; no durable recent
   activity remains.
 - Successful runtime final text, exact turns, and sessions are generally left
-  in raw logs rather than normalized.
+  in raw logs rather than normalized. **Fixed:** `agent_runs` persists
+  `final_text`, `final_turns`, and `session_id` per run (schema v11).
 - PRs are partially modeled, but issues, comments, reports, summaries, and
   other deliverables are not.
 - Supervisor events use a single bounded channel rather than a fan-out,
-  resumable event stream.
+  resumable event stream. Still open — see
+  `docs/research/fable-expedition/04-snapshot-event-consistency.md` for the
+  current thinking on the typed event envelope (DM-2).
 - Log paths and follow behavior are inconsistent between local and remote
   clients.
 
