@@ -41,7 +41,16 @@ func runScriptJob(ctx context.Context, sc *SlotContext) error {
 		return err
 	}
 	defer func() { _ = logFile.Close() }()
-	_ = sc.Store.UpdateJobLog(job.ID, sc.LogPath)
+	if err := sc.Store.UpdateJobLog(job.ID, sc.LogPath); err != nil {
+		sc.EmitDurableWith(EventError, fmt.Sprintf("Log path error for %s: %v", sc.JobLabel(), err),
+			func(tx *sqlx.Tx) error {
+				if failErr := db.UpdateJobFailureTx(tx, job.ID, "log", err.Error()); failErr != nil {
+					return failErr
+				}
+				return db.CompleteJobTx(tx, job.ID, db.StatusFailed)
+			})
+		return fmt.Errorf("record script log path: %w", err)
+	}
 
 	runID := beginScriptRun(sc)
 	res := db.AgentRunResult{Status: db.RunStatusSuccess}
@@ -50,7 +59,9 @@ func runScriptJob(ctx context.Context, sc *SlotContext) error {
 			if sc.sup != nil {
 				res.StepCount = sc.sup.endAgentRunTracking(sc.Job.ID)
 			}
-			_ = sc.Store.CompleteAgentRun(runID, res)
+			if err := sc.Store.CompleteAgentRun(runID, res); err != nil {
+				debugLog("script run completion failed", "job", sc.Job.ID, "run", runID, "error", err.Error())
+			}
 		}
 	}()
 
