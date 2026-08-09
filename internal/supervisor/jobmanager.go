@@ -63,6 +63,8 @@ type TestHooks struct {
 	EnsureAgentDefFn          func(name AgentName) (AgentDefSource, error)
 	ExtractReviewAssessmentFn func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment
 	CreateReviewCommentFn     func(ctx context.Context, prNumber int, body string) (int64, error)
+	GetPRBaseFn               func(ctx context.Context, prNumber int) (string, error)
+	EnableAutoMergeFn         func(ctx context.Context, prNumber int, method string) error
 }
 
 // SlotContext provides primitives that job managers use to interact
@@ -115,6 +117,22 @@ func (sc *SlotContext) JobLabel() string {
 // NewGHClient creates a GitHub client.
 func (sc *SlotContext) NewGHClient() *ghpkg.Client {
 	return sc.sup.newGHClient()
+}
+
+// getPRBase returns the base branch of a PR, dispatching to a test hook when set.
+func (sc *SlotContext) getPRBase(ctx context.Context, ghClient *ghpkg.Client, prNumber int) (string, error) {
+	if sc.Hooks != nil && sc.Hooks.GetPRBaseFn != nil {
+		return sc.Hooks.GetPRBaseFn(ctx, prNumber)
+	}
+	return ghClient.GetPRBase(ctx, sc.Owner, sc.Repo, prNumber)
+}
+
+// enableAutoMerge enables auto-merge on a PR, dispatching to a test hook when set.
+func (sc *SlotContext) enableAutoMerge(ctx context.Context, ghClient *ghpkg.Client, prNumber int, method string) error {
+	if sc.Hooks != nil && sc.Hooks.EnableAutoMergeFn != nil {
+		return sc.Hooks.EnableAutoMergeFn(ctx, prNumber, method)
+	}
+	return ghClient.EnableAutoMerge(ctx, sc.Owner, sc.Repo, prNumber, method)
 }
 
 // SetupWorktree creates a git worktree for this job.
@@ -1086,10 +1104,23 @@ func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk str
 
 		// Auto-merge if configured and low-risk.
 		if sc.Deploy.AutoMerge && reviewRisk == "low-risk" {
-			if err := ghClient.EnableAutoMerge(ctx, sc.Owner, sc.Repo, int(job.PRNumber.Int64), "merge"); err == nil {
-				sc.EmitEvent("info", fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", job.PRNumber.Int64))
-			} else {
-				sc.EmitEvent("warning", fmt.Sprintf("Auto-merge failed for PR #%d: %v", job.PRNumber.Int64, err))
+			prNum := int(job.PRNumber.Int64)
+			// Verify the PR targets the deployment default branch before enabling
+			// auto-merge. A non-default base (e.g. a stacked child PR under an
+			// integration-target plan) must not be silently squashed into an
+			// in-flight parent branch on a low-risk verdict. See #611.
+			prBase, baseErr := sc.getPRBase(ctx, ghClient, prNum)
+			switch {
+			case baseErr != nil:
+				sc.EmitEvent("warning", fmt.Sprintf("Auto-merge skipped for PR #%d: could not verify base branch: %v", prNum, baseErr))
+			case prBase != sc.BaseBranch:
+				sc.EmitEvent("info", fmt.Sprintf("Auto-merge skipped for PR #%d: base branch %q is not the deployment default %q", prNum, prBase, sc.BaseBranch))
+			default:
+				if err := sc.enableAutoMerge(ctx, ghClient, prNum, "merge"); err == nil {
+					sc.EmitEvent("info", fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", prNum))
+				} else {
+					sc.EmitEvent("warning", fmt.Sprintf("Auto-merge failed for PR #%d: %v", prNum, err))
+				}
 			}
 		}
 	} else {
