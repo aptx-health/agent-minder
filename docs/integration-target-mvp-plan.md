@@ -1,5 +1,21 @@
 # Milestone: Issue-declared integration targets
 
+> **Re-baselined 2026-08-08.** This plan was written against schema v9 with the
+> migration slated as v10→v11; both PR #578 (schema v10, issue #571 provenance)
+> and #583 (`agent_runs`, schema v11) have since landed, and the `#569` Coordinator
+> extraction is merged. Every version number and sequencing note below is
+> corrected in place per `docs/research/fable-expedition/03-integration-target-domain-review.md`
+> §2, whose four re-baselining amendments are: (1) the migration is now **v11→v12**;
+> (2) drop the `#569` sequencing caution — serialize instead against whichever v12+
+> migration is in flight and against the M1-13/16 `SlotContext` supervisor edits;
+> (3) issue 2's target-column persistence must land in **both** `CreateJob` and
+> `BulkCreateJobs` (see #602, which unifies the two insert paths); (4) `Prepare`
+> writes no provenance today, so provenance completion should land before or with
+> issue 2. See that document's §§2–12 for the full domain review, adversarial
+> findings, and sequencing plan — it supersedes this plan's design and risk
+> framing wherever the two disagree; this file keeps the product narrative and
+> flow diagrams.
+
 ## Summary
 
 Add a branch-only integration-target MVP for GitHub-issue-triggered jobs.
@@ -15,7 +31,7 @@ Minder will snapshot that declaration when it creates the job, fetch the branch 
 
 Issues without this metadata retain the current default-branch behavior exactly. Proactive/cron jobs, issue/PR/commit resolvers, automatic restacking, and `gh stack` automation remain out of scope.
 
-Planning baseline: current remote `origin/main` at `bfbc705` (schema v9). PR #578 for issue #571 is adding job activation provenance as schema v10; the integration-target migration should land after it as v11. The local checkout was 32 commits behind that baseline when this plan was prepared, but had a clean worktree and a green `go test ./...`.
+Planning baseline (historical): current remote `origin/main` at `bfbc705` (schema v9), 32 commits behind at plan time. **Superseded:** PR #578 (issue #571 provenance) landed as schema v10, and `agent_runs` (#583) landed as schema v11; the integration-target migration now targets **v11→v12**, the next free slot per `internal/db/schema.go:13`. See the re-baselining note above.
 
 ## Current reactive flow
 
@@ -275,7 +291,9 @@ Proactive cron jobs do not parse or accept integration targets in this milestone
 
 ## Data model
 
-After issue #571/PR #578 lands as schema v10, add a v10→v11 additive migration on `jobs`:
+Issue #571/PR #578 (schema v10) and #583's `agent_runs` table (schema v11) have both
+landed. Add a **v11→v12** additive migration on `jobs` (next free slot per
+`internal/db/schema.go:13`):
 
 | Column | Meaning |
 |---|---|
@@ -438,8 +456,8 @@ User-visible outcome: Both unattended issue activation and `minder deploy <issue
 
 Implementation scope:
 
-- Land after issue #571/PR #578 and add the v10→v11 job migration.
-- Extend `db.Job`, inserts, reset behavior, and store update helpers.
+- Add the v11→v12 job migration (issue #571/PR #578 and #583's `agent_runs` table have already landed as v10/v11).
+- Extend `db.Job`, inserts, reset behavior, and store update helpers. Target columns must be added to **both** `CreateJob` and `BulkCreateJobs` — see #602, which unifies the two insert paths; landing persistence through only one would repeat the same gap `agent_runs`/provenance hit before (Expedition III §2.3, Expedition I C9).
 - Parse issue metadata in both `Supervisor.createJobForIssue` and `supervisor.Prepare`.
 - Add `--integration-target` with the one-explicit-issue restriction.
 - Apply and report the precedence rules.
@@ -465,7 +483,7 @@ Acceptance criteria:
 
 Tests required:
 
-- v10→v11 migration and fresh-schema tests.
+- v11→v12 migration and fresh-schema tests.
 - Watch activation with trigger provenance plus issue target.
 - Targeted `Prepare` with issue metadata.
 - CLI precedence, warning, cardinality, and malformed-input tests.
@@ -473,7 +491,7 @@ Tests required:
 
 Dependencies: milestone issue 1 and upstream issue #571/PR #578.
 
-Risks/decisions: This migration must not run concurrently with another schema task. The open coordinator extraction (#569) is not an architectural prerequisite, but `cmd/deploy.go` edits should be rebased/serialized if it lands first.
+Risks/decisions: This migration must not run concurrently with another schema task — it owns the v12 queue slot. The `#569` Coordinator extraction has landed (`internal/coordinator` exists); target parsing, persistence, resolution, and worktree setup remain below the Coordinator boundary, so no serialization against it is needed. Instead, serialize against whichever v12+ migration is in flight and against the M1-13/16 `SlotContext` split (Expedition III §2.2, §11).
 
 ### 3. Resolve canonical branch targets and gate dispatch safely
 
@@ -709,4 +727,6 @@ Verify that:
 3. Proactive jobs should be deferred because they have no issue metadata source and their integration semantics are not needed for the vertical slice.
 4. The targeted CLI override belongs in the MVP as a narrowly scoped experiment/recovery tool, restricted to exactly one issue. It is secondary to the unattended issue declaration, not a replacement for it.
 5. `db.Job` is the correct architectural seam for carrying issue-specific runtime metadata from `createJobForIssue`/`Prepare`, through dispatch, into `SlotContext` and worktree creation. Forthcoming job provenance fields identify the selected automation independently.
-6. No current design forces a larger refactor. The open Coordinator extraction may move assembly code, but target parsing, persistence, resolution, and worktree setup remain below that boundary. Serialize the migration after #571 and avoid simultaneous edits to `cmd/deploy.go` while #569 is landing.
+6. No current design forces a larger refactor. The Coordinator extraction (`#569`, landed) moved assembly code, but target parsing, persistence, resolution, and worktree setup remain below that boundary. Serialize the migration against other v12+ schema work instead, per the re-baselining note at the top of this document.
+
+See `docs/research/fable-expedition/03-integration-target-domain-review.md` for the full independent domain review, including an unresolved disagreement over whether the CLI override belongs in the MVP (§10, §12) and adversarial findings (auto-merge/parent-branch contamination, swallowed activation fetch errors, and others in §7) that this plan predates.
