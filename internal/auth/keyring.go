@@ -8,20 +8,34 @@ import (
 )
 
 const (
-	serviceName = "agent-minder"
-	accountName = "github-token"
+	serviceName       = "agent-minder"
+	accountName       = "github-token"
+	EnvGitHubToken    = "GITHUB_TOKEN"
+	EnvGitHubTokenAlt = "GH_TOKEN"
 )
 
+// EnvToken returns a GitHub token from the environment and the variable name
+// that supplied it.
+func EnvToken() (string, string) {
+	if tok := os.Getenv(EnvGitHubToken); tok != "" {
+		return tok, EnvGitHubToken
+	}
+	if tok := os.Getenv(EnvGitHubTokenAlt); tok != "" {
+		return tok, EnvGitHubTokenAlt
+	}
+	return "", ""
+}
+
 // GetToken returns the GitHub token from the environment or keyring.
-// Precedence: GITHUB_TOKEN env var > OS keyring.
+// Precedence: GITHUB_TOKEN env var > GH_TOKEN env var > OS keyring.
 func GetToken() (string, error) {
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+	if tok, _ := EnvToken(); tok != "" {
 		return tok, nil
 	}
 
 	tok, err := keyring.Get(serviceName, accountName)
 	if err != nil {
-		return "", fmt.Errorf("no GITHUB_TOKEN in env or keyring: %w", err)
+		return "", fmt.Errorf("no GITHUB_TOKEN or GH_TOKEN in env or keyring: %w", err)
 	}
 	return tok, nil
 }
