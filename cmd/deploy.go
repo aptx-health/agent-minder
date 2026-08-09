@@ -95,6 +95,10 @@ func init() {
 }
 
 func runDeploy(cmd *cobra.Command, args []string) error {
+	if err := validateServeAPIKey(flagServe, flagAPIKey); err != nil {
+		return err
+	}
+
 	// If this is a daemon re-exec, run the daemon directly.
 	if flagDaemon && flagDeployID != "" {
 		if flagRuntime != "" {
@@ -298,6 +302,13 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nCheck status: minder status %s\n", deployID)
 	fmt.Printf("Stop: minder stop %s\n", deployID)
 
+	return nil
+}
+
+func validateServeAPIKey(serveAddr, apiKey string) error {
+	if serveAddr != "" && strings.TrimSpace(apiKey) == "" {
+		return fmt.Errorf("--api-key is required when --serve is set")
+	}
 	return nil
 }
 

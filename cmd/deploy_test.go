@@ -3,12 +3,45 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/db"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 )
+
+func TestValidateServeAPIKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		serveAddr string
+		apiKey    string
+		wantErr   bool
+	}{
+		{name: "serve requires api key", serveAddr: ":7749", wantErr: true},
+		{name: "serve rejects blank api key", serveAddr: ":7749", apiKey: " \t", wantErr: true},
+		{name: "serve accepts api key", serveAddr: ":7749", apiKey: "secret"},
+		{name: "no serve allows no api key"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateServeAPIKey(tt.serveAddr, tt.apiKey)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if !strings.Contains(err.Error(), "--api-key is required") {
+					t.Fatalf("error = %q, want --api-key requirement", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
+	}
+}
 
 const automationTestConfig = `jobs:
   nightly-maintenance:

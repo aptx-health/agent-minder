@@ -74,6 +74,10 @@ func NewServer(cfg ServerConfig) *Server {
 
 // ListenAndServe starts the server.
 func (s *Server) ListenAndServe(addr string) error {
+	if s.apiKey == "" {
+		return fmt.Errorf("api key required")
+	}
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", addr, err)
@@ -98,11 +102,9 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.apiKey != "" {
-			if !constantTimeEqual(r.Header.Get("X-API-Key"), s.apiKey) {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-				return
-			}
+		if s.apiKey == "" || !constantTimeEqual(r.Header.Get("X-API-Key"), s.apiKey) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
 		}
 
 		next.ServeHTTP(w, r)
