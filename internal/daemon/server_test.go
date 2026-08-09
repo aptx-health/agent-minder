@@ -14,6 +14,8 @@ import (
 	"github.com/aptx-health/agent-minder/internal/db"
 )
 
+const testAPIKey = "test-api-key"
+
 func testServer(t *testing.T) (*Server, *db.Store) {
 	t.Helper()
 	dir := t.TempDir()
@@ -47,6 +49,7 @@ func testServer(t *testing.T) (*Server, *db.Store) {
 	srv := NewServer(ServerConfig{
 		Store:    store,
 		DeployID: "test-deploy",
+		APIKey:   testAPIKey,
 	})
 	return srv, store
 }
@@ -54,6 +57,9 @@ func testServer(t *testing.T) (*Server, *db.Store) {
 func doRequest(t *testing.T, srv *Server, method, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, nil)
+	if srv.apiKey != "" {
+		req.Header.Set("X-API-Key", srv.apiKey)
+	}
 	rr := httptest.NewRecorder()
 	srv.middleware(srv.mux).ServeHTTP(rr, req)
 	return rr
@@ -373,8 +379,8 @@ func TestHandleJob_CrossDeploymentScoping(t *testing.T) {
 		t.Fatalf("CreateJob(b): %v", err)
 	}
 
-	srvA := NewServer(ServerConfig{Store: store, DeployID: "deploy-a"})
-	srvB := NewServer(ServerConfig{Store: store, DeployID: "deploy-b"})
+	srvA := NewServer(ServerConfig{Store: store, DeployID: "deploy-a", APIKey: testAPIKey})
+	srvB := NewServer(ServerConfig{Store: store, DeployID: "deploy-b", APIKey: testAPIKey})
 
 	// Each server can see its own job.
 	rr := doRequest(t, srvA, "GET", fmt.Sprintf("/jobs/%d", jobA.ID))
@@ -633,13 +639,15 @@ func TestAPIKeyMiddleware(t *testing.T) {
 	})
 
 	// No key → 401.
-	rr := doRequest(t, srv, "GET", "/status")
+	req := httptest.NewRequest("GET", "/status", nil)
+	rr := httptest.NewRecorder()
+	srv.middleware(srv.mux).ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without key, got %d", rr.Code)
 	}
 
 	// Wrong key → 401.
-	req := httptest.NewRequest("GET", "/status", nil)
+	req = httptest.NewRequest("GET", "/status", nil)
 	req.Header.Set("X-API-Key", "wrong-key")
 	rr = httptest.NewRecorder()
 	srv.middleware(srv.mux).ServeHTTP(rr, req)
@@ -654,6 +662,28 @@ func TestAPIKeyMiddleware(t *testing.T) {
 	srv.middleware(srv.mux).ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 with correct key, got %d", rr.Code)
+	}
+}
+
+func TestAPIKeyMiddlewareRejectsUnconfiguredServer(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.apiKey = ""
+
+	rr := doRequest(t, srv, "GET", "/status")
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when API key is not configured, got %d", rr.Code)
+	}
+}
+
+func TestListenAndServeRequiresAPIKey(t *testing.T) {
+	srv := NewServer(ServerConfig{})
+
+	err := srv.ListenAndServe("127.0.0.1:0")
+	if err == nil {
+		t.Fatal("expected ListenAndServe to reject a missing API key")
+	}
+	if err.Error() != "api key required" {
+		t.Fatalf("ListenAndServe error = %q, want %q", err.Error(), "api key required")
 	}
 }
 
