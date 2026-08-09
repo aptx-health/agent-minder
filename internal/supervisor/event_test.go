@@ -66,9 +66,17 @@ func TestEventEmitSitesUseRegisteredTypes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
+		emitPatterns := []string{
+			`emitEvent("`, `EmitEvent("`,
+			`emitDurableEvent("`, `emitDurableEventRun("`,
+			`EmitDurable("`, `EmitDurableWith("`,
+			`buildEnvelope("`,
+		}
 		for i, line := range strings.Split(string(source), "\n") {
-			if strings.Contains(line, `emitEvent("`) || strings.Contains(line, `EmitEvent("`) {
-				t.Errorf("%s:%d: emit site passes a raw string literal; use an EventType constant from event.go", name, i+1)
+			for _, pattern := range emitPatterns {
+				if strings.Contains(line, pattern) {
+					t.Errorf("%s:%d: emit site passes a raw string literal; use an EventType constant from event.go", name, i+1)
+				}
 			}
 		}
 	}

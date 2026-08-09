@@ -2,15 +2,18 @@
 package db
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/aptx-health/agent-minder/internal/sqliteutil"
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -201,6 +204,37 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_runs_job ON agent_runs(job_id);
+
+CREATE TABLE IF NOT EXISTS events (
+	-- AUTOINCREMENT is load-bearing (Expedition IV ID-1/V-6): without it,
+	-- retention deletion releases the newest-free rowids back into circulation
+	-- and a reused id silently corrupts every client holding the old cursor.
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	time DATETIME NOT NULL,
+
+	-- Identity scoping (R-9): replay filters by deployment; job_id/run_id are 0
+	-- when the event is not attributable, so no FK constraints here.
+	deployment_id TEXT NOT NULL,
+	job_id INTEGER NOT NULL DEFAULT 0,
+	run_id INTEGER NOT NULL DEFAULT 0,
+
+	type TEXT NOT NULL,
+	severity TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	data TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_deployment ON events(deployment_id, id);
+
+-- Single-row metadata beside the event log: the log epoch (Expedition IV ID-2,
+-- rotated only when history is destroyed) and the durable retention floor
+-- (R-7: resume at or below truncated_through gets a typed refusal).
+CREATE TABLE IF NOT EXISTS event_log_meta (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	epoch TEXT NOT NULL,
+	truncated_through INTEGER NOT NULL DEFAULT 0,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 `
 
 // migrateV11toV12 persists the deployment-level activation policy
@@ -430,6 +464,33 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_job ON agent_runs(job_id);
 UPDATE schema_version SET version = 11;
 `
 
+// migrateV12toV13 adds the durable event log (Expedition IV): the events table
+// appended in the same transaction as the state change it describes
+// (store-first, R-1), plus event_log_meta holding the log epoch and retention
+// floor. Additive — existing rows are untouched. The epoch value itself is
+// bootstrapped in Go (ensureEventLogMeta) because SQL cannot generate it.
+const migrateV12toV13 = `
+CREATE TABLE IF NOT EXISTS events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	time DATETIME NOT NULL,
+	deployment_id TEXT NOT NULL,
+	job_id INTEGER NOT NULL DEFAULT 0,
+	run_id INTEGER NOT NULL DEFAULT 0,
+	type TEXT NOT NULL,
+	severity TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	data TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_deployment ON events(deployment_id, id);
+CREATE TABLE IF NOT EXISTS event_log_meta (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	epoch TEXT NOT NULL,
+	truncated_through INTEGER NOT NULL DEFAULT 0,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+UPDATE schema_version SET version = 13;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -531,6 +592,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 				return nil, fmt.Errorf("migrating v11→v12: %w", err)
 			}
 		}
+		if version < 13 {
+			if _, err := db.Exec(migrateV12toV13); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v12→v13: %w", err)
+			}
+		}
 	} else if !hasVersion {
 		// Fresh database — apply schema from scratch.
 		if _, err := db.Exec(schema); err != nil {
@@ -540,7 +607,51 @@ func Open(dsn string) (*sqlx.DB, error) {
 		_, _ = db.Exec("INSERT INTO schema_version (version) VALUES (?)", schemaVersion)
 	}
 
+	if err := ensureEventLogMeta(db, dsn); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initializing event log metadata: %w", err)
+	}
+
 	return db, nil
+}
+
+// ensureEventLogMeta bootstraps the event log epoch (Expedition IV ID-2) and
+// handles the WAL-recovery interaction (F6): sqliteutil's recovery deletes the
+// -wal file, which can discard committed-but-uncheckpointed transactions —
+// including the tail of the durable event log. Recovery leaves a marker file;
+// consuming it here rotates the epoch so clients discard their cursors and
+// resync from a snapshot. Rotation is deliberately conservative: recovery that
+// happened to lose nothing still rotates, which only costs one resync.
+func ensureEventLogMeta(db *sqlx.DB, dbPath string) error {
+	epoch, err := newLogEpoch()
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(
+		"INSERT INTO event_log_meta (id, epoch) VALUES (1, ?) ON CONFLICT(id) DO NOTHING", epoch,
+	); err != nil {
+		return err
+	}
+
+	if sqliteutil.ConsumeRecoveryMarker(dbPath) {
+		rotated, err := newLogEpoch()
+		if err != nil {
+			return err
+		}
+		if _, err := db.Exec("UPDATE event_log_meta SET epoch = ? WHERE id = 1", rotated); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// newLogEpoch generates a random identifier for one continuous event history.
+func newLogEpoch() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generating log epoch: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // expandHome expands ~ to the user's home directory.
