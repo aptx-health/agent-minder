@@ -133,6 +133,64 @@ func TestJobCRUD(t *testing.T) {
 	}
 }
 
+// TestBulkCreateJobs_ColumnParity guards against BulkCreateJobs and CreateJob
+// drifting apart on which columns they persist (issue #602): both must write
+// max_turns/max_budget_usd and the source_type/source_name/source_ref
+// provenance columns identically.
+func TestBulkCreateJobs_ColumnParity(t *testing.T) {
+	s := testStore(t)
+
+	d := &Deployment{
+		ID: "deploy-bulk", RepoDir: "/tmp", Owner: "o", Repo: "r",
+		Mode: "issues", MaxAgents: 3, MaxTurns: 50, MaxBudgetUSD: 5,
+		AnalyzerModel: "sonnet", SkipLabel: "no-agent", TotalBudgetUSD: 25,
+		BaseBranch: "main", ReviewEnabled: true,
+	}
+	if err := s.CreateDeployment(d); err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+
+	j := &Job{
+		DeploymentID: "deploy-bulk",
+		Agent:        "autopilot",
+		Name:         "issue-77",
+		IssueNumber:  77,
+		Owner:        "o", Repo: "r", Status: StatusQueued,
+		MaxTurns:    sql.NullInt64{Int64: 9, Valid: true},
+		MaxBudgetOv: sql.NullFloat64{Float64: 1.5, Valid: true},
+		SourceType:  sql.NullString{String: "explicit", Valid: true},
+		SourceName:  sql.NullString{String: "issue-77", Valid: true},
+		SourceRef:   sql.NullString{String: "cli-deploy", Valid: true},
+	}
+	if err := s.BulkCreateJobs([]*Job{j}); err != nil {
+		t.Fatalf("BulkCreateJobs: %v", err)
+	}
+
+	jobs, err := s.GetJobs("deploy-bulk")
+	if err != nil {
+		t.Fatalf("GetJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+	got := jobs[0]
+	if !got.MaxTurns.Valid || got.MaxTurns.Int64 != 9 {
+		t.Errorf("max_turns = %v, want 9", got.MaxTurns)
+	}
+	if !got.MaxBudgetOv.Valid || got.MaxBudgetOv.Float64 != 1.5 {
+		t.Errorf("max_budget_usd = %v, want 1.5", got.MaxBudgetOv)
+	}
+	if !got.SourceType.Valid || got.SourceType.String != "explicit" {
+		t.Errorf("source_type = %v, want explicit", got.SourceType)
+	}
+	if !got.SourceName.Valid || got.SourceName.String != "issue-77" {
+		t.Errorf("source_name = %v, want issue-77", got.SourceName)
+	}
+	if !got.SourceRef.Valid || got.SourceRef.String != "cli-deploy" {
+		t.Errorf("source_ref = %v, want cli-deploy", got.SourceRef)
+	}
+}
+
 func TestQueuedUnblockedJobs(t *testing.T) {
 	s := testStore(t)
 

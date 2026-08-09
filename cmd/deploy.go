@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/signal"
@@ -242,6 +243,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			Owner:        owner,
 			Repo:         repo,
 			Status:       db.StatusQueued,
+			SourceType:   sql.NullString{String: "explicit", Valid: true},
 		}
 		if err := store.CreateJob(j); err != nil {
 			_ = store.Close()
