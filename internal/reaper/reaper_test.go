@@ -168,6 +168,10 @@ func TestSweepEmptyPath(t *testing.T) {
 // Smoke: snapshotMeta should populate command + ppid for a known live PID.
 func TestSnapshotMetaSelf(t *testing.T) {
 	pid := os.Getpid()
+	if _, err := exec.Command("ps", "-p", strconv.Itoa(pid)).Output(); err != nil {
+		t.Skipf("ps unavailable for process inspection: %v", err)
+	}
+
 	meta := snapshotMeta([]int{pid})
 	m, ok := meta[pid]
 	if !ok {

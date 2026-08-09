@@ -121,7 +121,7 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
-			if n := s.createJobForIssue(ctx, ghClient, issue, route); n > 0 {
+			if n := s.createJobForIssue(ctx, ghClient, issue, route, "watch"); n > 0 {
 				knownJobs[issueAgent{issue.Number, route.Agent}] = true
 				discovered += n
 			}
@@ -146,7 +146,7 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
-			if n := s.createJobForIssue(ctx, ghClient, issue, route); n > 0 {
+			if n := s.createJobForIssue(ctx, ghClient, issue, route, "trigger"); n > 0 {
 				knownJobs[issueAgent{issue.Number, route.Agent}] = true
 				discovered += n
 			}
@@ -238,9 +238,17 @@ func hasAllLabels(issueLabels []string, required []string) bool {
 	return len(required) > 0
 }
 
-// createJobForIssue fetches issue content and inserts a job row.
-func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Client, issue ghpkg.ItemStatus, route TriggerRoute) int {
-	content, _ := ghClient.FetchItemContent(ctx, s.owner, s.repo, issue.Number, "issue")
+// createJobForIssue fetches issue content and inserts a job row. sourceType
+// records how the issue was discovered: "trigger" for a jobs.yaml label→agent
+// route match, "watch" for a --watch filter discovery.
+func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Client, issue ghpkg.ItemStatus, route TriggerRoute, sourceType string) int {
+	content, err := ghClient.FetchItemContent(ctx, s.owner, s.repo, issue.Number, "issue")
+	if err != nil {
+		// Don't create a job with an empty body on a transient fetch error;
+		// knownJobs only records created jobs, so the next watch poll retries.
+		s.emitEvent("warn", fmt.Sprintf("Skipping #%d: fetch issue content failed: %v", issue.Number, err), 0)
+		return 0
+	}
 	body := ""
 	if content != nil {
 		body = content.Body
@@ -248,6 +256,15 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 	agent := route.Agent
 	if agent == "" {
 		agent = "autopilot"
+	}
+
+	// A --watch discovery may still resolve to a named trigger route (a more
+	// specific label match); keep the source_name/source_ref pointing at that
+	// route in that case, otherwise fall back to the watch filter itself.
+	sourceName := route.Name
+	sourceRef := route.FilterString()
+	if sourceType == "watch" && route.Name == "" {
+		sourceRef = s.deploy.WatchFilter.String
 	}
 
 	j := &db.Job{
@@ -264,9 +281,9 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 		Owner:        s.owner,
 		Repo:         s.repo,
 		Status:       db.StatusQueued,
-		SourceType:   sql.NullString{String: "trigger", Valid: true},
-		SourceName:   sql.NullString{String: route.Name, Valid: route.Name != ""},
-		SourceRef:    sql.NullString{String: route.FilterString(), Valid: route.Name != ""},
+		SourceType:   sql.NullString{String: sourceType, Valid: sourceType != ""},
+		SourceName:   sql.NullString{String: sourceName, Valid: sourceName != ""},
+		SourceRef:    sql.NullString{String: sourceRef, Valid: sourceRef != ""},
 	}
 
 	if err := s.store.CreateJob(j); err != nil {
