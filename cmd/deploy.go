@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/signal"
@@ -144,12 +145,12 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 
 	ghToken, err := auth.GetToken()
 	if err != nil {
-		return fmt.Errorf("GITHUB_TOKEN required: set via env or run 'minder auth login'\n  %w", err)
+		return fmt.Errorf("GITHUB_TOKEN or GH_TOKEN required: set via env or run 'minder auth login'\n  %w", err)
 	}
 
 	// Ensure token is in env for daemon re-exec and agent subprocesses.
-	if os.Getenv("GITHUB_TOKEN") == "" {
-		_ = os.Setenv("GITHUB_TOKEN", ghToken)
+	if os.Getenv(auth.EnvGitHubToken) == "" {
+		_ = os.Setenv(auth.EnvGitHubToken, ghToken)
 	}
 
 	// Auto-detect base branch if not specified.
@@ -242,6 +243,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 			Owner:        owner,
 			Repo:         repo,
 			Status:       db.StatusQueued,
+			SourceType:   sql.NullString{String: "explicit", Valid: true},
 		}
 		if err := store.CreateJob(j); err != nil {
 			_ = store.Close()

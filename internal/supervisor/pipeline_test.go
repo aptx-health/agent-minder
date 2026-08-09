@@ -257,6 +257,110 @@ func strContains(s, sub string) bool {
 
 // --- Test cases ---
 
+// TestBranchCollisionBlocksSecondJob verifies that when two jobs on the same
+// issue (different agents) derive the same branch, the second job is blocked
+// rather than destroying the first job's active worktree. Covers A-4: a sibling
+// in "review" status holds the claim because its open PR is backed by the branch.
+func TestBranchCollisionBlocksSecondJob(t *testing.T) {
+	tests := []struct {
+		name          string
+		siblingStatus string
+	}{
+		{"running sibling", db.StatusRunning},
+		{"review sibling (A-4)", db.StatusReview},
+		{"reviewed sibling (A-4)", db.StatusReviewed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+
+			// Sibling job on issue 42 (spike agent) already active and owning the branch.
+			sibling := testJob(t, h.store, h.deploy, func(j *db.Job) {
+				j.Agent = "spike"
+				j.Name = "spike-issue-42"
+				j.IssueNumber = 42
+			})
+			if err := h.store.UpdateJobWorktree(sibling.ID, "/tmp/wt-sibling", "agent/issue-42"); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.store.UpdateJobStatus(sibling.ID, tc.siblingStatus); err != nil {
+				t.Fatal(err)
+			}
+
+			// Second job on the same issue with a different agent derives the same branch.
+			second := testJob(t, h.store, h.deploy, func(j *db.Job) {
+				j.Agent = "autopilot"
+				j.Name = "autopilot-issue-42"
+				j.IssueNumber = 42
+			})
+
+			var setupCalled bool
+			h.hooks.SetupWorktreeFn = func() error {
+				setupCalled = true
+				return nil
+			}
+
+			contract := &AgentContract{Name: "autopilot", Output: "pr"}
+			err := h.run(context.Background(), second, contract)
+			if err == nil {
+				t.Fatal("expected second job to be blocked, got nil error")
+			}
+			if setupCalled {
+				t.Error("SetupWorktree was called — active worktree may have been destroyed")
+			}
+
+			got, err := h.store.GetJob(second.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != db.StatusBailed {
+				t.Errorf("second job status = %q, want %q", got.Status, db.StatusBailed)
+			}
+			if got.FailureReason.String != "branch_in_use" {
+				t.Errorf("failure_reason = %q, want branch_in_use", got.FailureReason.String)
+			}
+
+			// Sibling must be untouched.
+			sib, err := h.store.GetJob(sibling.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sib.Branch.String != "agent/issue-42" {
+				t.Errorf("sibling branch = %q, want agent/issue-42 (untouched)", sib.Branch.String)
+			}
+			if sib.Status != tc.siblingStatus {
+				t.Errorf("sibling status = %q, want %q (untouched)", sib.Status, tc.siblingStatus)
+			}
+		})
+	}
+}
+
+// TestBranchClaimReleasedWhenSiblingTerminal verifies that a terminal sibling
+// (done/bailed) does not hold the branch claim, so a new job may proceed.
+func TestBranchClaimReleasedWhenSiblingTerminal(t *testing.T) {
+	h := newHarness(t)
+
+	sibling := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Agent = "spike"
+		j.Name = "spike-issue-42"
+		j.IssueNumber = 42
+	})
+	if err := h.store.UpdateJobWorktree(sibling.ID, "/tmp/wt-sibling", "agent/issue-42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.UpdateJobStatus(sibling.ID, db.StatusDone); err != nil {
+		t.Fatal(err)
+	}
+
+	owner, err := h.store.ActiveJobOwningBranch(h.deploy.Owner, h.deploy.Repo, "agent/issue-42", 999)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner != nil {
+		t.Errorf("terminal sibling should not hold branch claim, got job #%d", owner.ID)
+	}
+}
+
 // TestPipeline_CodeThenReview verifies the happy path: code stage succeeds,
 // PR detected, review stage fires and completes.
 // This is the exact scenario that failed in production (issue #437 context):
@@ -1022,6 +1126,98 @@ func TestPipeline_StageNamedReviewWithNonReviewerAgent(t *testing.T) {
 	defer h.mu.Unlock()
 	if len(callOrder) != 2 || callOrder[0] != "quality-check" || callOrder[1] != "reviewer" {
 		t.Errorf("expected sequential execution [quality-check, reviewer], got %v", callOrder)
+	}
+}
+
+// TestPipeline_AutoMergeSkippedForNonDefaultBase verifies that a low-risk PR
+// whose base branch is not the deployment default does NOT get auto-merge
+// enabled. Enabling it would silently squash a stacked child PR into an
+// in-flight parent branch. See #611.
+func TestPipeline_AutoMergeSkippedForNonDefaultBase(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = true
+		d.AutoMerge = true
+		d.BaseBranch = "main"
+	})
+
+	h.hooks.DetectPRFn = func(ctx context.Context) int { return 100 }
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{Risk: "low-risk", Summary: "Clean"}
+	}
+	// PR targets a non-default base branch.
+	h.hooks.GetPRBaseFn = func(ctx context.Context, prNumber int) (string, error) {
+		return "agent/issue-99", nil
+	}
+	var autoMergeCalled bool
+	h.hooks.EnableAutoMergeFn = func(ctx context.Context, prNumber int, method string) error {
+		autoMergeCalled = true
+		return nil
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 611
+		j.Name = "issue-611"
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if autoMergeCalled {
+		t.Error("auto-merge was enabled for a PR with a non-default base branch")
+	}
+	if !hasEvent(h.events(), "info", "Auto-merge skipped for PR #100") {
+		t.Error("expected an info event noting auto-merge was skipped")
+	}
+}
+
+// TestPipeline_AutoMergeEnabledForDefaultBase verifies default-base behavior is
+// unchanged: a low-risk PR targeting the deployment default gets auto-merge
+// enabled (which waits for CI to pass). See #611.
+func TestPipeline_AutoMergeEnabledForDefaultBase(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = true
+		d.AutoMerge = true
+		d.BaseBranch = "main"
+	})
+
+	h.hooks.DetectPRFn = func(ctx context.Context) int { return 100 }
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{Risk: "low-risk", Summary: "Clean"}
+	}
+	h.hooks.GetPRBaseFn = func(ctx context.Context, prNumber int) (string, error) {
+		return "main", nil
+	}
+	var autoMergeCalled bool
+	h.hooks.EnableAutoMergeFn = func(ctx context.Context, prNumber int, method string) error {
+		autoMergeCalled = true
+		return nil
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 611
+		j.Name = "issue-611-default"
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !autoMergeCalled {
+		t.Error("auto-merge was not enabled for a low-risk PR on the default base")
+	}
+	if !hasEvent(h.events(), "info", "Auto-merge enabled for PR #100") {
+		t.Error("expected an info event noting auto-merge was enabled")
 	}
 }
 

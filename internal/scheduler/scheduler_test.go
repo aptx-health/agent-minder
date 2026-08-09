@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -91,6 +92,56 @@ jobs:
 	}
 }
 
+func TestSyncSchedulesConvertScheduleToTrigger(t *testing.T) {
+	store := testStore(t)
+	_ = testDeployment(t, store)
+
+	// First sync: the job is cron-scheduled, so a cron row is created enabled.
+	cfg, err := ParseConfig([]byte(`
+jobs:
+  triage:
+    schedule: "0 9 * * 1"
+    agent: autopilot
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	s := New(store, "test-sched", "acme", "widgets", cfg)
+	if err := s.SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules: %v", err)
+	}
+	sched, err := store.GetSchedule("test-sched", "triage")
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	if !sched.Enabled {
+		t.Fatalf("triage should be enabled after initial sync")
+	}
+
+	// Convert the same name in place from schedule: to trigger:.
+	cfg2, err := ParseConfig([]byte(`
+jobs:
+  triage:
+    trigger: "label:bug"
+    agent: autopilot
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	s2 := New(store, "test-sched", "acme", "widgets", cfg2)
+	if err := s2.SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules (converted): %v", err)
+	}
+
+	sched, err = store.GetSchedule("test-sched", "triage")
+	if err != nil {
+		t.Fatalf("GetSchedule after convert: %v", err)
+	}
+	if sched.Enabled {
+		t.Errorf("triage cron row should be disabled after conversion to trigger")
+	}
+}
+
 func TestFireSchedule(t *testing.T) {
 	store := testStore(t)
 	_ = testDeployment(t, store)
@@ -130,6 +181,15 @@ jobs:
 	}
 	if !jobs[0].Model.Valid || jobs[0].Model.String != "gpt-5" {
 		t.Errorf("model = %v, want gpt-5", jobs[0].Model)
+	}
+	if !jobs[0].SourceType.Valid || jobs[0].SourceType.String != "cron" {
+		t.Errorf("source_type = %v, want cron", jobs[0].SourceType)
+	}
+	if !jobs[0].SourceName.Valid || jobs[0].SourceName.String != "test-job" {
+		t.Errorf("source_name = %v, want test-job", jobs[0].SourceName)
+	}
+	if !jobs[0].SourceRef.Valid || jobs[0].SourceRef.String == "" {
+		t.Errorf("source_ref = %v, want non-empty fire time", jobs[0].SourceRef)
 	}
 
 	// Verify schedule was updated.
@@ -183,6 +243,12 @@ jobs:
 	if !jobs[0].Model.Valid || jobs[0].Model.String != "gpt-5" {
 		t.Errorf("model = %v, want gpt-5", jobs[0].Model)
 	}
+	if !jobs[0].SourceType.Valid || jobs[0].SourceType.String != "cron" {
+		t.Errorf("source_type = %v, want cron", jobs[0].SourceType)
+	}
+	if !jobs[0].SourceName.Valid || jobs[0].SourceName.String != "manual-test" {
+		t.Errorf("source_name = %v, want manual-test", jobs[0].SourceName)
+	}
 
 	// Non-existent schedule.
 	_, err = s.RunOnce("nonexistent")
@@ -209,16 +275,20 @@ jobs:
 		t.Error("should not be active with no jobs")
 	}
 
-	// Create a queued job matching the pattern.
+	// Create a queued job whose name does NOT follow the schedule-name prefix
+	// convention at all, proving dedup no longer relies on name matching —
+	// only on source_type='cron'/source_name=<schedule> provenance.
 	_ = store.CreateJob(&db.Job{
 		DeploymentID: "test-sched",
 		Agent:        "autopilot",
-		Name:         "active-test-20260402-0900",
+		Name:         "totally-unrelated-job-name",
 		Owner:        "acme", Repo: "widgets",
-		Status: db.StatusQueued,
+		Status:     db.StatusQueued,
+		SourceType: sql.NullString{String: "cron", Valid: true},
+		SourceName: sql.NullString{String: "active-test", Valid: true},
 	})
 
 	if !s.jobAlreadyActive("active-test") {
-		t.Error("should be active with queued job")
+		t.Error("should be active with queued job matching provenance, regardless of job name")
 	}
 }

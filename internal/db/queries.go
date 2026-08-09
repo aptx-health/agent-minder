@@ -76,14 +76,26 @@ func (s *Store) UpdateDeploymentCarriedCost(id string, cost float64) error {
 
 // --- Job CRUD ---
 
+// jobInsertColumns lists the columns shared by CreateJob and BulkCreateJobs,
+// so a new job field only has to be added to one INSERT statement shape.
+const jobInsertColumns = `deployment_id, agent, name, runtime, model, max_turns, max_budget_usd,
+	issue_number, issue_title, issue_body, owner, repo, status, dependencies, stages_json,
+	source_type, source_name, source_ref`
+
+// jobInsertArgs returns the bind args matching jobInsertColumns, in order.
+func jobInsertArgs(j *Job) []interface{} {
+	return []interface{}{
+		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.MaxTurns, j.MaxBudgetOv,
+		j.IssueNumber, j.IssueTitle, j.IssueBody, j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON,
+		j.SourceType, j.SourceName, j.SourceRef,
+	}
+}
+
 // CreateJob inserts a new job.
 func (s *Store) CreateJob(j *Job) error {
-	res, err := s.db.Exec(`INSERT INTO jobs
-		(deployment_id, agent, name, runtime, model, max_turns, max_budget_usd, issue_number, issue_title, issue_body,
-		 owner, repo, status, dependencies, stages_json, source_type, source_name, source_ref)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.MaxTurns, j.MaxBudgetOv, j.IssueNumber, j.IssueTitle, j.IssueBody,
-		j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON, j.SourceType, j.SourceName, j.SourceRef)
+	res, err := s.db.Exec(fmt.Sprintf(`INSERT INTO jobs (%s)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobInsertColumns),
+		jobInsertArgs(j)...)
 	if err != nil {
 		return err
 	}
@@ -92,15 +104,14 @@ func (s *Store) CreateJob(j *Job) error {
 	return nil
 }
 
-// BulkCreateJobs inserts multiple jobs, ignoring duplicates.
+// BulkCreateJobs inserts multiple jobs, ignoring duplicates. Shares the same
+// column set as CreateJob so job fields never silently diverge between the
+// two insert paths.
 func (s *Store) BulkCreateJobs(jobs []*Job) error {
 	for _, j := range jobs {
-		_, err := s.db.Exec(`INSERT OR IGNORE INTO jobs
-			(deployment_id, agent, name, runtime, model, issue_number, issue_title, issue_body,
-			 owner, repo, status, dependencies, stages_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.IssueNumber, j.IssueTitle, j.IssueBody,
-			j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON)
+		_, err := s.db.Exec(fmt.Sprintf(`INSERT OR IGNORE INTO jobs (%s)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobInsertColumns),
+			jobInsertArgs(j)...)
 		if err != nil {
 			return err
 		}
@@ -115,6 +126,20 @@ func (s *Store) GetJobs(deploymentID string) ([]*Job, error) {
 	return jobs, err
 }
 
+// CountActiveJobsBySource returns the number of jobs for a deployment with the
+// given source_type/source_name provenance whose status is queued, running,
+// blocked, or reviewing. Used for scheduler dedup instead of name-prefix
+// matching.
+func (s *Store) CountActiveJobsBySource(deploymentID, sourceType, sourceName string) (int, error) {
+	var count int
+	err := s.db.Get(&count, `SELECT COUNT(*) FROM jobs
+		WHERE deployment_id = ? AND source_type = ? AND source_name = ?
+		AND status IN (?, ?, ?, ?)`,
+		deploymentID, sourceType, sourceName,
+		StatusQueued, StatusRunning, StatusBlocked, StatusReviewing)
+	return count, err
+}
+
 // GetJobsByRepo returns all jobs for a given owner/repo across all deployments,
 // most recent first.
 func (s *Store) GetJobsByRepo(owner, repo string) ([]*Job, error) {
@@ -122,6 +147,43 @@ func (s *Store) GetJobsByRepo(owner, repo string) ([]*Job, error) {
 	err := s.db.Select(&jobs,
 		"SELECT * FROM jobs WHERE owner = ? AND repo = ? ORDER BY id DESC", owner, repo)
 	return jobs, err
+}
+
+// activeBranchClaimStatuses are the job statuses that hold a live claim on a
+// branch and its worktree. Running jobs have in-flight working state; jobs in
+// review/reviewing/reviewed have an open PR backed by the branch (A-4); waiting
+// and manual jobs are paused mid-lifecycle and expect their worktree intact.
+// A second job deriving the same branch must not destroy any of these.
+var activeBranchClaimStatuses = []string{
+	StatusRunning, StatusReview, StatusReviewing, StatusReviewed, StatusWaiting, StatusManual,
+}
+
+// ActiveJobOwningBranch returns the first non-terminal job in the same
+// owner/repo that owns the given branch, excluding excludeID. It returns
+// (nil, nil) when the branch is unclaimed. Callers use this to block a second
+// job from destroying an active job's worktree on a branch collision.
+func (s *Store) ActiveJobOwningBranch(owner, repo, branch string, excludeID int64) (*Job, error) {
+	if branch == "" {
+		return nil, nil
+	}
+	placeholders := make([]string, len(activeBranchClaimStatuses))
+	args := []interface{}{owner, repo, branch, excludeID}
+	for i, st := range activeBranchClaimStatuses {
+		placeholders[i] = "?"
+		args = append(args, st)
+	}
+	query := fmt.Sprintf(`SELECT * FROM jobs
+		WHERE owner = ? AND repo = ? AND branch = ? AND id != ?
+		AND status IN (%s) ORDER BY id LIMIT 1`, strings.Join(placeholders, ","))
+	var j Job
+	err := s.db.Get(&j, query, args...)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
 }
 
 // GetJob returns a single job by ID.

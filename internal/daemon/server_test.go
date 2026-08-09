@@ -316,6 +316,100 @@ func TestHandleTaskByID(t *testing.T) {
 	}
 }
 
+func TestHandleJob_CrossDeploymentScoping(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	conn, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	store := db.NewStore(conn)
+
+	for _, id := range []string{"deploy-a", "deploy-b"} {
+		deploy := &db.Deployment{
+			ID:      id,
+			RepoDir: "/tmp/repo",
+			Owner:   "acme",
+			Repo:    "widgets",
+			Mode:    "issues",
+		}
+		if err := store.CreateDeployment(deploy); err != nil {
+			t.Fatalf("CreateDeployment(%s): %v", id, err)
+		}
+	}
+
+	logFile := filepath.Join(t.TempDir(), "agent.log")
+	if err := os.WriteFile(logFile, []byte("secret log\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	jobA := &db.Job{
+		DeploymentID: "deploy-a",
+		Agent:        "autopilot",
+		Name:         "issue-1",
+		IssueNumber:  1,
+		Owner:        "acme",
+		Repo:         "widgets",
+		Status:       db.StatusQueued,
+	}
+	if err := store.CreateJob(jobA); err != nil {
+		t.Fatalf("CreateJob(a): %v", err)
+	}
+	if _, err := store.DB().Exec("UPDATE jobs SET agent_log = ? WHERE id = ?", logFile, jobA.ID); err != nil {
+		t.Fatalf("set agent_log: %v", err)
+	}
+
+	jobB := &db.Job{
+		DeploymentID: "deploy-b",
+		Agent:        "autopilot",
+		Name:         "issue-2",
+		IssueNumber:  2,
+		Owner:        "acme",
+		Repo:         "widgets",
+		Status:       db.StatusQueued,
+	}
+	if err := store.CreateJob(jobB); err != nil {
+		t.Fatalf("CreateJob(b): %v", err)
+	}
+
+	srvA := NewServer(ServerConfig{Store: store, DeployID: "deploy-a"})
+	srvB := NewServer(ServerConfig{Store: store, DeployID: "deploy-b"})
+
+	// Each server can see its own job.
+	rr := doRequest(t, srvA, "GET", fmt.Sprintf("/jobs/%d", jobA.ID))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("srvA own job: expected 200, got %d", rr.Code)
+	}
+	rr = doRequest(t, srvB, "GET", fmt.Sprintf("/jobs/%d", jobB.ID))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("srvB own job: expected 200, got %d", rr.Code)
+	}
+
+	// Neither server can see the other's job or log.
+	rr = doRequest(t, srvA, "GET", fmt.Sprintf("/jobs/%d", jobB.ID))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("srvA cross-deployment job: expected 404, got %d", rr.Code)
+	}
+	rr = doRequest(t, srvB, "GET", fmt.Sprintf("/jobs/%d", jobA.ID))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("srvB cross-deployment job: expected 404, got %d", rr.Code)
+	}
+	rr = doRequest(t, srvB, "GET", fmt.Sprintf("/jobs/%d/log", jobA.ID))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("srvB cross-deployment log: expected 404, got %d", rr.Code)
+	}
+	if bodyContains := rr.Body.String(); bodyContains != "" && bodyContains == "secret log\n" {
+		t.Errorf("srvB leaked deploy-a log content: %q", bodyContains)
+	}
+
+	// Legacy /tasks/{id} alias is scoped the same way.
+	rr = doRequest(t, srvA, "GET", fmt.Sprintf("/tasks/%d", jobB.ID))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("srvA cross-deployment task alias: expected 404, got %d", rr.Code)
+	}
+}
+
 func TestHandleDepGraph(t *testing.T) {
 	srv, store := testServer(t)
 
@@ -560,5 +654,28 @@ func TestAPIKeyMiddleware(t *testing.T) {
 	srv.middleware(srv.mux).ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 with correct key, got %d", rr.Code)
+	}
+}
+
+func TestConstantTimeEqual(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"equal", "secret-key", "secret-key", true},
+		{"differ mid", "secret-key", "secret-kex", false},
+		{"differ first byte", "secret-key", "Xecret-key", false},
+		{"shorter guess", "secret-key", "secret", false},
+		{"longer guess", "secret-key", "secret-key-extra", false},
+		{"empty guess", "secret-key", "", false},
+		{"both empty", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := constantTimeEqual(tc.a, tc.b); got != tc.want {
+				t.Fatalf("constantTimeEqual(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
 	}
 }

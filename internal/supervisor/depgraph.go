@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -46,7 +47,10 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 			return nil, fmt.Errorf("fetch issue #%d: %w", num, err)
 		}
 
-		content, _ := ghClient.FetchItemContent(ctx, deploy.Owner, deploy.Repo, num, "issue")
+		content, err := ghClient.FetchItemContent(ctx, deploy.Owner, deploy.Repo, num, "issue")
+		if err != nil {
+			return nil, fmt.Errorf("fetch issue #%d content: %w", num, err)
+		}
 		body := ""
 		if content != nil {
 			body = content.Body
@@ -60,6 +64,7 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 			Owner:        deploy.Owner,
 			Repo:         deploy.Repo,
 			Status:       db.StatusQueued,
+			SourceType:   sql.NullString{String: "explicit", Valid: true},
 		}
 		j.IssueTitle.String = item.Title
 		j.IssueTitle.Valid = true
@@ -260,7 +265,8 @@ func BuildDepOptionsFromStore(ctx context.Context, completer claudecli.Completer
 	return buildDepOptions(ctx, completer, deploy, jobs)
 }
 
-// newGHClientForToken creates a GitHub client from a token.
-func newGHClientForToken(token string) *ghpkg.Client {
+// newGHClientForToken creates a GitHub client from a token. It is a var so
+// tests can point Prepare at an httptest server.
+var newGHClientForToken = func(token string) *ghpkg.Client {
 	return ghpkg.NewClient(token)
 }
