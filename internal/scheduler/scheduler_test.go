@@ -91,6 +91,56 @@ jobs:
 	}
 }
 
+func TestSyncSchedulesConvertScheduleToTrigger(t *testing.T) {
+	store := testStore(t)
+	_ = testDeployment(t, store)
+
+	// First sync: the job is cron-scheduled, so a cron row is created enabled.
+	cfg, err := ParseConfig([]byte(`
+jobs:
+  triage:
+    schedule: "0 9 * * 1"
+    agent: autopilot
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	s := New(store, "test-sched", "acme", "widgets", cfg)
+	if err := s.SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules: %v", err)
+	}
+	sched, err := store.GetSchedule("test-sched", "triage")
+	if err != nil {
+		t.Fatalf("GetSchedule: %v", err)
+	}
+	if !sched.Enabled {
+		t.Fatalf("triage should be enabled after initial sync")
+	}
+
+	// Convert the same name in place from schedule: to trigger:.
+	cfg2, err := ParseConfig([]byte(`
+jobs:
+  triage:
+    trigger: "label:bug"
+    agent: autopilot
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	s2 := New(store, "test-sched", "acme", "widgets", cfg2)
+	if err := s2.SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules (converted): %v", err)
+	}
+
+	sched, err = store.GetSchedule("test-sched", "triage")
+	if err != nil {
+		t.Fatalf("GetSchedule after convert: %v", err)
+	}
+	if sched.Enabled {
+		t.Errorf("triage cron row should be disabled after conversion to trigger")
+	}
+}
+
 func TestFireSchedule(t *testing.T) {
 	store := testStore(t)
 	_ = testDeployment(t, store)

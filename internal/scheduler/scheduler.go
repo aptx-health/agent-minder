@@ -73,14 +73,16 @@ func (s *Scheduler) SyncSchedules() error {
 	}
 
 	// Reconcile removals: disable any persisted schedule for this deployment
-	// whose definition no longer exists in jobs.yaml, so it stops firing.
+	// that is no longer cron-scheduled in jobs.yaml, so it stops firing. This
+	// covers both outright removal and in-place conversion from schedule: to
+	// trigger: (a name still present in config but no longer scheduled).
 	existing, err := s.store.GetSchedules(s.deployID)
 	if err != nil {
 		return fmt.Errorf("load existing schedules: %w", err)
 	}
 	for _, sched := range existing {
-		if _, ok := s.config.Jobs[sched.Name]; ok {
-			continue // still defined in config
+		if def, ok := s.config.Jobs[sched.Name]; ok && def.IsScheduled() {
+			continue // still cron-scheduled in config
 		}
 		if !sched.Enabled {
 			continue // already disabled
