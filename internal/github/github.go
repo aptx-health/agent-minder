@@ -581,6 +581,15 @@ func (c *Client) IsPRMerged(ctx context.Context, owner, repo string, number int)
 	return merged, nil
 }
 
+// GetPRBase returns the base (target) branch of a pull request.
+func (c *Client) GetPRBase(ctx context.Context, owner, repo string, number int) (string, error) {
+	pr, _, err := c.gh.PullRequests.Get(ctx, owner, repo, number)
+	if err != nil {
+		return "", fmt.Errorf("get PR #%d: %w", number, err)
+	}
+	return pr.GetBase().GetRef(), nil
+}
+
 // EnableAutoMerge enables GitHub's auto-merge on a PR so it merges when CI passes.
 // Falls back to immediate merge if auto-merge is not available (e.g., not enabled on repo).
 func (c *Client) EnableAutoMerge(ctx context.Context, owner, repo string, number int, method string) error {

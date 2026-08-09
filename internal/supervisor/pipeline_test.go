@@ -1025,6 +1025,98 @@ func TestPipeline_StageNamedReviewWithNonReviewerAgent(t *testing.T) {
 	}
 }
 
+// TestPipeline_AutoMergeSkippedForNonDefaultBase verifies that a low-risk PR
+// whose base branch is not the deployment default does NOT get auto-merge
+// enabled. Enabling it would silently squash a stacked child PR into an
+// in-flight parent branch. See #611.
+func TestPipeline_AutoMergeSkippedForNonDefaultBase(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = true
+		d.AutoMerge = true
+		d.BaseBranch = "main"
+	})
+
+	h.hooks.DetectPRFn = func(ctx context.Context) int { return 100 }
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{Risk: "low-risk", Summary: "Clean"}
+	}
+	// PR targets a non-default base branch.
+	h.hooks.GetPRBaseFn = func(ctx context.Context, prNumber int) (string, error) {
+		return "agent/issue-99", nil
+	}
+	var autoMergeCalled bool
+	h.hooks.EnableAutoMergeFn = func(ctx context.Context, prNumber int, method string) error {
+		autoMergeCalled = true
+		return nil
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 611
+		j.Name = "issue-611"
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if autoMergeCalled {
+		t.Error("auto-merge was enabled for a PR with a non-default base branch")
+	}
+	if !hasEvent(h.events(), "info", "Auto-merge skipped for PR #100") {
+		t.Error("expected an info event noting auto-merge was skipped")
+	}
+}
+
+// TestPipeline_AutoMergeEnabledForDefaultBase verifies default-base behavior is
+// unchanged: a low-risk PR targeting the deployment default gets auto-merge
+// enabled (which waits for CI to pass). See #611.
+func TestPipeline_AutoMergeEnabledForDefaultBase(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = true
+		d.AutoMerge = true
+		d.BaseBranch = "main"
+	})
+
+	h.hooks.DetectPRFn = func(ctx context.Context) int { return 100 }
+	h.hooks.ExtractReviewAssessmentFn = func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment {
+		return ReviewAssessment{Risk: "low-risk", Summary: "Clean"}
+	}
+	h.hooks.GetPRBaseFn = func(ctx context.Context, prNumber int) (string, error) {
+		return "main", nil
+	}
+	var autoMergeCalled bool
+	h.hooks.EnableAutoMergeFn = func(ctx context.Context, prNumber int, method string) error {
+		autoMergeCalled = true
+		return nil
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 611
+		j.Name = "issue-611-default"
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if !autoMergeCalled {
+		t.Error("auto-merge was not enabled for a low-risk PR on the default base")
+	}
+	if !hasEvent(h.events(), "info", "Auto-merge enabled for PR #100") {
+		t.Error("expected an info event noting auto-merge was enabled")
+	}
+}
+
 // TestPipeline_CapturesLessonsFromNonReviewerStage verifies that a stage
 // with captures_lessons: true extracts and saves lessons from its output.
 func TestPipeline_CapturesLessonsFromNonReviewerStage(t *testing.T) {
