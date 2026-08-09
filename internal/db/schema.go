@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 11
+const schemaVersion = 12
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS deployments (
 	total_budget_usd REAL DEFAULT 25.0,
 	carried_cost_usd REAL DEFAULT 0.0,
 	base_branch TEXT DEFAULT 'main',
+	activation_policy TEXT NOT NULL DEFAULT 'automated',
 	started_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -200,6 +201,17 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_runs_job ON agent_runs(job_id);
+`
+
+// migrateV11toV12 persists the deployment-level activation policy
+// distinguishing explicit (only the supplied issues/proactive job),
+// automated (jobs.yaml triggers and cron schedules installed), and hybrid
+// (explicit work plus jobs.yaml automations) deployments. Existing rows
+// default to 'automated' to preserve the pre-migration behavior of
+// unconditionally loading jobs.yaml.
+const migrateV11toV12 = `
+ALTER TABLE deployments ADD COLUMN activation_policy TEXT NOT NULL DEFAULT 'automated';
+UPDATE schema_version SET version = 12;
 `
 
 // migrateV1toV2 migrates a v1 database (tasks table) to v2 (jobs table).
@@ -511,6 +523,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV10toV11); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v10→v11: %w", err)
+			}
+		}
+		if version < 12 {
+			if _, err := db.Exec(migrateV11toV12); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v11→v12: %w", err)
 			}
 		}
 	} else if !hasVersion {

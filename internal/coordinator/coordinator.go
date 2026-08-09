@@ -8,6 +8,8 @@ package coordinator
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -80,17 +82,29 @@ func New(opts Options) (*Coordinator, error) {
 		c.sup.SetRuntime(opts.Runtime)
 	}
 
-	// Load jobs.yaml scheduler and trigger routes when present.
-	cfgPath := scheduler.ConfigPath(opts.Deploy.RepoDir)
-	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
-		c.cfg = cfg
-		c.sched = scheduler.New(opts.Store, opts.Deploy.ID, opts.Deploy.Owner, opts.Deploy.Repo, cfg)
-		if err := c.sched.SyncSchedules(); err != nil {
-			c.syncWarning = err
-		}
-		c.routes = TriggerRoutesFromConfig(cfg)
-		if len(c.routes) > 0 {
-			c.sup.SetTriggerRoutes(c.routes)
+	// Load jobs.yaml scheduler and trigger routes only for deployments whose
+	// persisted activation policy calls for automation. Explicit deployments
+	// (only the issues/proactive job the operator named) must not
+	// auto-subscribe to jobs.yaml triggers or cron schedules.
+	if opts.Deploy.ActivationPolicy != db.ActivationExplicit {
+		cfgPath := scheduler.ConfigPath(opts.Deploy.RepoDir)
+		if _, statErr := os.Stat(cfgPath); statErr == nil {
+			cfg, err := scheduler.LoadConfig(cfgPath)
+			if err != nil {
+				// jobs.yaml exists but is invalid, and automation was
+				// requested (implicitly or explicitly) — surface the error
+				// rather than silently running without automation.
+				return nil, fmt.Errorf("load jobs.yaml: %w", err)
+			}
+			c.cfg = cfg
+			c.sched = scheduler.New(opts.Store, opts.Deploy.ID, opts.Deploy.Owner, opts.Deploy.Repo, cfg)
+			if err := c.sched.SyncSchedules(); err != nil {
+				c.syncWarning = err
+			}
+			c.routes = TriggerRoutesFromConfig(cfg)
+			if len(c.routes) > 0 {
+				c.sup.SetTriggerRoutes(c.routes)
+			}
 		}
 	}
 
@@ -108,6 +122,12 @@ func (c *Coordinator) Routes() []supervisor.TriggerRoute { return c.routes }
 
 // SyncWarning returns the non-fatal error from schedule synchronization, if any.
 func (c *Coordinator) SyncWarning() error { return c.syncWarning }
+
+// ActivationPolicy returns the persisted activation policy for this
+// deployment (explicit, automated, or hybrid). Exposed so deployment-detail
+// surfaces can distinguish an ad-hoc explicit batch from a long-lived
+// automation worker.
+func (c *Coordinator) ActivationPolicy() db.ActivationPolicy { return c.deploy.ActivationPolicy }
 
 // Snapshot returns the active watch, trigger, and cron automations for this
 // deployment. Database read errors intentionally produce no cron entries,

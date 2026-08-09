@@ -546,6 +546,12 @@ func TestV8toV9ScheduleMigration(t *testing.T) {
 	v8Schedules := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (8);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	repo_dir TEXT NOT NULL,
+	owner TEXT NOT NULL,
+	repo TEXT NOT NULL
+);
 CREATE TABLE jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL,
@@ -620,6 +626,12 @@ func TestV9toV10ProvenanceMigration(t *testing.T) {
 	v9 := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (9);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	repo_dir TEXT NOT NULL,
+	owner TEXT NOT NULL,
+	repo TEXT NOT NULL
+);
 CREATE TABLE jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL,
@@ -786,6 +798,12 @@ func TestV10toV11AgentRunsMigration(t *testing.T) {
 	v10 := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (10);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	repo_dir TEXT NOT NULL,
+	owner TEXT NOT NULL,
+	repo TEXT NOT NULL
+);
 CREATE TABLE jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL,
@@ -828,6 +846,71 @@ VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
 		`INSERT INTO agent_runs (job_id, stage, attempt, agent, status)
 		 VALUES (1, 'code', 1, 'autopilot', 'running')`); err != nil {
 		t.Fatalf("insert into migrated agent_runs: %v", err)
+	}
+}
+
+func TestV11toV12ActivationPolicyMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migrate1112.db")
+
+	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open v11 db: %v", err)
+	}
+	v11 := `
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version VALUES (11);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	repo_dir TEXT NOT NULL,
+	owner TEXT NOT NULL,
+	repo TEXT NOT NULL,
+	mode TEXT NOT NULL DEFAULT 'issues',
+	watch_filter TEXT,
+	max_agents INTEGER DEFAULT 3,
+	max_turns INTEGER DEFAULT 50,
+	max_budget_usd REAL DEFAULT 5.0,
+	runtime TEXT DEFAULT 'claude-code',
+	analyzer_model TEXT DEFAULT 'sonnet',
+	skip_label TEXT DEFAULT 'no-agent',
+	auto_merge INTEGER DEFAULT 0,
+	review_enabled INTEGER DEFAULT 1,
+	review_max_turns INTEGER,
+	review_max_budget REAL,
+	total_budget_usd REAL DEFAULT 25.0,
+	carried_cost_usd REAL DEFAULT 0.0,
+	base_branch TEXT DEFAULT 'main',
+	started_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO deployments (id, repo_dir, owner, repo, mode) VALUES ('d1', '/tmp', 'o', 'r', 'watch');
+`
+	if _, err := conn.Exec(v11); err != nil {
+		t.Fatalf("create v11 db: %v", err)
+	}
+	_ = conn.Close()
+
+	c2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (migration): %v", err)
+	}
+	defer func() { _ = c2.Close() }()
+
+	var version int
+	_ = c2.Get(&version, "SELECT version FROM schema_version")
+	if version != schemaVersion {
+		t.Errorf("got schema version %d, want %d", version, schemaVersion)
+	}
+
+	// A pre-existing deployment predating the column defaults to 'automated',
+	// preserving its pre-migration behavior of unconditionally loading
+	// jobs.yaml.
+	store := NewStore(c2)
+	deploy, err := store.GetDeployment("d1")
+	if err != nil {
+		t.Fatalf("GetDeployment after migration: %v", err)
+	}
+	if deploy.ActivationPolicy != ActivationAutomated {
+		t.Errorf("migrated activation_policy = %q, want %q", deploy.ActivationPolicy, ActivationAutomated)
 	}
 }
 

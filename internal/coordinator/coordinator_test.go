@@ -28,6 +28,11 @@ const jobsYAML = `jobs:
 
 func setup(t *testing.T, jobsConfig string) (*db.Store, *db.Deployment) {
 	t.Helper()
+	return setupWithPolicy(t, jobsConfig, db.ActivationAutomated)
+}
+
+func setupWithPolicy(t *testing.T, jobsConfig string, policy db.ActivationPolicy) (*db.Store, *db.Deployment) {
+	t.Helper()
 
 	repoDir := t.TempDir()
 	if jobsConfig != "" {
@@ -48,17 +53,18 @@ func setup(t *testing.T, jobsConfig string) (*db.Store, *db.Deployment) {
 	store := db.NewStore(conn)
 
 	deploy := &db.Deployment{
-		ID:             "coord-test",
-		RepoDir:        repoDir,
-		Owner:          "acme",
-		Repo:           "widgets",
-		Mode:           "issues",
-		MaxAgents:      1,
-		MaxTurns:       50,
-		MaxBudgetUSD:   5,
-		Runtime:        "claude-code",
-		TotalBudgetUSD: 25,
-		BaseBranch:     "main",
+		ID:               "coord-test",
+		RepoDir:          repoDir,
+		Owner:            "acme",
+		Repo:             "widgets",
+		Mode:             "issues",
+		MaxAgents:        1,
+		MaxTurns:         50,
+		MaxBudgetUSD:     5,
+		Runtime:          "claude-code",
+		TotalBudgetUSD:   25,
+		BaseBranch:       "main",
+		ActivationPolicy: policy,
 	}
 	if err := store.CreateDeployment(deploy); err != nil {
 		t.Fatalf("create deployment: %v", err)
@@ -151,5 +157,79 @@ func TestNew_NoConfig(t *testing.T) {
 	}
 	if len(coord.Snapshot()) != 0 {
 		t.Fatalf("snapshot = %#v, want empty", coord.Snapshot())
+	}
+}
+
+// TestNew_ExplicitPolicySkipsJobsYAML asserts an explicit-activation
+// deployment never installs jobs.yaml triggers or cron schedules, even when
+// a valid jobs.yaml is present — the core guarantee of issue #653.
+func TestNew_ExplicitPolicySkipsJobsYAML(t *testing.T) {
+	store, deploy := setupWithPolicy(t, jobsYAML, db.ActivationExplicit)
+
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if coord.Scheduler() != nil {
+		t.Fatal("explicit deployment must not load the jobs.yaml scheduler")
+	}
+	if len(coord.Routes()) != 0 {
+		t.Fatalf("explicit deployment installed routes: %#v", coord.Routes())
+	}
+	if len(coord.Snapshot()) != 0 {
+		t.Fatalf("explicit deployment snapshot = %#v, want empty (truthful Subscriptions: summary)", coord.Snapshot())
+	}
+	schedules, err := store.GetSchedules(deploy.ID)
+	if err != nil {
+		t.Fatalf("get schedules: %v", err)
+	}
+	if len(schedules) != 0 {
+		t.Fatalf("explicit deployment persisted schedules: %#v", schedules)
+	}
+	if coord.ActivationPolicy() != db.ActivationExplicit {
+		t.Errorf("ActivationPolicy() = %q, want explicit", coord.ActivationPolicy())
+	}
+}
+
+// TestNew_HybridPolicyLoadsJobsYAML asserts a hybrid deployment (explicit
+// issues plus an explicit watch filter) still installs jobs.yaml automations.
+func TestNew_HybridPolicyLoadsJobsYAML(t *testing.T) {
+	store, deploy := setupWithPolicy(t, jobsYAML, db.ActivationHybrid)
+
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if coord.Scheduler() == nil {
+		t.Fatal("hybrid deployment should still load the jobs.yaml scheduler")
+	}
+	if len(coord.Routes()) != 1 {
+		t.Fatalf("hybrid deployment installed %d routes, want 1", len(coord.Routes()))
+	}
+}
+
+// TestNew_InvalidJobsYAMLErrorsWhenAutomationRequested verifies a broken
+// jobs.yaml is surfaced as a fatal error for automated/hybrid deployments
+// instead of being silently ignored.
+func TestNew_InvalidJobsYAMLErrorsWhenAutomationRequested(t *testing.T) {
+	store, deploy := setupWithPolicy(t, "jobs: {}", db.ActivationAutomated)
+
+	if _, err := New(Options{Store: store, Deploy: deploy}); err == nil {
+		t.Fatal("expected error for invalid jobs.yaml when automation is requested")
+	}
+}
+
+// TestNew_ExplicitPolicyIgnoresInvalidJobsYAML verifies an explicit
+// deployment never even attempts to load jobs.yaml, so a broken config next
+// to explicitly requested work does not block it.
+func TestNew_ExplicitPolicyIgnoresInvalidJobsYAML(t *testing.T) {
+	store, deploy := setupWithPolicy(t, "jobs: {}", db.ActivationExplicit)
+
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if coord.Scheduler() != nil {
+		t.Fatal("explicit deployment must not load jobs.yaml at all")
 	}
 }

@@ -42,9 +42,9 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **Agent command:** `claude --agent <name> -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var.
 
-### DB schema (internal/db) — currently v11
+### DB schema (internal/db) — currently v12
 
-**deployments**: id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns, max_budget_usd, runtime, analyzer_model, skip_label, auto_merge, review_enabled, review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch, started_at
+**deployments**: id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns, max_budget_usd, runtime, analyzer_model, skip_label, auto_merge, review_enabled, review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch, activation_policy, started_at
 
 **jobs**: id, deployment_id, agent, name, issue_number, issue_title, issue_body, owner, repo, status (queued/running/review/reviewing/reviewed/done/bailed/blocked), current_stage, stages_json, result_json, worktree_path, branch, pr_number, cost_usd, agent_log, failure_reason, failure_detail, review_risk, review_comment_id, dependencies, max_turns, max_budget_usd, runtime, model, source_type, source_name, source_ref, queued_at, started_at, completed_at — UNIQUE on (deployment_id, name)
 
@@ -60,7 +60,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **agent_runs**: id, job_id, stage, attempt, agent, runtime, model, session_id, status (running/success/failed/bailed/manual/usage_limit), stop_reason, failure_detail, step_count, final_turns, cost_usd, max_turns, max_budget_usd, final_text, log_path, started_at, last_activity_at, completed_at — one durable row per (job, stage, attempt); indexed on job_id
 
-Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents), v4→v5 (add last_helpful_at/last_unhelpful_at to lessons for decay-weighted scoring), v5→v6 (deployments.runtime), v6→v7 (per-job and per-schedule runtime overrides), v7→v8 (per-job and per-schedule model overrides), v8→v9 (job_schedules PK rescoped from name-only to (deployment_id, name), preserving last-run history), v9→v10 (jobs.source_type/source_name/source_ref for job provenance), v10→v11 (agent_runs table for durable per-run/attempt records).
+Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents), v4→v5 (add last_helpful_at/last_unhelpful_at to lessons for decay-weighted scoring), v5→v6 (deployments.runtime), v6→v7 (per-job and per-schedule runtime overrides), v7→v8 (per-job and per-schedule model overrides), v8→v9 (job_schedules PK rescoped from name-only to (deployment_id, name), preserving last-run history), v9→v10 (jobs.source_type/source_name/source_ref for job provenance), v10→v11 (agent_runs table for durable per-run/attempt records), v11→v12 (deployments.activation_policy: explicit/automated/hybrid, gates whether jobs.yaml triggers and cron schedules are installed).
 
 Schema changes go in `internal/db/schema.go`: increment `schemaVersion`, add a migration guard, and never edit an existing migration constant. `TestClaudeMDSchemaVersion` in `internal/supervisor` asserts the version documented above matches the constant.
 
