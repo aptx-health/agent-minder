@@ -60,6 +60,27 @@ func (c *CodexRuntime) ResolveRunMetadata(ctx context.Context, inv runtime.Invoc
 	}, err
 }
 
+// Capabilities reports the local Codex CLI and model catalog accepted by
+// Minder's preflight.
+func (c *CodexRuntime) Capabilities(ctx context.Context) (runtime.RuntimeCapabilities, error) {
+	caps := runtime.ProbeCLIVersion(ctx, Name, c.binPath(), "--version")
+	caps.Models = []string{
+		"gpt-5",
+		"gpt-5-codex",
+		"gpt-5-mini",
+		"gpt-5-nano",
+		"o3",
+		"o4-mini",
+	}
+	caps.ModelPrefixes = []string{"gpt-", "o3-", "o4-"}
+	caps.Features = runtime.RuntimeFeatures{
+		StructuredOutput: true,
+		BudgetFlag:       false,
+		SessionResume:    true,
+	}
+	return caps, nil
+}
+
 // binPath returns the configured binary path or the default.
 func (c *CodexRuntime) binPath() string {
 	if c.Bin != "" {

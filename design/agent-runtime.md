@@ -22,6 +22,7 @@ See `internal/runtime/runtime.go` and `internal/runtime/types.go`. Summary:
 ```go
 type AgentRuntime interface {
     Name() string
+    Capabilities(ctx) (RuntimeCapabilities, error)
     PrepareAgentDef(ctx, ws, def) error
     Run(ctx, inv, sink, logFile) (exitCode int, err error)
     Resume(ctx, sessionID, sink, logFile) (exitCode int, err error)  // ErrNotSupported allowed
@@ -39,6 +40,7 @@ Each row maps an interface method to the current Claude-Code-shaped code it abst
 
 | Interface method | Current code | Notes |
 |---|---|---|
+| `Capabilities` | `internal/runtime/capability.go` plus each concrete adapter's CLI/version probe | Reports CLI availability, version, accepted models/aliases/formats, and feature flags for launch preflight and `minder doctor`. Results are cached per process. |
 | `PrepareAgentDef` | `ensureAgentDefByName` in `internal/supervisor/prompt.go:184` (called from `SlotContext.EnsureAgentDef` at `internal/supervisor/jobmanager.go:138`) | Writes `.claude/agents/<name>.md` into the worktree. Returns `AgentDefSource` today; the runtime swallows that. |
 | `Run` | `SlotContext.RunClaudeAgent` at `internal/supervisor/jobmanager.go:157` + `buildAgentArgs` at `internal/supervisor/prompt.go:324` + `scanStream` at `internal/supervisor/scanner.go:46` | The supervisor builds `[]string` Claude CLI args today; ClaudeRuntime owns that internally. Stream-json scanning becomes runtime-internal, with normalized events pushed to `EventSink`. |
 | `Resume` | Hard-coded `--resume <session_id>` at `internal/supervisor/jobmanager.go:527-531` | Currently always supported because we only have Claude. Becomes ClaudeRuntime-internal. |
@@ -69,6 +71,5 @@ Each row maps an interface method to the current Claude-Code-shaped code it abst
 ## What's deliberately NOT in the contract
 
 - No method to list events from history. ParseResult is the only post-hoc accessor; if we need richer replay, add it when there's a caller.
-- No method for "is this runtime healthy" / preflight check. Add when needed.
 - No structured tool-use schema. `OnToolStart(name, inputSummary)` passes a displayable summary string; the supervisor doesn't need the parsed input. Structured tool data stays in the raw log via the `Native` field on `Result`.
 - No retry policy on the interface. Retry/backoff lives in the supervisor where it can coordinate across stages, not in the runtime.

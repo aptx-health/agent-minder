@@ -12,6 +12,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -96,6 +97,60 @@ type BailReport struct {
 	Reason string          // agent-supplied category
 	Detail string          // agent-supplied free text
 	Native json.RawMessage // raw JSON block, for forensics
+}
+
+// RuntimeFeatures describes optional runtime behavior that Minder can account
+// for before launch.
+type RuntimeFeatures struct {
+	StructuredOutput bool
+	BudgetFlag       bool
+	SessionResume    bool
+}
+
+// RuntimeCapabilities is the per-process capability snapshot for a runtime.
+// Empty model means "use runtime default" and is always accepted by model
+// validation; runtimes that require explicit provider configuration should
+// surface that in Error/Available when they can detect it.
+type RuntimeCapabilities struct {
+	RuntimeName   string
+	BinaryName    string
+	Available     bool
+	Version       string
+	Error         string
+	Models        []string
+	Aliases       map[string]string
+	ModelPrefixes []string
+	ModelFormats  []string
+	Features      RuntimeFeatures
+}
+
+// SupportsModel reports whether model is accepted by this runtime catalog.
+func (c RuntimeCapabilities) SupportsModel(model string) bool {
+	model = NormalizeModelName(model)
+	if model == "" {
+		return true
+	}
+	for _, known := range c.Models {
+		if model == known {
+			return true
+		}
+	}
+	if _, ok := c.Aliases[model]; ok {
+		return true
+	}
+	for _, prefix := range c.ModelPrefixes {
+		if prefix != "" && len(model) >= len(prefix) && model[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	for _, format := range c.ModelFormats {
+		if format == "provider/model" {
+			if provider, id, ok := strings.Cut(model, "/"); ok && provider != "" && id != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // EventSink receives normalized events as the agent runs. Implementations

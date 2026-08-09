@@ -3,6 +3,7 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -114,6 +115,7 @@ type Supervisor struct {
 	mu                 sync.Mutex
 	gitSetupMu         sync.Mutex
 	running            map[int64]*runState // keyed by job ID
+	preflighting       map[int64]bool      // queued jobs being runtime-checked before launch
 	maxAgents          int
 	active             bool
 	daemonMode         bool
@@ -188,16 +190,17 @@ func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken s
 		maxAgents = 3
 	}
 	s := &Supervisor{
-		store:       store,
-		deploy:      deploy,
-		repoDir:     repoDir,
-		owner:       owner,
-		repo:        repo,
-		ghToken:     ghToken,
-		running:     make(map[int64]*runState),
-		maxAgents:   maxAgents,
-		events:      eventbus.New[Envelope](eventbus.DefaultSubscriberBuffer),
-		sparedLogAt: make(map[int64]time.Time),
+		store:        store,
+		deploy:       deploy,
+		repoDir:      repoDir,
+		owner:        owner,
+		repo:         repo,
+		ghToken:      ghToken,
+		running:      make(map[int64]*runState),
+		preflighting: make(map[int64]bool),
+		maxAgents:    maxAgents,
+		events:       eventbus.New[Envelope](eventbus.DefaultSubscriberBuffer),
+		sparedLogAt:  make(map[int64]time.Time),
 	}
 	s.fetchFn = func() error { return gitpkg.Fetch(s.repoDir) }
 	return s
@@ -641,36 +644,78 @@ func (s *Supervisor) emitWaitingForMerge() {
 }
 
 func (s *Supervisor) fillCapacity(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if s.paused || s.budgetPaused || ctx.Err() != nil {
+		s.mu.Unlock()
 		return
 	}
+	s.ensurePreflightMapLocked()
 
 	if s.deploy.TotalBudgetUSD > 0 {
 		s.mu.Unlock()
 		exceeded := s.checkBudgetCeiling()
 		s.mu.Lock()
+		s.ensurePreflightMapLocked()
 		if exceeded || s.paused || s.budgetPaused || ctx.Err() != nil {
+			s.mu.Unlock()
 			return
 		}
 	}
 
 	// Fetch once before launching, with offline-aware backoff.
-	if len(s.running) < s.maxAgents {
+	if s.activeLaunchesLocked() < s.maxAgents {
 		s.mu.Unlock()
 		s.tryFetch()
 		s.mu.Lock()
+		s.ensurePreflightMapLocked()
 	}
 
-	for len(s.running) < s.maxAgents {
+	for s.activeLaunchesLocked() < s.maxAgents {
 		jobs, err := s.store.QueuedUnblockedJobs(s.deploy.ID)
 		if err != nil || len(jobs) == 0 {
 			break
 		}
-		s.launchJob(ctx, jobs[0])
+		var job *db.Job
+		for _, candidate := range jobs {
+			if !s.preflighting[candidate.ID] {
+				job = candidate
+				break
+			}
+		}
+		if job == nil {
+			break
+		}
+		s.preflighting[job.ID] = true
+		s.mu.Unlock()
+		preflightErr := s.preflightJob(ctx, job)
+		s.mu.Lock()
+		delete(s.preflighting, job.ID)
+		if preflightErr != nil {
+			s.mu.Unlock()
+			s.blockJobPreflight(job, preflightErr)
+			s.mu.Lock()
+			continue
+		}
+		if s.paused || s.budgetPaused || ctx.Err() != nil || s.activeLaunchesLocked() >= s.maxAgents {
+			break
+		}
+		s.launchJob(ctx, job)
 	}
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) ensurePreflightMapLocked() {
+	if s.preflighting == nil {
+		s.preflighting = make(map[int64]bool)
+	}
+}
+
+func (s *Supervisor) activeLaunchesLocked() int {
+	return len(s.running) + len(s.preflighting)
 }
 
 // offlineBackoffSchedule is the delay-until-next-probe sequence while offline.
@@ -779,6 +824,24 @@ func (s *Supervisor) launchJob(ctx context.Context, job *db.Job) {
 	s.running[job.ID] = rs
 
 	go s.runJobManager(jobCtx, job)
+}
+
+func (s *Supervisor) preflightJob(ctx context.Context, job *db.Job) error {
+	rt, err := s.RuntimeForJob(job)
+	if err != nil {
+		return err
+	}
+	return runtimepkg.Preflight(ctx, rt, job.EffectiveModel())
+}
+
+func (s *Supervisor) blockJobPreflight(job *db.Job, err error) {
+	detail := err.Error()
+	summary := fmt.Sprintf("Preflight blocked %s: %s", jobLabel(job), detail)
+	s.emitDurableEvent(EventError, summary, job.ID,
+		func(tx *sqlx.Tx) error { return db.UpdateJobBlockedTx(tx, job.ID, "preflight", detail) })
+	job.Status = db.StatusBlocked
+	job.FailureReason = sql.NullString{String: "preflight", Valid: true}
+	job.FailureDetail = sql.NullString{String: detail, Valid: true}
 }
 
 // markJobLaunched commits the queued→running transition and its started event

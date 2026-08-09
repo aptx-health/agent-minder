@@ -13,6 +13,9 @@ import (
 type stubRuntime struct{ name string }
 
 func (s *stubRuntime) Name() string { return s.name }
+func (s *stubRuntime) Capabilities(context.Context) (RuntimeCapabilities, error) {
+	return RuntimeCapabilities{RuntimeName: s.name, Available: true}, nil
+}
 func (s *stubRuntime) PrepareAgentDef(context.Context, Workspace, AgentDefinition) error {
 	return nil
 }

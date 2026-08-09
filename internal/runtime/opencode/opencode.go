@@ -86,6 +86,19 @@ func (o *OpencodeRuntime) ResolveRunMetadata(ctx context.Context, inv runtime.In
 	}, err
 }
 
+// Capabilities reports the local opencode CLI and the provider-qualified model
+// format Minder can validate without contacting provider backends.
+func (o *OpencodeRuntime) Capabilities(ctx context.Context) (runtime.RuntimeCapabilities, error) {
+	caps := runtime.ProbeCLIVersion(ctx, Name, o.binPath(), "--version")
+	caps.ModelFormats = []string{"provider/model"}
+	caps.Features = runtime.RuntimeFeatures{
+		StructuredOutput: true,
+		BudgetFlag:       false,
+		SessionResume:    true,
+	}
+	return caps, nil
+}
+
 // PrepareAgentDef writes the agent definition body to
 // `<workspace>/.opencode/agent/<name>.md`. Idempotent: overwrites if the file
 // already exists so updates to the embedded contract are picked up.

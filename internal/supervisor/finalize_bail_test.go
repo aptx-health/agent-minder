@@ -17,6 +17,9 @@ type classifyingRuntime struct {
 }
 
 func (r *classifyingRuntime) Name() string { return "classifying" }
+func (r *classifyingRuntime) Capabilities(context.Context) (runtimepkg.RuntimeCapabilities, error) {
+	return runtimepkg.RuntimeCapabilities{RuntimeName: r.Name(), Available: true}, nil
+}
 func (r *classifyingRuntime) PrepareAgentDef(_ context.Context, _ runtimepkg.Workspace, _ runtimepkg.AgentDefinition) error {
 	return nil
 }

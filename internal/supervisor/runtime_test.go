@@ -29,6 +29,8 @@ type fakeRuntime struct {
 	lastWorkspace runtimepkg.Workspace
 	metadata      runtimepkg.RunMetadata
 	metadataErr   error
+	caps          runtimepkg.RuntimeCapabilities
+	capCalls      int
 }
 
 func (f *fakeRuntime) Name() string { return "fake" }
@@ -42,6 +44,15 @@ func (f *fakeRuntime) ResolveRunMetadata(_ context.Context, inv runtimepkg.Invoc
 		meta.Model = runtimepkg.NormalizeModelName(inv.Model)
 	}
 	return meta, f.metadataErr
+}
+
+func (f *fakeRuntime) Capabilities(context.Context) (runtimepkg.RuntimeCapabilities, error) {
+	f.capCalls++
+	caps := f.caps
+	if caps.RuntimeName == "" {
+		caps.RuntimeName = f.Name()
+	}
+	return caps, nil
 }
 
 func (f *fakeRuntime) PrepareAgentDef(_ context.Context, ws runtimepkg.Workspace, def runtimepkg.AgentDefinition) error {
@@ -173,6 +184,117 @@ func TestRuntimeForJobSelectsOpenCode(t *testing.T) {
 	}
 	if got := rt.Name(); got != runtimepkg.NameOpenCode {
 		t.Fatalf("RuntimeForJob runtime = %q, want %q", got, runtimepkg.NameOpenCode)
+	}
+}
+
+func TestLaunchPreflightBlocksUnsupportedModelBeforeWorktree(t *testing.T) {
+	runtimepkg.ResetCapabilityCache()
+	store := testStore(t)
+	deploy := testDeployment(t, store, func(d *db.Deployment) {
+		d.MaxAgents = 1
+	})
+	job := testJob(t, store, deploy, func(j *db.Job) {
+		j.Status = db.StatusQueued
+		j.Model = sql.NullString{String: "typo-model", Valid: true}
+	})
+
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+	sup.fetchFn = func() error { return nil }
+	sup.SetRuntime(&fakeRuntime{caps: runtimepkg.RuntimeCapabilities{
+		RuntimeName: "fake",
+		Available:   true,
+		Models:      []string{"known-model"},
+	}})
+
+	sup.fillCapacity(context.Background())
+
+	updated, err := store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if updated.Status != db.StatusBlocked {
+		t.Fatalf("status = %q, want blocked", updated.Status)
+	}
+	if !updated.FailureReason.Valid || updated.FailureReason.String != "preflight" {
+		t.Fatalf("failure_reason = %+v, want preflight", updated.FailureReason)
+	}
+	if !updated.FailureDetail.Valid || !strings.Contains(updated.FailureDetail.String, "does not support model") {
+		t.Fatalf("failure_detail = %+v, want unsupported model", updated.FailureDetail)
+	}
+	if updated.WorktreePath.Valid {
+		t.Fatalf("worktree_path = %q, want NULL before setup", updated.WorktreePath.String)
+	}
+	if len(sup.RunningJobs()) != 0 {
+		t.Fatalf("preflight failure launched a job: %+v", sup.RunningJobs())
+	}
+}
+
+func TestLaunchPreflightBlocksUnavailableRuntimeCLI(t *testing.T) {
+	runtimepkg.ResetCapabilityCache()
+	store := testStore(t)
+	deploy := testDeployment(t, store, func(d *db.Deployment) {
+		d.MaxAgents = 1
+	})
+	job := testJob(t, store, deploy, func(j *db.Job) {
+		j.Status = db.StatusQueued
+	})
+
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+	sup.fetchFn = func() error { return nil }
+	sup.SetRuntime(&fakeRuntime{caps: runtimepkg.RuntimeCapabilities{
+		RuntimeName: "fake",
+		BinaryName:  "fake-cli",
+		Available:   false,
+		Error:       "executable file not found in PATH",
+	}})
+
+	sup.fillCapacity(context.Background())
+
+	updated, err := store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if updated.Status != db.StatusBlocked {
+		t.Fatalf("status = %q, want blocked", updated.Status)
+	}
+	if !updated.FailureDetail.Valid || !strings.Contains(updated.FailureDetail.String, "unavailable") {
+		t.Fatalf("failure_detail = %+v, want unavailable runtime", updated.FailureDetail)
+	}
+	if updated.WorktreePath.Valid {
+		t.Fatalf("worktree_path = %q, want NULL before setup", updated.WorktreePath.String)
+	}
+}
+
+func TestLaunchPreflightCachesRuntimeCapabilities(t *testing.T) {
+	runtimepkg.ResetCapabilityCache()
+	store := testStore(t)
+	deploy := testDeployment(t, store, func(d *db.Deployment) {
+		d.MaxAgents = 2
+	})
+	testJob(t, store, deploy, func(j *db.Job) {
+		j.Status = db.StatusQueued
+		j.IssueNumber = 0
+		j.Name = "first"
+	})
+	testJob(t, store, deploy, func(j *db.Job) {
+		j.Status = db.StatusQueued
+		j.IssueNumber = 0
+		j.Name = "second"
+	})
+
+	rt := &fakeRuntime{caps: runtimepkg.RuntimeCapabilities{
+		RuntimeName: "fake",
+		Available:   true,
+		Models:      []string{"known-model"},
+	}}
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+	sup.fetchFn = func() error { return nil }
+	sup.SetRuntime(rt)
+
+	sup.fillCapacity(context.Background())
+
+	if rt.capCalls != 1 {
+		t.Fatalf("Capabilities calls = %d, want 1", rt.capCalls)
 	}
 }
 
