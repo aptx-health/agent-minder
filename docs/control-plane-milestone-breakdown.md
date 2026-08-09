@@ -114,6 +114,12 @@ below for the full test list and the assert-on-serialized-surfaces discipline.
 | M1-17 `internal/eventbus` fan-out | Replace bounded drop-channel with fan-out + monotonic cursor + subscriptions; terminal/persistence/API each subscribe | 03 |
 | M1-18 Persist typed job events | cursor, ts, deployment/job/run, severity, summary, structured data | 17 |
 
+The consistency contract for M1-18 and M1-21 (delivery/ordering guarantees,
+snapshot watermarks, identity, retention, resync) is fixed in
+[`research/fable-expedition/04-snapshot-event-consistency.md`](research/fable-expedition/04-snapshot-event-consistency.md);
+note it supersedes this table's "onto the bus" framing (store-first, bus as
+live tail).
+
 ### Wave 5 — Versioned read API
 
 | Task | Scope | Deps |
