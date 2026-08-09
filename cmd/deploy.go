@@ -597,6 +597,8 @@ func printStartupSummary(automations []coordinator.Automation) {
 				next = automation.NextRunAt.Format("Mon 15:04 UTC")
 			}
 			fmt.Printf("  Cron: %s (%s) → %s%s [next: %s]\n", automation.Name, automation.Expression, automation.Agent, runtimeSuffix, next)
+		case coordinator.AutomationOneShot:
+			fmt.Printf("  One-shot: %s → %s%s [fires: %s]\n", automation.Name, automation.Agent, runtimeSuffix, automation.NextRunAt.Local().Format("Mon 15:04 MST"))
 		}
 	}
 	if len(automations) == 0 {
