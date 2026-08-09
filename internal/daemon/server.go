@@ -3,6 +3,8 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -97,7 +99,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 
 		if s.apiKey != "" {
-			if r.Header.Get("X-API-Key") != s.apiKey {
+			if !constantTimeEqual(r.Header.Get("X-API-Key"), s.apiKey) {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 				return
 			}
@@ -105,6 +107,16 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// constantTimeEqual reports whether the two strings are equal using a
+// constant-time comparison. Both sides are hashed with SHA-256 first so the
+// comparison runs over fixed-size digests, avoiding both the byte-by-byte
+// timing side-channel of `==` (CWE-208) and any leak of the secret's length.
+func constantTimeEqual(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
 // --- Handlers ---

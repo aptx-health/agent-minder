@@ -562,3 +562,26 @@ func TestAPIKeyMiddleware(t *testing.T) {
 		t.Fatalf("expected 200 with correct key, got %d", rr.Code)
 	}
 }
+
+func TestConstantTimeEqual(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"equal", "secret-key", "secret-key", true},
+		{"differ mid", "secret-key", "secret-kex", false},
+		{"differ first byte", "secret-key", "Xecret-key", false},
+		{"shorter guess", "secret-key", "secret", false},
+		{"longer guess", "secret-key", "secret-key-extra", false},
+		{"empty guess", "secret-key", "", false},
+		{"both empty", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := constantTimeEqual(tc.a, tc.b); got != tc.want {
+				t.Fatalf("constantTimeEqual(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}
