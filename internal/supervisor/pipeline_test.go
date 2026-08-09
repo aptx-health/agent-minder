@@ -357,6 +357,211 @@ func TestBranchClaimReleasedWhenSiblingTerminal(t *testing.T) {
 	}
 }
 
+func TestSetupHookAbsentDoesNotChangePipeline(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = false
+	})
+
+	job := testJob(t, h.store, h.deploy)
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	stages := h.stages()
+	if len(stages) != 1 {
+		t.Fatalf("got %d stage invocations, want 1", len(stages))
+	}
+	updated, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status == db.StatusBlocked {
+		t.Fatalf("job was blocked without a setup hook: %+v", updated)
+	}
+	if hasEvent(h.events(), string(EventInfo), "Setup hook") {
+		t.Fatal("setup hook event emitted even though hook was absent")
+	}
+}
+
+func TestSetupHookPassingRunsBeforeAgentAndCapturesOutput(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = false
+	})
+	writeSetupHook(t, h.deploy.RepoDir, "echo setup-start\nprintf 'setup-err\\n' >&2\n")
+
+	var logAtAgentStart string
+	job := testJob(t, h.store, h.deploy)
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
+		data, err := os.ReadFile(h.logPathForJob(job.ID))
+		if err != nil {
+			t.Fatalf("read log before agent write: %v", err)
+		}
+		logAtAgentStart = string(data)
+		h.mu.Lock()
+		h.stageLog = append(h.stageLog, stageCall{Agent: inv.AgentName, Inv: inv})
+		h.mu.Unlock()
+		return 0, &runtimepkg.Result{}, false, nil
+	}
+
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, want := range []string{"setup-start", "setup-err", "setup hook started", "setup hook finished"} {
+		if !strings.Contains(logAtAgentStart, want) {
+			t.Fatalf("agent started without setup output %q in log:\n%s", want, logAtAgentStart)
+		}
+	}
+	if len(h.stages()) != 1 {
+		t.Fatalf("agent did not proceed after passing hook; stages=%d", len(h.stages()))
+	}
+	if !h.hasStoredEvent(t, EventInfo, "Setup hook started") {
+		t.Fatal("missing setup hook start event")
+	}
+	if !h.hasStoredEvent(t, EventInfo, "Setup hook succeeded") {
+		t.Fatal("missing setup hook success event")
+	}
+}
+
+func TestSetupHookFailureBlocksWithoutAgentRun(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = false
+	})
+	writeSetupHook(t, h.deploy.RepoDir, "echo before-fail\nprintf 'bad setup\\n' >&2\nexit 7\n")
+
+	job := testJob(t, h.store, h.deploy)
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	err := h.run(context.Background(), job, contract)
+	if err == nil {
+		t.Fatal("Run returned nil, want setup hook error")
+	}
+
+	updated, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != db.StatusBlocked {
+		t.Fatalf("status = %q, want %q", updated.Status, db.StatusBlocked)
+	}
+	if updated.FailureReason.String != setupHookFailureReason {
+		t.Fatalf("failure_reason = %q, want %q", updated.FailureReason.String, setupHookFailureReason)
+	}
+	for _, want := range []string{"exit code 7", "before-fail", "bad setup"} {
+		if !strings.Contains(updated.FailureDetail.String, want) {
+			t.Fatalf("failure_detail missing %q:\n%s", want, updated.FailureDetail.String)
+		}
+	}
+	if len(h.stages()) != 0 {
+		t.Fatalf("agent ran after setup hook failure: %+v", h.stages())
+	}
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("agent_runs recorded despite setup failure: %+v", runs)
+	}
+	if !h.hasStoredEvent(t, EventError, "Setup hook failed") {
+		t.Fatal("missing setup hook failure event")
+	}
+}
+
+func TestSetupHookTimeoutBlocksWithoutAgentRun(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) {
+		d.ReviewEnabled = false
+	})
+	writeSetupHook(t, h.deploy.RepoDir, "echo before-sleep\nsleep 2\n")
+
+	job := testJob(t, h.store, h.deploy)
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "pr",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	sc := h.newSlotContext(job)
+	sc.SetupTimeout = "20ms"
+	mgr := NewDefaultJobManager(sc, contract)
+	err := mgr.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run returned nil, want setup hook timeout")
+	}
+
+	updated, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != db.StatusBlocked {
+		t.Fatalf("status = %q, want %q", updated.Status, db.StatusBlocked)
+	}
+	if updated.FailureReason.String != setupHookFailureReason {
+		t.Fatalf("failure_reason = %q, want %q", updated.FailureReason.String, setupHookFailureReason)
+	}
+	if !strings.Contains(updated.FailureDetail.String, "timed out after 20ms") {
+		t.Fatalf("failure_detail missing timeout:\n%s", updated.FailureDetail.String)
+	}
+	if !strings.Contains(updated.FailureDetail.String, "before-sleep") {
+		t.Fatalf("failure_detail missing output tail:\n%s", updated.FailureDetail.String)
+	}
+	if len(h.stages()) != 0 {
+		t.Fatalf("agent ran after setup hook timeout: %+v", h.stages())
+	}
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("agent_runs recorded despite setup timeout: %+v", runs)
+	}
+}
+
+func (h *pipelineHarness) logPathForJob(jobID int64) string {
+	return filepath.Join(h.logDir, fmt.Sprintf("job-%d.log", jobID))
+}
+
+func (h *pipelineHarness) hasStoredEvent(t *testing.T, typ EventType, substr string) bool {
+	t.Helper()
+	events, err := h.store.EventsAfter(h.deploy.ID, 0, 0)
+	if err != nil {
+		t.Fatalf("EventsAfter: %v", err)
+	}
+	for _, event := range events {
+		if event.Type == string(typ) && strings.Contains(event.Summary, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+func writeSetupHook(t *testing.T, root string, body string) {
+	t.Helper()
+	dir := filepath.Join(root, ".agent-minder")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir setup hook dir: %v", err)
+	}
+	path := filepath.Join(dir, "setup.sh")
+	if err := os.WriteFile(path, []byte("#!/usr/bin/env bash\nset -e\n"+body), 0o644); err != nil {
+		t.Fatalf("write setup hook: %v", err)
+	}
+}
+
 // TestPipeline_CodeThenReview verifies the happy path: code stage succeeds,
 // PR detected, review stage fires and completes.
 // This is the exact scenario that failed in production (issue #437 context):

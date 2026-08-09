@@ -306,6 +306,23 @@ func updateJobFailure(e sqlx.Execer, id int64, reason, detail string) error {
 	return err
 }
 
+// UpdateJobBlockedFailure sets failure info and marks the job as blocked.
+func (s *Store) UpdateJobBlockedFailure(id int64, reason, detail string) error {
+	return updateJobBlockedFailure(s.db, id, reason, detail)
+}
+
+// UpdateJobBlockedFailureTx is UpdateJobBlockedFailure inside an existing transaction.
+func UpdateJobBlockedFailureTx(tx *sqlx.Tx, id int64, reason, detail string) error {
+	return updateJobBlockedFailure(tx, id, reason, detail)
+}
+
+func updateJobBlockedFailure(e sqlx.Execer, id int64, reason, detail string) error {
+	_, err := e.Exec(`UPDATE jobs SET status = 'blocked', failure_reason = ?,
+		failure_detail = ?, completed_at = ? WHERE id = ?`,
+		reason, detail, time.Now().UTC(), id)
+	return err
+}
+
 // UpdateJobDeps updates the dependencies JSON for a job.
 func (s *Store) UpdateJobDeps(id int64, deps []int) error {
 	data, _ := json.Marshal(deps)
@@ -396,6 +413,9 @@ func (s *Store) QueuedUnblockedJobs(deploymentID string) ([]*Job, error) {
 	var result []*Job
 	for _, j := range jobs {
 		if j.Status != StatusQueued && j.Status != StatusBlocked {
+			continue
+		}
+		if j.Status == StatusBlocked && j.FailureReason.Valid {
 			continue
 		}
 

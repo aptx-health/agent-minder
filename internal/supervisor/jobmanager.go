@@ -1,10 +1,13 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -61,6 +64,7 @@ type TestHooks struct {
 	ResumeFn                  func(ctx context.Context, sessionID string, logFile *os.File) (result *runtimepkg.Result, usageLimit bool, err error)
 	DetectPRFn                func(ctx context.Context) int
 	SetupWorktreeFn           func() error
+	RunSetupHookFn            func(ctx context.Context) (bool, error)
 	EnsureAgentDefFn          func(name AgentName) (AgentDefSource, error)
 	ExtractReviewAssessmentFn func(ctx context.Context, logPath string, job *db.Job) ReviewAssessment
 	CreateReviewCommentFn     func(ctx context.Context, prNumber int, body string) (int64, error)
@@ -89,6 +93,7 @@ type SlotContext struct {
 	TestCommand  string
 	TestTimeout  string // e.g., "3m" — agents should wrap test commands with timeout
 	BuildTimeout string // e.g., "2m" — agents should wrap build commands with timeout
+	SetupTimeout string // e.g., "5m" — setup hook execution timeout
 	AllowedTools []string
 
 	// Internal reference to supervisor.
@@ -96,6 +101,8 @@ type SlotContext struct {
 
 	// Test hooks — nil in production, set by tests to override external calls.
 	Hooks *TestHooks
+
+	provisioningLogged bool
 
 	// hasReviewerFeedback tracks whether per-lesson feedback was processed.
 	// When true, binary RecordLessonOutcome is skipped (reviewer feedback is more precise).
@@ -182,6 +189,141 @@ func (sc *SlotContext) SetupWorktree() error {
 
 	_ = sc.Store.UpdateJobWorktree(sc.Job.ID, sc.WorktreePath, sc.Branch)
 	return nil
+}
+
+const (
+	setupHookRelPath          = ".agent-minder/setup.sh"
+	setupHookFailureReason    = "setup_hook"
+	setupHookOutputTailBytes  = 32 * 1024
+	setupHookDetailTailBytes  = 4 * 1024
+	setupHookDefaultTimeout   = 5 * time.Minute
+	setupHookLogStartTemplate = "=== agent-minder setup hook started: %s ===\n"
+	setupHookLogEndTemplate   = "=== agent-minder setup hook finished: %s ===\n"
+)
+
+// RunSetupHook runs a repo-provided setup hook after a fresh worktree is
+// created. It returns true when it wrote provisioning output to the job log.
+func (sc *SlotContext) RunSetupHook(ctx context.Context) (bool, error) {
+	if sc.Hooks != nil && sc.Hooks.RunSetupHookFn != nil {
+		wroteLog, err := sc.Hooks.RunSetupHookFn(ctx)
+		sc.provisioningLogged = wroteLog
+		return wroteLog, err
+	}
+
+	hookPath := filepath.Join(sc.WorktreePath, setupHookRelPath)
+	info, err := os.Stat(hookPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat setup hook: %w", err)
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("setup hook is a directory: %s", setupHookRelPath)
+	}
+
+	timeout := sc.setupHookTimeout()
+	sc.EmitDurable(EventInfo, fmt.Sprintf("Setup hook started for %s: %s", sc.JobLabel(), setupHookRelPath))
+	logFile, err := sc.OpenLogFile(false)
+	if err != nil {
+		return false, fmt.Errorf("open setup hook log: %w", err)
+	}
+	defer func() { _ = logFile.Close() }()
+
+	sc.provisioningLogged = true
+	startedAt := time.Now().UTC().Format(time.RFC3339)
+	_, _ = fmt.Fprintf(logFile, setupHookLogStartTemplate, startedAt)
+
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, "env", "bash", setupHookRelPath)
+	cmd.Dir = sc.WorktreePath
+	tail := &limitedBuffer{limit: setupHookOutputTailBytes}
+	writer := io.MultiWriter(logFile, tail)
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+
+	err = cmd.Run()
+	finishedAt := time.Now().UTC().Format(time.RFC3339)
+	_, _ = fmt.Fprintf(logFile, setupHookLogEndTemplate, finishedAt)
+	if err == nil {
+		sc.EmitDurable(EventInfo, fmt.Sprintf("Setup hook succeeded for %s", sc.JobLabel()))
+		return true, nil
+	}
+
+	return true, setupHookError(err, runCtx.Err(), timeout, tail.String())
+}
+
+func (sc *SlotContext) setupHookTimeout() time.Duration {
+	if sc.SetupTimeout == "" {
+		return setupHookDefaultTimeout
+	}
+	d, err := time.ParseDuration(sc.SetupTimeout)
+	if err != nil || d <= 0 {
+		return setupHookDefaultTimeout
+	}
+	return d
+}
+
+func setupHookError(err error, ctxErr error, timeout time.Duration, output string) error {
+	status := fmt.Sprintf("setup hook failed: %v", err)
+	if ctxErr == context.DeadlineExceeded {
+		status = fmt.Sprintf("setup hook timed out after %s", timeout)
+	} else if exitErr, ok := err.(*exec.ExitError); ok {
+		if code := exitErr.ExitCode(); code >= 0 {
+			status = fmt.Sprintf("setup hook failed with exit code %d", code)
+		} else if exitErr.ProcessState != nil {
+			status = fmt.Sprintf("setup hook failed: %s", exitErr.String())
+		}
+	}
+	tail := tailString(output, setupHookDetailTailBytes)
+	if strings.TrimSpace(tail) == "" {
+		return fmt.Errorf("%s", status)
+	}
+	return fmt.Errorf("%s\n\noutput tail:\n%s", status, tail)
+}
+
+type limitedBuffer struct {
+	buf   bytes.Buffer
+	limit int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.limit <= 0 {
+		return n, nil
+	}
+	if n >= b.limit {
+		b.buf.Reset()
+		_, _ = b.buf.Write(p[n-b.limit:])
+		return n, nil
+	}
+	if b.buf.Len()+n > b.limit {
+		data := append([]byte(nil), b.buf.Bytes()...)
+		keep := b.limit - n
+		if keep < 0 {
+			keep = 0
+		}
+		if len(data) > keep {
+			data = data[len(data)-keep:]
+		}
+		b.buf.Reset()
+		_, _ = b.buf.Write(data)
+	}
+	_, _ = b.buf.Write(p)
+	return n, nil
+}
+
+func (b *limitedBuffer) String() string {
+	return b.buf.String()
+}
+
+func tailString(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	return s[len(s)-maxBytes:]
 }
 
 // branchClaimedByActiveJob returns another non-terminal job that already owns
@@ -389,6 +531,7 @@ func (s *Supervisor) newSlotContext(jobID int64, job *db.Job) *SlotContext {
 		TestCommand:  resolveTestCommand(s.repoDir),
 		TestTimeout:  resolveTimeout(s.repoDir, "test"),
 		BuildTimeout: resolveTimeout(s.repoDir, "build"),
+		SetupTimeout: resolveTimeout(s.repoDir, "setup"),
 		AllowedTools: resolveAllowedTools(s.repoDir),
 		sup:          s,
 	}
@@ -533,6 +676,13 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 				func(tx *sqlx.Tx) error { return db.UpdateJobFailureTx(tx, job.ID, "worktree", err.Error()) })
 			return err
 		}
+		if _, err := sc.RunSetupHook(ctx); err != nil {
+			sc.EmitDurableWith(EventError, fmt.Sprintf("Setup hook failed for %s: %v", sc.JobLabel(), err),
+				func(tx *sqlx.Tx) error {
+					return db.UpdateJobBlockedFailureTx(tx, job.ID, setupHookFailureReason, err.Error())
+				})
+			return err
+		}
 	}
 
 	// Ensure all agent defs referenced by stages exist.
@@ -554,7 +704,7 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "in-progress")
 	}
 
-	logFile, err := sc.OpenLogFile(false)
+	logFile, err := sc.OpenLogFile(sc.provisioningLogged)
 	if err != nil {
 		sc.EmitDurableWith(EventError, fmt.Sprintf("Log file error for %s: %v", sc.JobLabel(), err),
 			func(tx *sqlx.Tx) error { return db.UpdateJobFailureTx(tx, job.ID, "log", err.Error()) })
