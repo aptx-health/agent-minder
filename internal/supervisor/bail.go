@@ -80,7 +80,7 @@ func (m *DefaultJobManager) handleBailReport(ctx context.Context, report *runtim
 	_ = sc.Store.UpdateJobResult(job.ID, string(data))
 	_ = sc.Store.UpdateJobFailure(job.ID, "bailed", assessment.Reason)
 
-	sc.EmitEvent("info", fmt.Sprintf("Bail report captured for %s: %s", sc.JobLabel(), assessment.Reason))
+	sc.EmitEvent(EventInfo, fmt.Sprintf("Bail report captured for %s: %s", sc.JobLabel(), assessment.Reason))
 
 	debugLog("bail report extracted",
 		"label", sc.JobLabel(),
