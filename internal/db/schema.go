@@ -10,7 +10,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 11
+const schemaVersion = 12
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS deployments (
 	owner TEXT NOT NULL,
 	repo TEXT NOT NULL,
 	mode TEXT NOT NULL DEFAULT 'issues',
+	activation_policy TEXT NOT NULL DEFAULT 'explicit',
 	watch_filter TEXT,
 	max_agents INTEGER DEFAULT 3,
 	max_turns INTEGER DEFAULT 50,
@@ -418,6 +419,19 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_job ON agent_runs(job_id);
 UPDATE schema_version SET version = 11;
 `
 
+// migrateV11toV12 persists deployment activation intent. Legacy watch-mode
+// deployments remain automated; legacy issue-mode deployments become explicit
+// without consulting mutable jobs or schedules.
+const migrateV11toV12 = `
+ALTER TABLE deployments ADD COLUMN activation_policy TEXT NOT NULL DEFAULT 'explicit';
+UPDATE deployments
+SET activation_policy = CASE
+	WHEN mode = 'watch' THEN 'automated'
+	ELSE 'explicit'
+END;
+UPDATE schema_version SET version = 12;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -511,6 +525,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV10toV11); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v10→v11: %w", err)
+			}
+		}
+		if version < 12 {
+			if _, err := db.Exec(migrateV11toV12); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v11→v12: %w", err)
 			}
 		}
 	} else if !hasVersion {

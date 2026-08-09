@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -133,13 +134,18 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Check that we have something to do: issues, watch filter, or jobs.yaml.
-	hasSchedules := false
-	if _, err := scheduler.LoadConfig(scheduler.ConfigPath(repoDir)); err == nil {
-		hasSchedules = true
-	}
-	if len(issues) == 0 && flagWatch == "" && !hasSchedules {
-		return fmt.Errorf("provide issue numbers, --watch filter, or create .agent-minder/jobs.yaml")
+	activationPolicy := deriveActivationPolicy(issues, flagWatch, flagAgent)
+	if activationPolicy.ActivatesAutomations() {
+		_, configErr := scheduler.LoadConfig(scheduler.ConfigPath(repoDir))
+		switch {
+		case configErr == nil:
+		case errors.Is(configErr, os.ErrNotExist) && flagWatch != "":
+			// An explicit watch filter is a complete automation source by itself.
+		case errors.Is(configErr, os.ErrNotExist):
+			return fmt.Errorf("provide issue numbers, --watch filter, --agent, or create .agent-minder/jobs.yaml")
+		default:
+			return fmt.Errorf("load jobs.yaml for %s deployment: %w", activationPolicy, configErr)
+		}
 	}
 
 	owner, repo, err := resolveOwnerRepo(repoDir)
@@ -175,21 +181,22 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	// Create deployment record.
 	deployID := uuid.New().String()[:8]
 	deploy := &db.Deployment{
-		ID:             deployID,
-		RepoDir:        repoDir,
-		Owner:          owner,
-		Repo:           repo,
-		Mode:           mode,
-		MaxAgents:      flagMaxAgents,
-		MaxTurns:       flagMaxTurns,
-		MaxBudgetUSD:   flagBudget,
-		Runtime:        runtimeResolution.Name,
-		AnalyzerModel:  flagModel,
-		SkipLabel:      flagSkipLabel,
-		AutoMerge:      flagAutoMerge,
-		ReviewEnabled:  true,
-		TotalBudgetUSD: flagTotalBudget,
-		BaseBranch:     baseBranch,
+		ID:               deployID,
+		RepoDir:          repoDir,
+		Owner:            owner,
+		Repo:             repo,
+		Mode:             mode,
+		ActivationPolicy: activationPolicy,
+		MaxAgents:        flagMaxAgents,
+		MaxTurns:         flagMaxTurns,
+		MaxBudgetUSD:     flagBudget,
+		Runtime:          runtimeResolution.Name,
+		AnalyzerModel:    flagModel,
+		SkipLabel:        flagSkipLabel,
+		AutoMerge:        flagAutoMerge,
+		ReviewEnabled:    true,
+		TotalBudgetUSD:   flagTotalBudget,
+		BaseBranch:       baseBranch,
 	}
 	if flagWatch != "" {
 		deploy.WatchFilter.String = flagWatch
@@ -210,7 +217,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create deployment: %w", err)
 	}
 
-	fmt.Printf("Deploy %s: %s/%s (%s)\n", deployID, owner, repo, mode)
+	fmt.Printf("Deploy %s: %s/%s (%s, %s)\n", deployID, owner, repo, mode, activationPolicy)
 	fmt.Printf("  Issues: %v\n", issues)
 	fmt.Printf("  Agents: %d, Runtime: %s (%s), Turns: %d, Budget: $%.2f/task, Total: $%.2f\n",
 		flagMaxAgents, deploy.Runtime, runtimeResolution.Source, flagMaxTurns, flagBudget, flagTotalBudget)
@@ -438,10 +445,10 @@ func runDaemon(deployID string) error {
 	// Check if jobs already exist (daemon restart).
 	jobs, _ := store.GetJobs(deployID)
 	if len(jobs) == 0 {
-		if deploy.Mode == "watch" {
-			// Watch mode — supervisor will discover issues.
+		if deploy.ActivationPolicy.IsLongLived() {
+			// Automation mode — coordinator will discover or schedule work.
 		} else {
-			fmt.Println("Warning: no jobs found and not in watch mode")
+			fmt.Println("Warning: no jobs found in explicit deployment")
 		}
 	}
 
@@ -467,7 +474,7 @@ func runDaemon(deployID string) error {
 
 	printStartupSummary(coord.Snapshot())
 
-	if len(jobs) == 0 && deploy.Mode == "issues" && sched == nil {
+	if len(jobs) == 0 && !deploy.ActivationPolicy.IsLongLived() && sched == nil {
 		fmt.Println("Note: daemon started but no jobs found. Waiting for watch events or manual job creation.")
 	}
 
@@ -495,7 +502,7 @@ func runDaemon(deployID string) error {
 
 	// Check if we have jobs to run or schedules to wait for.
 	existingJobs, _ := store.GetJobs(deployID)
-	if len(existingJobs) == 0 && deploy.Mode != "watch" && sched == nil {
+	if len(existingJobs) == 0 && !deploy.ActivationPolicy.IsLongLived() && sched == nil {
 		fmt.Println("No jobs to run. Exiting.")
 		return nil
 	}
@@ -511,6 +518,22 @@ func runDaemon(deployID string) error {
 	coord.Run(ctx)
 
 	return nil
+}
+
+// deriveActivationPolicy converts the operator's requested work sources into
+// durable deployment intent. Merely having jobs.yaml on disk does not turn an
+// explicit issue or proactive-agent deployment into an automation worker.
+func deriveActivationPolicy(issues []int, watchFilter, agent string) db.ActivationPolicy {
+	hasExplicitWork := len(issues) > 0 || agent != "autopilot"
+	hasExplicitWatch := watchFilter != ""
+	switch {
+	case hasExplicitWork && hasExplicitWatch:
+		return db.ActivationHybrid
+	case hasExplicitWork:
+		return db.ActivationExplicit
+	default:
+		return db.ActivationAutomated
+	}
 }
 
 // --- Helpers ---

@@ -41,19 +41,20 @@ func TestDeploymentCRUD(t *testing.T) {
 	s := testStore(t)
 
 	d := &Deployment{
-		ID:             "test-deploy-1",
-		RepoDir:        "/tmp/repo",
-		Owner:          "aptx-health",
-		Repo:           "agent-minder",
-		Mode:           "issues",
-		MaxAgents:      3,
-		MaxTurns:       50,
-		MaxBudgetUSD:   5.0,
-		AnalyzerModel:  "sonnet",
-		SkipLabel:      "no-agent",
-		TotalBudgetUSD: 25.0,
-		BaseBranch:     "main",
-		ReviewEnabled:  true,
+		ID:               "test-deploy-1",
+		RepoDir:          "/tmp/repo",
+		Owner:            "aptx-health",
+		Repo:             "agent-minder",
+		Mode:             "issues",
+		ActivationPolicy: ActivationHybrid,
+		MaxAgents:        3,
+		MaxTurns:         50,
+		MaxBudgetUSD:     5.0,
+		AnalyzerModel:    "sonnet",
+		SkipLabel:        "no-agent",
+		TotalBudgetUSD:   25.0,
+		BaseBranch:       "main",
+		ReviewEnabled:    true,
 	}
 
 	if err := s.CreateDeployment(d); err != nil {
@@ -69,6 +70,9 @@ func TestDeploymentCRUD(t *testing.T) {
 	}
 	if got.Runtime != "claude-code" {
 		t.Errorf("got runtime %q, want claude-code default", got.Runtime)
+	}
+	if got.ActivationPolicy != ActivationHybrid {
+		t.Errorf("got activation policy %q, want %q", got.ActivationPolicy, ActivationHybrid)
 	}
 
 	ds, err := s.ListDeployments()
@@ -546,6 +550,10 @@ func TestV8toV9ScheduleMigration(t *testing.T) {
 	v8Schedules := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (8);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	mode TEXT NOT NULL DEFAULT 'issues'
+);
 CREATE TABLE jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL,
@@ -620,6 +628,10 @@ func TestV9toV10ProvenanceMigration(t *testing.T) {
 	v9 := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (9);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	mode TEXT NOT NULL DEFAULT 'issues'
+);
 CREATE TABLE jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL,
@@ -786,6 +798,12 @@ func TestV10toV11AgentRunsMigration(t *testing.T) {
 	v10 := `
 CREATE TABLE schema_version (version INTEGER NOT NULL);
 INSERT INTO schema_version VALUES (10);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	mode TEXT NOT NULL DEFAULT 'issues'
+);
+INSERT INTO deployments (id, mode) VALUES ('explicit-legacy', 'issues');
+INSERT INTO deployments (id, mode) VALUES ('automated-legacy', 'watch');
 CREATE TABLE jobs (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	deployment_id TEXT NOT NULL,
@@ -813,6 +831,17 @@ VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
 	_ = c2.Get(&version, "SELECT version FROM schema_version")
 	if version != schemaVersion {
 		t.Errorf("got schema version %d, want %d", version, schemaVersion)
+	}
+
+	var explicitPolicy, automatedPolicy ActivationPolicy
+	if err := c2.QueryRow("SELECT activation_policy FROM deployments WHERE id = 'explicit-legacy'").Scan(&explicitPolicy); err != nil {
+		t.Fatalf("query explicit legacy policy: %v", err)
+	}
+	if err := c2.QueryRow("SELECT activation_policy FROM deployments WHERE id = 'automated-legacy'").Scan(&automatedPolicy); err != nil {
+		t.Fatalf("query automated legacy policy: %v", err)
+	}
+	if explicitPolicy != ActivationExplicit || automatedPolicy != ActivationAutomated {
+		t.Fatalf("legacy policies = %q/%q, want %q/%q", explicitPolicy, automatedPolicy, ActivationExplicit, ActivationAutomated)
 	}
 
 	// The agent_runs table exists and pre-existing job rows survive untouched.

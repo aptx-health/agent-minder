@@ -38,12 +38,16 @@ func (s *Store) CreateDeployment(d *Deployment) error {
 	if runtimeName == "" {
 		runtimeName = "claude-code"
 	}
+	activationPolicy := d.ActivationPolicy
+	if activationPolicy == "" {
+		activationPolicy = ActivationExplicit
+	}
 	_, err := s.db.Exec(`INSERT INTO deployments
-		(id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns,
+		(id, repo_dir, owner, repo, mode, activation_policy, watch_filter, max_agents, max_turns,
 		 max_budget_usd, runtime, analyzer_model, skip_label, auto_merge, review_enabled,
 		 review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.ID, d.RepoDir, d.Owner, d.Repo, d.Mode, d.WatchFilter,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ID, d.RepoDir, d.Owner, d.Repo, d.Mode, activationPolicy, d.WatchFilter,
 		d.MaxAgents, d.MaxTurns, d.MaxBudgetUSD, runtimeName, d.AnalyzerModel,
 		d.SkipLabel, d.AutoMerge, d.ReviewEnabled,
 		d.ReviewMaxTurns, d.ReviewMaxBudget,

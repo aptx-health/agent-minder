@@ -8,6 +8,9 @@ package coordinator
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -80,22 +83,34 @@ func New(opts Options) (*Coordinator, error) {
 		c.sup.SetRuntime(opts.Runtime)
 	}
 
-	// Load jobs.yaml scheduler and trigger routes when present.
-	cfgPath := scheduler.ConfigPath(opts.Deploy.RepoDir)
-	if cfg, err := scheduler.LoadConfig(cfgPath); err == nil {
-		c.cfg = cfg
-		c.sched = scheduler.New(opts.Store, opts.Deploy.ID, opts.Deploy.Owner, opts.Deploy.Repo, cfg)
-		if err := c.sched.SyncSchedules(); err != nil {
-			c.syncWarning = err
-		}
-		c.routes = TriggerRoutesFromConfig(cfg)
-		if len(c.routes) > 0 {
-			c.sup.SetTriggerRoutes(c.routes)
+	// Only automated and hybrid deployments activate jobs.yaml. Explicit
+	// deployments deliberately do not parse it, so an unrelated malformed file
+	// cannot widen or block an explicit batch.
+	if opts.Deploy.ActivationPolicy.ActivatesAutomations() {
+		cfgPath := scheduler.ConfigPath(opts.Deploy.RepoDir)
+		cfg, err := scheduler.LoadConfig(cfgPath)
+		if err != nil {
+			// A watch-only deployment is valid without jobs.yaml. Every other
+			// automation deployment requires the canonical file to remain present.
+			watchOnlyWithoutConfig := errors.Is(err, os.ErrNotExist) &&
+				opts.Deploy.WatchFilter.Valid && opts.Deploy.WatchFilter.String != ""
+			if !watchOnlyWithoutConfig {
+				return nil, fmt.Errorf("load jobs.yaml for %s deployment: %w", opts.Deploy.ActivationPolicy, err)
+			}
+		} else {
+			c.cfg = cfg
+			c.sched = scheduler.New(opts.Store, opts.Deploy.ID, opts.Deploy.Owner, opts.Deploy.Repo, cfg)
+			if err := c.sched.SyncSchedules(); err != nil {
+				c.syncWarning = err
+			}
+			c.routes = TriggerRoutesFromConfig(cfg)
+			if len(c.routes) > 0 {
+				c.sup.SetTriggerRoutes(c.routes)
+			}
 		}
 	}
 
-	hasTriggers := len(c.routes) > 0
-	c.sup.SetDaemonMode(opts.Deploy.Mode == "watch" || c.sched != nil || hasTriggers)
+	c.sup.SetDaemonMode(opts.Deploy.ActivationPolicy.IsLongLived())
 
 	return c, nil
 }
@@ -182,6 +197,9 @@ func TriggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 // historical best-effort startup-summary behavior.
 func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute, store *db.Store, deployID string) []Automation {
 	automations := make([]Automation, 0, len(routes)+1)
+	if !deploy.ActivationPolicy.IsLongLived() {
+		return automations
+	}
 	if deploy.WatchFilter.Valid && deploy.WatchFilter.String != "" {
 		automations = append(automations, Automation{
 			Kind:       AutomationWatch,

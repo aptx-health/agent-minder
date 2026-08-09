@@ -30,6 +30,8 @@ var ErrNotFound = errors.New("not found in this deployment")
 type StateProvider interface {
 	// DeploymentID identifies the deployment this provider serves.
 	DeploymentID() string
+	// ActivationPolicy returns the persisted deployment activation intent.
+	ActivationPolicy() db.ActivationPolicy
 
 	// Stop halts the deployment: cancels scheduler and supervisor work and
 	// drains in-flight jobs.
@@ -63,6 +65,9 @@ var _ StateProvider = (*Coordinator)(nil)
 
 // DeploymentID identifies the deployment this Coordinator serves.
 func (c *Coordinator) DeploymentID() string { return c.deploy.ID }
+
+// ActivationPolicy returns the persisted deployment activation intent.
+func (c *Coordinator) ActivationPolicy() db.ActivationPolicy { return c.deploy.ActivationPolicy }
 
 // ResumeBudget clears the supervisor's budget-paused state.
 func (c *Coordinator) ResumeBudget() { c.sup.ResumeBudget() }

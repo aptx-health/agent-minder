@@ -43,6 +43,31 @@ func TestValidateServeAPIKey(t *testing.T) {
 	}
 }
 
+func TestDeriveActivationPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		issues []int
+		watch  string
+		agent  string
+		want   db.ActivationPolicy
+	}{
+		{name: "explicit issues", issues: []int{42, 55}, agent: "autopilot", want: db.ActivationExplicit},
+		{name: "yaml automation", agent: "autopilot", want: db.ActivationAutomated},
+		{name: "watch automation", watch: "label:ready", agent: "autopilot", want: db.ActivationAutomated},
+		{name: "issues and watch", issues: []int{42}, watch: "label:ready", agent: "autopilot", want: db.ActivationHybrid},
+		{name: "proactive agent", agent: "dependency-updater", want: db.ActivationExplicit},
+		{name: "proactive agent and watch", watch: "label:ready", agent: "dependency-updater", want: db.ActivationHybrid},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := deriveActivationPolicy(tt.issues, tt.watch, tt.agent); got != tt.want {
+				t.Fatalf("deriveActivationPolicy() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 const automationTestConfig = `jobs:
   nightly-maintenance:
     schedule: "0 2 * * *"
@@ -73,17 +98,18 @@ func setupAutomationTest(t *testing.T) (*db.Deployment, *db.Store, *scheduler.Co
 	t.Cleanup(func() { _ = conn.Close() })
 	store := db.NewStore(conn)
 	deploy := &db.Deployment{
-		ID:             "characterization",
-		RepoDir:        repoDir,
-		Owner:          "acme",
-		Repo:           "widgets",
-		Mode:           "issues",
-		MaxAgents:      1,
-		MaxTurns:       50,
-		MaxBudgetUSD:   5,
-		Runtime:        "claude-code",
-		TotalBudgetUSD: 25,
-		BaseBranch:     "main",
+		ID:               "characterization",
+		RepoDir:          repoDir,
+		Owner:            "acme",
+		Repo:             "widgets",
+		Mode:             "issues",
+		ActivationPolicy: db.ActivationAutomated,
+		MaxAgents:        1,
+		MaxTurns:         50,
+		MaxBudgetUSD:     5,
+		Runtime:          "claude-code",
+		TotalBudgetUSD:   25,
+		BaseBranch:       "main",
 	}
 	if err := store.CreateDeployment(deploy); err != nil {
 		t.Fatalf("create deployment: %v", err)
