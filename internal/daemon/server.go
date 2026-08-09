@@ -169,7 +169,7 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job, err := s.store.GetJob(id)
-	if err != nil {
+	if err != nil || job.DeploymentID != s.deployID {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
 		return
 	}
@@ -186,7 +186,7 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job, err := s.store.GetJob(id)
-	if err != nil {
+	if err != nil || job.DeploymentID != s.deployID {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job_not_found"})
 		return
 	}
