@@ -245,10 +245,11 @@ type AgentRun struct {
 	Attempt int `db:"attempt"`
 
 	// What ran.
-	Agent     string         `db:"agent"`
-	Runtime   sql.NullString `db:"runtime"`
-	Model     sql.NullString `db:"model"`
-	SessionID sql.NullString `db:"session_id"`
+	Agent          string         `db:"agent"`
+	Runtime        sql.NullString `db:"runtime"`
+	Model          sql.NullString `db:"model"`
+	RuntimeVersion sql.NullString `db:"runtime_version"`
+	SessionID      sql.NullString `db:"session_id"`
 
 	// Outcome.
 	Status        string         `db:"status"` // running/success/failed/bailed/manual/usage_limit

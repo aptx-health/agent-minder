@@ -557,6 +557,11 @@ type DefaultJobManager struct {
 	attempts map[string]int // stage name → executions so far (for run attempt numbering)
 }
 
+type agentRunStart struct {
+	id    int64
+	model string
+}
+
 // NewDefaultJobManager creates a job manager that executes the contract's stage pipeline.
 func NewDefaultJobManager(sc *SlotContext, contract *AgentContract) *DefaultJobManager {
 	return &DefaultJobManager{sc: sc, contract: contract, attempts: map[string]int{}}
@@ -566,40 +571,83 @@ func NewDefaultJobManager(sc *SlotContext, contract *AgentContract) *DefaultJobM
 // and registers it so live-status updates persist step progress. Returns the
 // run ID, or 0 if the row could not be written (run tracking is best-effort and
 // never fails the stage).
-func (m *DefaultJobManager) beginAgentRun(stageName, agentName string, inv runtimepkg.Invocation) int64 {
+func (m *DefaultJobManager) beginAgentRun(ctx context.Context, stageName, agentName string, inv runtimepkg.Invocation, rt runtimepkg.AgentRuntime) agentRunStart {
 	sc := m.sc
+	meta := m.resolveRunMetadata(ctx, inv, rt)
 	if sc.Store == nil {
-		return 0
+		return agentRunStart{model: meta.Model}
 	}
 	m.attempts[stageName]++
 	run := &db.AgentRun{
-		JobID:        sc.Job.ID,
-		Stage:        stageName,
-		Attempt:      m.attempts[stageName],
-		Agent:        agentName,
-		Runtime:      sql.NullString{String: sc.Job.EffectiveRuntime(sc.Deploy), Valid: true},
-		Model:        toNullStr(inv.Model),
-		MaxTurns:     sql.NullInt64{Int64: int64(inv.Limits.MaxTurns), Valid: inv.Limits.MaxTurns > 0},
-		MaxBudgetUSD: sql.NullFloat64{Float64: inv.Limits.MaxBudgetUSD, Valid: inv.Limits.MaxBudgetUSD > 0},
-		LogPath:      toNullStr(sc.LogPath),
+		JobID:          sc.Job.ID,
+		Stage:          stageName,
+		Attempt:        m.attempts[stageName],
+		Agent:          agentName,
+		Runtime:        toNullStr(meta.RuntimeName),
+		Model:          toNullStr(meta.Model),
+		RuntimeVersion: toNullStr(meta.RuntimeVersion),
+		MaxTurns:       sql.NullInt64{Int64: int64(inv.Limits.MaxTurns), Valid: inv.Limits.MaxTurns > 0},
+		MaxBudgetUSD:   sql.NullFloat64{Float64: inv.Limits.MaxBudgetUSD, Valid: inv.Limits.MaxBudgetUSD > 0},
+		LogPath:        toNullStr(sc.LogPath),
 	}
 	if err := sc.Store.StartAgentRun(run); err != nil {
 		debugLog("agent run start failed", "job", sc.Job.ID, "stage", stageName, "error", err.Error())
-		return 0
+		return agentRunStart{model: meta.Model}
 	}
 	if sc.sup != nil {
 		sc.sup.beginAgentRunTracking(sc.Job.ID, run.ID)
 	}
-	return run.ID
+	return agentRunStart{id: run.ID, model: meta.Model}
+}
+
+func (m *DefaultJobManager) resolveRunMetadata(ctx context.Context, inv runtimepkg.Invocation, rt runtimepkg.AgentRuntime) runtimepkg.RunMetadata {
+	sc := m.sc
+	meta := runtimepkg.RunMetadata{
+		RuntimeName: sc.Job.EffectiveRuntime(sc.Deploy),
+		Model:       runtimepkg.NormalizeModelName(inv.Model),
+	}
+	if rt != nil {
+		meta.RuntimeName = rt.Name()
+		if provider, ok := rt.(runtimepkg.MetadataProvider); ok {
+			resolved, err := provider.ResolveRunMetadata(ctx, inv)
+			if err != nil {
+				debugLog("runtime metadata resolution failed",
+					"job", sc.Job.ID, "runtime", rt.Name(), "error", err.Error())
+			}
+			if resolved.RuntimeName != "" {
+				meta.RuntimeName = resolved.RuntimeName
+			}
+			if resolved.Model != "" {
+				meta.Model = resolved.Model
+			}
+			if resolved.RuntimeVersion != "" {
+				meta.RuntimeVersion = resolved.RuntimeVersion
+			}
+		}
+	}
+	return meta
 }
 
 // finishAgentRun writes the terminal state of a run row from the stage outcome
 // and the runtime result, and stops live-status tracking for it.
-func (m *DefaultJobManager) finishAgentRun(runID int64, result *runtimepkg.Result, res stageResult) {
-	if runID == 0 {
+func (m *DefaultJobManager) finishAgentRun(run agentRunStart, result *runtimepkg.Result, res stageResult) {
+	if run.id == 0 {
 		return
 	}
 	sc := m.sc
+	reportedModel := ""
+	if result != nil {
+		reportedModel = runtimepkg.NormalizeModelName(result.Model)
+		if reportedModel != "" && run.model != "" && reportedModel != run.model {
+			if sc.sup != nil {
+				sc.EmitDurable(EventWarning, fmt.Sprintf(
+					"Runtime model mismatch for %s: recorded %q but runtime reported %q",
+					sc.JobLabel(), run.model, reportedModel))
+			}
+			debugLog("runtime model mismatch",
+				"job", sc.Job.ID, "run", run.id, "recorded_model", run.model, "reported_model", reportedModel)
+		}
+	}
 	steps := 0
 	if sc.sup != nil {
 		steps = sc.sup.endAgentRunTracking(sc.Job.ID)
@@ -615,6 +663,7 @@ func (m *DefaultJobManager) finishAgentRun(runID int64, result *runtimepkg.Resul
 	}
 	if result != nil {
 		fin.SessionID = result.SessionID
+		fin.Model = reportedModel
 		fin.FinalText = result.FinalText
 		fin.FinalTurns = result.NumTurns
 		fin.CostUSD = result.TotalCostUSD
@@ -622,8 +671,8 @@ func (m *DefaultJobManager) finishAgentRun(runID int64, result *runtimepkg.Resul
 			fin.StopReason = result.StopReason
 		}
 	}
-	if err := sc.Store.CompleteAgentRun(runID, fin); err != nil {
-		debugLog("agent run complete failed", "job", sc.Job.ID, "run", runID, "error", err.Error())
+	if err := sc.Store.CompleteAgentRun(run.id, fin); err != nil {
+		debugLog("agent run complete failed", "job", sc.Job.ID, "run", run.id, "error", err.Error())
 	}
 }
 
@@ -950,7 +999,7 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 
 	// Record a durable run row for this stage attempt. finishAgentRun reads the
 	// final stageResult (named return) and the runtime result on the way out.
-	runID := m.beginAgentRun(stage.Name, agentName, inv)
+	runID := m.beginAgentRun(ctx, stage.Name, agentName, inv, rt)
 	var runResult *runtimepkg.Result
 	defer func() { m.finishAgentRun(runID, runResult, res) }()
 
@@ -1227,16 +1276,20 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
 	prompt := renderReviewContext(ctx, sc)
-	if rt, err := sc.sup.RuntimeForJob(job); err != nil {
+	var rt runtimepkg.AgentRuntime
+	if resolved, err := sc.sup.RuntimeForJob(job); err != nil {
 		sc.EmitEvent(EventError, fmt.Sprintf("Runtime config error for review of %s: %v", sc.JobLabel(), err))
 		return stageResult{success: false}
-	} else if rt == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
+	} else {
+		rt = resolved
+	}
+	if rt == nil && (sc.Hooks == nil || sc.Hooks.RunStageFn == nil) {
 		sc.EmitEvent(EventError, fmt.Sprintf("No runtime configured for review of %s", sc.JobLabel()))
 		return stageResult{success: false}
 	}
 	inv := runtimeInvocationFor(sc, agentName, prompt, "")
 
-	runID := m.beginAgentRun(stage.Name, agentName, inv)
+	runID := m.beginAgentRun(ctx, stage.Name, agentName, inv, rt)
 	var runResult *runtimepkg.Result
 	defer func() { m.finishAgentRun(runID, runResult, res) }()
 

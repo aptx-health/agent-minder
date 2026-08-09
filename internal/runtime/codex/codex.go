@@ -49,6 +49,17 @@ func init() {
 // Name returns the runtime identifier.
 func (c *CodexRuntime) Name() string { return Name }
 
+// ResolveRunMetadata reports the normalized fresh-run model and best-effort
+// Codex CLI version before process launch.
+func (c *CodexRuntime) ResolveRunMetadata(ctx context.Context, inv runtime.Invocation) (runtime.RunMetadata, error) {
+	version, err := runtime.CommandVersion(ctx, c.binPath(), "--version")
+	return runtime.RunMetadata{
+		RuntimeName:    c.Name(),
+		Model:          runtime.NormalizeModelName(inv.Model),
+		RuntimeVersion: version,
+	}, err
+}
+
 // binPath returns the configured binary path or the default.
 func (c *CodexRuntime) binPath() string {
 	if c.Bin != "" {
@@ -266,6 +277,7 @@ func (c *CodexRuntime) ParseResult(logPath string) (*runtime.Result, error) {
 
 	return &runtime.Result{
 		SessionID:         state.SessionID,
+		Model:             state.Model,
 		NumTurns:          state.NumTurns,
 		TotalCostUSD:      estimateCostUSD(state.Model, state.InputTok, state.CachedTok, state.OutputTok),
 		FinalText:         state.FinalText,

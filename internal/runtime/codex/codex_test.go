@@ -112,6 +112,25 @@ func TestBuildArgs(t *testing.T) {
 	}
 }
 
+func TestModelOverrideReachesCLIInvocation(t *testing.T) {
+	var gotArgs []string
+	r := New()
+	r.execFunc = func(_ context.Context, args []string, _ string, _ map[string]string, _ runtime.Limits, _ runtime.EventSink, _ io.Writer) (int, error) {
+		gotArgs = append([]string(nil), args...)
+		return 0, nil
+	}
+
+	if _, err := r.Run(context.Background(), runtime.Invocation{Model: " gpt-5.1-codex ", Prompt: "ship it"}, nil, io.Discard); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for i := 0; i < len(gotArgs)-1; i++ {
+		if gotArgs[i] == "--model" && gotArgs[i+1] == "gpt-5.1-codex" {
+			return
+		}
+	}
+	t.Fatalf("model override did not reach Codex CLI args: %v", gotArgs)
+}
+
 func TestBuildArgsAddsLinkedWorktreeGitDirs(t *testing.T) {
 	dir := t.TempDir()
 	gitDir := filepath.Join(dir, "..", "repo", ".git", "worktrees", "issue-2")
@@ -241,6 +260,9 @@ func TestParseResultSuccess(t *testing.T) {
 	}
 	if got.SessionID != "thread-1" {
 		t.Errorf("SessionID = %q, want thread-1", got.SessionID)
+	}
+	if got.Model != "gpt-5.4-mini" {
+		t.Errorf("Model = %q, want gpt-5.4-mini", got.Model)
 	}
 	if got.NumTurns != 1 {
 		t.Errorf("NumTurns = %d, want 1", got.NumTurns)

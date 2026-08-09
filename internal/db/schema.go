@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 13
+const schemaVersion = 14
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 	agent TEXT NOT NULL,
 	runtime TEXT,
 	model TEXT,
+	runtime_version TEXT,
 	session_id TEXT,
 
 	-- Outcome.
@@ -491,6 +492,13 @@ CREATE TABLE IF NOT EXISTS event_log_meta (
 UPDATE schema_version SET version = 13;
 `
 
+// migrateV13toV14 records the runtime CLI version resolved at run start.
+// Nullable and additive because older runs have no version probe.
+const migrateV13toV14 = `
+ALTER TABLE agent_runs ADD COLUMN runtime_version TEXT;
+UPDATE schema_version SET version = 14;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -596,6 +604,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV12toV13); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v12→v13: %w", err)
+			}
+		}
+		if version < 14 {
+			if _, err := db.Exec(migrateV13toV14); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v13→v14: %w", err)
 			}
 		}
 	} else if !hasVersion {

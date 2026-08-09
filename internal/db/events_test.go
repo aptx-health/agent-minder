@@ -402,6 +402,29 @@ CREATE TABLE jobs (
 );
 INSERT INTO jobs (deployment_id, agent, name, status)
 VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
+CREATE TABLE agent_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id INTEGER NOT NULL REFERENCES jobs(id),
+	stage TEXT NOT NULL,
+	attempt INTEGER NOT NULL DEFAULT 1,
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	session_id TEXT,
+	status TEXT NOT NULL DEFAULT 'running',
+	stop_reason TEXT,
+	failure_detail TEXT,
+	step_count INTEGER DEFAULT 0,
+	final_turns INTEGER DEFAULT 0,
+	cost_usd REAL DEFAULT 0.0,
+	max_turns INTEGER,
+	max_budget_usd REAL,
+	final_text TEXT,
+	log_path TEXT,
+	started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	last_activity_at DATETIME,
+	completed_at DATETIME
+);
 `
 	if _, err := conn.Exec(v12); err != nil {
 		t.Fatalf("create v12 db: %v", err)

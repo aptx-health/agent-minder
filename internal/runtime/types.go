@@ -10,6 +10,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 )
@@ -41,6 +42,21 @@ type Invocation struct {
 	Env          map[string]string // additional env vars (e.g., GITHUB_TOKEN)
 }
 
+// RunMetadata is the runtime's best-effort description of what a fresh
+// invocation will execute after local normalization. RuntimeVersion is optional
+// because CLI version probes should never block or fail a run.
+type RunMetadata struct {
+	RuntimeName    string
+	Model          string
+	RuntimeVersion string
+}
+
+// MetadataProvider is an optional interface implemented by runtimes that can
+// resolve invocation metadata before process launch.
+type MetadataProvider interface {
+	ResolveRunMetadata(ctx context.Context, inv Invocation) (RunMetadata, error)
+}
+
 // Limits caps a single run. A zero value means no cap (runtime default).
 type Limits struct {
 	MaxTurns     int
@@ -51,6 +67,7 @@ type Limits struct {
 // Result is the normalized post-run summary parsed from the runtime log.
 type Result struct {
 	SessionID         string // for Resume; empty if runtime has no session concept
+	Model             string // runtime-reported effective model, when present
 	NumTurns          int
 	TotalCostUSD      float64
 	FinalText         string // last assistant message text (where bail-report lives)

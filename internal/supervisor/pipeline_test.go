@@ -1538,11 +1538,17 @@ func TestPipeline_NoCaptureWithoutFlag(t *testing.T) {
 // final turns, cost, and session, plus a separate row for the review stage.
 func TestPipeline_WritesAgentRuns(t *testing.T) {
 	h := newHarness(t, func(d *db.Deployment) { d.ReviewEnabled = true })
+	h.sup.SetRuntime(&fakeRuntime{metadata: runtimepkg.RunMetadata{
+		RuntimeName:    "fake",
+		Model:          "resolved-model",
+		RuntimeVersion: "fake version 1.2.3",
+	}})
 
 	h.hooks.DetectPRFn = func(ctx context.Context) int { return 100 }
 	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
 		return 0, &runtimepkg.Result{
 			SessionID:    "sess-" + inv.AgentName,
+			Model:        "resolved-model",
 			NumTurns:     9,
 			TotalCostUSD: 0.21,
 			FinalText:    "done",
@@ -1556,6 +1562,7 @@ func TestPipeline_WritesAgentRuns(t *testing.T) {
 	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
 		j.IssueNumber = 77
 		j.Name = "issue-77"
+		j.Model = sql.NullString{String: "requested-model", Valid: true}
 	})
 	contract := &AgentContract{
 		Name:   "autopilot",
@@ -1589,8 +1596,14 @@ func TestPipeline_WritesAgentRuns(t *testing.T) {
 	if code.SessionID.String != "sess-autopilot" {
 		t.Errorf("code run session = %q, want sess-autopilot", code.SessionID.String)
 	}
-	if !code.Runtime.Valid || code.Runtime.String == "" {
-		t.Errorf("code run runtime not recorded: %+v", code.Runtime)
+	if code.Runtime.String != "fake" {
+		t.Errorf("code run runtime = %q, want fake", code.Runtime.String)
+	}
+	if code.Model.String != "resolved-model" {
+		t.Errorf("code run model = %q, want resolved-model", code.Model.String)
+	}
+	if code.RuntimeVersion.String != "fake version 1.2.3" {
+		t.Errorf("code run runtime_version = %q, want fake version 1.2.3", code.RuntimeVersion.String)
 	}
 	if !code.CompletedAt.Valid {
 		t.Error("code run completed_at should be set")
@@ -1602,6 +1615,50 @@ func TestPipeline_WritesAgentRuns(t *testing.T) {
 	}
 	if review.Status != db.RunStatusSuccess {
 		t.Errorf("review run status = %q, want success", review.Status)
+	}
+}
+
+func TestPipeline_ReconcilesRuntimeReportedModelMismatch(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) { d.ReviewEnabled = false })
+	h.sup.SetRuntime(&fakeRuntime{metadata: runtimepkg.RunMetadata{
+		RuntimeName: "fake",
+		Model:       "requested-model",
+	}})
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
+		return 0, &runtimepkg.Result{
+			SessionID: "sess-autopilot",
+			Model:     "reported-model",
+			FinalText: "done",
+		}, false, nil
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 88
+		j.Name = "issue-88"
+		j.Model = sql.NullString{String: "requested-model", Valid: true}
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "issue",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !hasEvent(h.events(), string(EventWarning), `recorded "requested-model" but runtime reported "reported-model"`) {
+		t.Fatalf("missing runtime model mismatch warning")
+	}
+
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("got %d agent runs, want 1", len(runs))
+	}
+	if runs[0].Model.String != "reported-model" {
+		t.Errorf("reconciled model = %q, want reported-model", runs[0].Model.String)
 	}
 }
 

@@ -743,15 +743,16 @@ func TestAgentRunCRUD(t *testing.T) {
 	}
 
 	run := &AgentRun{
-		JobID:        j.ID,
-		Stage:        "code",
-		Attempt:      1,
-		Agent:        "autopilot",
-		Runtime:      sql.NullString{String: "claude-code", Valid: true},
-		Model:        sql.NullString{String: "sonnet", Valid: true},
-		MaxTurns:     sql.NullInt64{Int64: 50, Valid: true},
-		MaxBudgetUSD: sql.NullFloat64{Float64: 5, Valid: true},
-		LogPath:      sql.NullString{String: "/tmp/log", Valid: true},
+		JobID:          j.ID,
+		Stage:          "code",
+		Attempt:        1,
+		Agent:          "autopilot",
+		Runtime:        sql.NullString{String: "claude-code", Valid: true},
+		Model:          sql.NullString{String: "sonnet", Valid: true},
+		RuntimeVersion: sql.NullString{String: "claude 1.2.3", Valid: true},
+		MaxTurns:       sql.NullInt64{Int64: 50, Valid: true},
+		MaxBudgetUSD:   sql.NullFloat64{Float64: 5, Valid: true},
+		LogPath:        sql.NullString{String: "/tmp/log", Valid: true},
 	}
 	if err := s.StartAgentRun(run); err != nil {
 		t.Fatalf("StartAgentRun: %v", err)
@@ -774,6 +775,9 @@ func TestAgentRunCRUD(t *testing.T) {
 	if got.StepCount != 7 {
 		t.Errorf("step_count = %d, want 7", got.StepCount)
 	}
+	if got.RuntimeVersion.String != "claude 1.2.3" {
+		t.Errorf("runtime_version = %q, want claude 1.2.3", got.RuntimeVersion.String)
+	}
 	if !got.LastActivityAt.Valid {
 		t.Error("last_activity_at should be set after Touch")
 	}
@@ -786,6 +790,7 @@ func TestAgentRunCRUD(t *testing.T) {
 		Status:     RunStatusSuccess,
 		StopReason: "end_turn",
 		SessionID:  "sess-1",
+		Model:      "claude-3-5-sonnet-20241022",
 		FinalText:  "opened PR",
 		FinalTurns: 12,
 		CostUSD:    0.34,
@@ -809,6 +814,9 @@ func TestAgentRunCRUD(t *testing.T) {
 	}
 	if got.SessionID.String != "sess-1" || got.StopReason.String != "end_turn" {
 		t.Errorf("session/stop = %q/%q, want sess-1/end_turn", got.SessionID.String, got.StopReason.String)
+	}
+	if got.Model.String != "claude-3-5-sonnet-20241022" {
+		t.Errorf("model = %q, want reconciled claude-3-5-sonnet-20241022", got.Model.String)
 	}
 	if !got.CompletedAt.Valid {
 		t.Error("completed_at should be set after completion")
@@ -893,6 +901,116 @@ VALUES ('d1', 'autopilot', 'autopilot-issue-1', 'queued');
 	}
 }
 
+func TestV13toV14RuntimeVersionMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migrate1314.db")
+
+	conn, err := sqlx.Open("sqlite", dbPath+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open v13 db: %v", err)
+	}
+	v13 := `
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+INSERT INTO schema_version VALUES (13);
+CREATE TABLE deployments (
+	id TEXT PRIMARY KEY,
+	repo_dir TEXT NOT NULL,
+	owner TEXT NOT NULL,
+	repo TEXT NOT NULL
+);
+CREATE TABLE jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	deployment_id TEXT NOT NULL REFERENCES deployments(id),
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL,
+	owner TEXT NOT NULL DEFAULT '',
+	repo TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'queued'
+);
+CREATE TABLE agent_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id INTEGER NOT NULL REFERENCES jobs(id),
+	stage TEXT NOT NULL,
+	attempt INTEGER NOT NULL DEFAULT 1,
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	session_id TEXT,
+	status TEXT NOT NULL DEFAULT 'running',
+	stop_reason TEXT,
+	failure_detail TEXT,
+	step_count INTEGER DEFAULT 0,
+	final_turns INTEGER DEFAULT 0,
+	cost_usd REAL DEFAULT 0.0,
+	max_turns INTEGER,
+	max_budget_usd REAL,
+	final_text TEXT,
+	log_path TEXT,
+	started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	last_activity_at DATETIME,
+	completed_at DATETIME
+);
+CREATE TABLE events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	time DATETIME NOT NULL,
+	deployment_id TEXT NOT NULL,
+	job_id INTEGER NOT NULL DEFAULT 0,
+	run_id INTEGER NOT NULL DEFAULT 0,
+	type TEXT NOT NULL,
+	severity TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	data TEXT
+);
+CREATE TABLE event_log_meta (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	epoch TEXT NOT NULL,
+	truncated_through INTEGER NOT NULL DEFAULT 0,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO deployments (id, repo_dir, owner, repo) VALUES ('d1', '/tmp/repo', 'aptx-health', 'agent-minder');
+INSERT INTO jobs (deployment_id, agent, name, owner, repo, status)
+VALUES ('d1', 'autopilot', 'issue-1', 'aptx-health', 'agent-minder', 'running');
+INSERT INTO agent_runs (job_id, stage, attempt, agent, runtime, model, status)
+VALUES (1, 'code', 1, 'autopilot', 'codex', 'gpt-5', 'running');
+`
+	if _, err := conn.Exec(v13); err != nil {
+		t.Fatalf("create v13 db: %v", err)
+	}
+	_ = conn.Close()
+
+	c2, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open (migration): %v", err)
+	}
+	defer func() { _ = c2.Close() }()
+
+	var version int
+	_ = c2.Get(&version, "SELECT version FROM schema_version")
+	if version != schemaVersion {
+		t.Errorf("got schema version %d, want %d", version, schemaVersion)
+	}
+
+	store := NewStore(c2)
+	got, err := store.GetAgentRun(1)
+	if err != nil {
+		t.Fatalf("GetAgentRun after migration: %v", err)
+	}
+	if got.Model.String != "gpt-5" || got.RuntimeVersion.Valid {
+		t.Errorf("migrated run model/runtime_version = %q/%+v, want gpt-5/NULL", got.Model.String, got.RuntimeVersion)
+	}
+	run := &AgentRun{JobID: 1, Stage: "review", Attempt: 1, Agent: "reviewer", RuntimeVersion: sql.NullString{String: "codex 1.2.3", Valid: true}}
+	if err := store.StartAgentRun(run); err != nil {
+		t.Fatalf("StartAgentRun after migration: %v", err)
+	}
+	got, err = store.GetAgentRun(run.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRun new row: %v", err)
+	}
+	if got.RuntimeVersion.String != "codex 1.2.3" {
+		t.Errorf("new run runtime_version = %q, want codex 1.2.3", got.RuntimeVersion.String)
+	}
+}
+
 func TestV11toV12ActivationPolicyMigration(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "migrate1112.db")
@@ -927,6 +1045,40 @@ CREATE TABLE deployments (
 	started_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 INSERT INTO deployments (id, repo_dir, owner, repo, mode) VALUES ('d1', '/tmp', 'o', 'r', 'watch');
+CREATE TABLE jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	deployment_id TEXT NOT NULL REFERENCES deployments(id),
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL,
+	owner TEXT NOT NULL DEFAULT '',
+	repo TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'queued'
+);
+INSERT INTO jobs (deployment_id, agent, name, owner, repo, status)
+VALUES ('d1', 'autopilot', 'issue-1', 'o', 'r', 'running');
+CREATE TABLE agent_runs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	job_id INTEGER NOT NULL REFERENCES jobs(id),
+	stage TEXT NOT NULL,
+	attempt INTEGER NOT NULL DEFAULT 1,
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	session_id TEXT,
+	status TEXT NOT NULL DEFAULT 'running',
+	stop_reason TEXT,
+	failure_detail TEXT,
+	step_count INTEGER DEFAULT 0,
+	final_turns INTEGER DEFAULT 0,
+	cost_usd REAL DEFAULT 0.0,
+	max_turns INTEGER,
+	max_budget_usd REAL,
+	final_text TEXT,
+	log_path TEXT,
+	started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	last_activity_at DATETIME,
+	completed_at DATETIME
+);
 `
 	if _, err := conn.Exec(v11); err != nil {
 		t.Fatalf("create v11 db: %v", err)

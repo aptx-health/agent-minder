@@ -22,6 +22,7 @@ type claudeResultEvent struct {
 	Result            string            `json:"result"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	SessionID         string            `json:"session_id"`
+	Model             string            `json:"model"`
 }
 
 // streamEvent is the envelope for any stream-json event.
