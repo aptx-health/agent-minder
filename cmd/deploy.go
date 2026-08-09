@@ -394,8 +394,7 @@ func runForeground(deployID string) error {
 	defer events.Close()
 	go func() {
 		for event := range events.Events() {
-			evt := event.Value
-			fmt.Printf("[%s] %s: %s\n", evt.Time.Format("15:04:05"), evt.Type, evt.Summary)
+			fmt.Printf("%s\n", event.Value.ForegroundLine())
 		}
 	}()
 

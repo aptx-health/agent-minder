@@ -50,14 +50,6 @@ func debugLog(msg string, attrs ...any) {
 	debugLogger.Info(msg, attrs...)
 }
 
-// Event is emitted by the supervisor for the TUI/API to consume.
-type Event struct {
-	Time    time.Time
-	Type    string // "info", "started", "completed", "bailed", "stopped", "finished", "error", "warning"
-	Summary string
-	TaskID  int64 // kept as TaskID for API backward compat
-}
-
 // RunInfo describes a currently running job.
 type RunInfo struct {
 	JobID       int64
@@ -137,7 +129,7 @@ type Supervisor struct {
 	offlineBackoffIdx  int
 	nextProbeAt        time.Time
 	eventBusOnce       sync.Once
-	events             *eventbus.Bus[Event]
+	events             *eventbus.Bus[Envelope]
 	eventDrainMu       sync.Mutex
 	eventDrainCursor   uint64
 	parentCtx          context.Context
@@ -196,7 +188,7 @@ func New(store *db.Store, deploy *db.Deployment, repoDir, owner, repo, ghToken s
 		ghToken:     ghToken,
 		running:     make(map[int64]*runState),
 		maxAgents:   maxAgents,
-		events:      eventbus.New[Event](eventbus.DefaultSubscriberBuffer),
+		events:      eventbus.New[Envelope](eventbus.DefaultSubscriberBuffer),
 		sparedLogAt: make(map[int64]time.Time),
 	}
 	s.fetchFn = func() error { return gitpkg.Fetch(s.repoDir) }
@@ -219,14 +211,14 @@ func (s *Supervisor) SetDaemonMode(daemon bool) {
 
 // Subscribe returns supervisor events strictly after afterCursor, followed by
 // live events. Each caller receives an independent subscription.
-func (s *Supervisor) Subscribe(afterCursor uint64) (*eventbus.Subscription[Event], error) {
+func (s *Supervisor) Subscribe(afterCursor uint64) (*eventbus.Subscription[Envelope], error) {
 	return s.eventBus().Subscribe(afterCursor)
 }
 
-func (s *Supervisor) eventBus() *eventbus.Bus[Event] {
+func (s *Supervisor) eventBus() *eventbus.Bus[Envelope] {
 	s.eventBusOnce.Do(func() {
 		if s.events == nil {
-			s.events = eventbus.New[Event](eventbus.DefaultSubscriberBuffer)
+			s.events = eventbus.New[Envelope](eventbus.DefaultSubscriberBuffer)
 		}
 	})
 	return s.events
@@ -419,7 +411,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.mu.Lock()
 				s.active = false
 				s.mu.Unlock()
-				s.emitEvent("finished", "Supervisor cancelled", 0)
+				s.emitEvent(EventFinished, "Supervisor cancelled", 0)
 				return
 
 			case <-watchTicker.C:
@@ -457,7 +449,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		s.mu.Lock()
 		s.active = false
 		s.mu.Unlock()
-		s.emitEvent("finished", "All agents finished", 0)
+		s.emitEvent(EventFinished, "All agents finished", 0)
 	}()
 }
 
@@ -484,10 +476,24 @@ func (s *Supervisor) Stop() {
 	runtimepkg.ShutdownAll()
 }
 
-func (s *Supervisor) emitEvent(typ, summary string, taskID int64) {
-	evt := Event{Time: time.Now(), Type: typ, Summary: summary, TaskID: taskID}
-	if _, err := s.eventBus().Publish(evt); err != nil {
-		debugLog("publish supervisor event", "type", typ, "task_id", taskID, "error", err)
+func (s *Supervisor) emitEvent(typ EventType, summary string, jobID int64) {
+	if !typ.Known() {
+		debugLog("unregistered supervisor event type", "type", string(typ), "job_id", jobID)
+	}
+	deploymentID := ""
+	if s.deploy != nil {
+		deploymentID = s.deploy.ID
+	}
+	envelope := Envelope{
+		Time:         time.Now(),
+		DeploymentID: deploymentID,
+		JobID:        jobID,
+		Type:         typ,
+		Severity:     typ.EventSeverity(),
+		Summary:      summary,
+	}
+	if _, err := s.eventBus().Publish(envelope); err != nil {
+		debugLog("publish supervisor event", "type", string(typ), "job_id", jobID, "error", err)
 	}
 }
 
@@ -531,7 +537,7 @@ func (s *Supervisor) emitWaitingForMerge() {
 		return
 	}
 	s.waitingHintEmitted = true
-	go s.emitEvent("info", "Waiting for PR(s) to be merged (checking every 30s, ctrl+c to exit)", 0)
+	go s.emitEvent(EventInfo, "Waiting for PR(s) to be merged (checking every 30s, ctrl+c to exit)", 0)
 }
 
 func (s *Supervisor) fillCapacity(ctx context.Context) {
@@ -601,14 +607,14 @@ func (s *Supervisor) tryFetch() {
 			s.offline = false
 			s.offlineBackoffIdx = 0
 			s.nextProbeAt = time.Time{}
-			s.emitEvent("info", fmt.Sprintf("Network online (offline for %s) — resuming", downFor), 0)
+			s.emitEvent(EventInfo, fmt.Sprintf("Network online (offline for %s) — resuming", downFor), 0)
 		}
 		return
 	}
 
 	if !gitpkg.IsNetworkError(err) {
 		// Non-network error: surface immediately, don't enter offline state.
-		s.emitEvent("warning", fmt.Sprintf("Git fetch failed: %v", err), 0)
+		s.emitEvent(EventWarning, fmt.Sprintf("Git fetch failed: %v", err), 0)
 		return
 	}
 
@@ -616,7 +622,7 @@ func (s *Supervisor) tryFetch() {
 		s.offline = true
 		s.offlineSince = time.Now()
 		s.offlineBackoffIdx = 0
-		s.emitEvent("warning", "Network offline (git fetch failed) — backing off, will retry quietly", 0)
+		s.emitEvent(EventWarning, "Network offline (git fetch failed) — backing off, will retry quietly", 0)
 	} else if s.offlineBackoffIdx < len(offlineBackoffSchedule)-1 {
 		s.offlineBackoffIdx++
 	}
@@ -644,7 +650,7 @@ func (s *Supervisor) checkBudgetCeiling() bool {
 		s.mu.Lock()
 		s.budgetPaused = true
 		s.mu.Unlock()
-		s.emitEvent("warning", fmt.Sprintf("Budget ceiling reached: $%.2f / $%.2f", spent, ceiling), 0)
+		s.emitEvent(EventWarning, fmt.Sprintf("Budget ceiling reached: $%.2f / $%.2f", spent, ceiling), 0)
 		return true
 	}
 
@@ -652,7 +658,7 @@ func (s *Supervisor) checkBudgetCeiling() bool {
 		s.mu.Lock()
 		s.budgetWarned = true
 		s.mu.Unlock()
-		s.emitEvent("warning", fmt.Sprintf("Budget at 80%%: $%.2f / $%.2f", spent, ceiling), 0)
+		s.emitEvent(EventWarning, fmt.Sprintf("Budget at 80%%: $%.2f / $%.2f", spent, ceiling), 0)
 	}
 	return false
 }
@@ -697,7 +703,7 @@ func (s *Supervisor) runJobManager(ctx context.Context, job *db.Job) {
 	if len(contract.Dedup) > 0 {
 		result := EvaluateDedup(ctx, sc, contract.Dedup)
 		if result.Skip {
-			sc.EmitEvent("info", fmt.Sprintf("Skipped %s: %s", sc.JobLabel(), result.Reason))
+			sc.EmitEvent(EventInfo, fmt.Sprintf("Skipped %s: %s", sc.JobLabel(), result.Reason))
 			_ = s.store.UpdateJobStatus(job.ID, "skipped")
 			return
 		}
@@ -735,7 +741,7 @@ func (s *Supervisor) checkMergedPRs(ctx context.Context) {
 		if err == nil && merged {
 			_ = s.store.CompleteJob(j.ID, db.StatusDone)
 			ghClient.RemoveLabel(ctx, s.owner, s.repo, j.IssueNumber, "needs-review")
-			s.emitEvent("completed", fmt.Sprintf("PR #%d merged — #%d done", j.PRNumber.Int64, j.IssueNumber), j.ID)
+			s.emitEvent(EventCompleted, fmt.Sprintf("PR #%d merged — #%d done", j.PRNumber.Int64, j.IssueNumber), j.ID)
 		}
 	}
 }
@@ -895,7 +901,7 @@ func (s *Supervisor) reportSpared(j *db.Job, reason string) {
 	}
 	msg := fmt.Sprintf("[reaper] spared job#%d issue-%d reason=%s%s worktree=%s",
 		j.ID, j.IssueNumber, reason, age, j.WorktreePath.String)
-	s.emitEvent("spared", msg, j.ID)
+	s.emitEvent(EventSpared, msg, j.ID)
 	debugLog("reaper spared", "job", j.ID, "issue", j.IssueNumber,
 		"reason", reason, "worktree", j.WorktreePath.String)
 }
@@ -905,7 +911,7 @@ func (s *Supervisor) reportSpared(j *db.Job, reason string) {
 func (s *Supervisor) reportReaped(reaped []reaper.Reaped, jobID int64, issueNum int) {
 	for _, r := range reaped {
 		msg := fmt.Sprintf("[reaper] job#%d issue-%d: killed %s", jobID, issueNum, r)
-		s.emitEvent("reaped", msg, jobID)
+		s.emitEvent(EventReaped, msg, jobID)
 		debugLog("reaper killed", "job", jobID, "issue", issueNum,
 			"pid", r.PID, "ppid", r.PPID, "command", r.Command,
 			"age_seconds", r.Age.Seconds(), "cpu_percent", r.CPU, "signal", r.Signal)

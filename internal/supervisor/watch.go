@@ -160,7 +160,7 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 	s.ghPollSucceeded = true
 	s.mu.Unlock()
 	if firstPoll && totalPolled == 0 && len(routes) > 0 {
-		s.emitEvent("info", fmt.Sprintf("Watch poll: 0 issues found across %d trigger routes — if unexpected, check GitHub status", len(routes)), 0)
+		s.emitEvent(EventInfo, fmt.Sprintf("Watch poll: 0 issues found across %d trigger routes — if unexpected, check GitHub status", len(routes)), 0)
 	}
 
 	return discovered
@@ -202,7 +202,7 @@ func (s *Supervisor) reportGHError(msg string) {
 	if s.lastGHError.IsZero() || time.Since(s.lastGHError) > 10*time.Minute {
 		s.lastGHError = time.Now()
 		s.mu.Unlock()
-		s.emitEvent("error", msg, 0)
+		s.emitEvent(EventError, msg, 0)
 	} else {
 		s.mu.Unlock()
 	}
@@ -246,7 +246,7 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 	if err != nil {
 		// Don't create a job with an empty body on a transient fetch error;
 		// knownJobs only records created jobs, so the next watch poll retries.
-		s.emitEvent("warn", fmt.Sprintf("Skipping #%d: fetch issue content failed: %v", issue.Number, err), 0)
+		s.emitEvent(EventWarning, fmt.Sprintf("Skipping #%d: fetch issue content failed: %v", issue.Number, err), 0)
 		return 0
 	}
 	body := ""
@@ -290,7 +290,7 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 		return 0
 	}
 
-	s.emitEvent("info", fmt.Sprintf("Discovered #%d: %s (agent: %s)", issue.Number, issue.Title, agent), j.ID)
+	s.emitEvent(EventInfo, fmt.Sprintf("Discovered #%d: %s (agent: %s)", issue.Number, issue.Title, agent), j.ID)
 	return 1
 }
 
