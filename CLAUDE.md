@@ -157,7 +157,7 @@ The `lnav/agent-minder.json` format file ships with the repo. It color-codes sta
 
 ### Where agent guidance lives
 
-Four layers, each owning one thing. Keeping them separate is what stops them contradicting each other:
+Five layers, each owning one thing. Keeping them separate is what stops them contradicting each other:
 
 | Layer | Owns | Lives in |
 |-------|------|----------|
@@ -165,8 +165,9 @@ Four layers, each owning one thing. Keeping them separate is what stops them con
 | Task context | Issue, repo info, branch, test command, siblings, dep graph | `internal/supervisor/context.go` providers |
 | Behavior | How an agent decides, when it stops, what it produces | `.claude/agents/<name>.md` and `AgentTemplates()` bodies |
 | House style | Scope, human-facing output format, delegation budget | `renderHouseStyle()` in `internal/supervisor/context.go`, injected into every prompt |
+| User instructions | Cross-repo standing orders from the operator ("never bump major versions") | `~/.agent-minder/AGENTS.md`, read by `renderUserInstructions()` in `internal/supervisor/context.go`, appended after house style into every doer prompt |
 
-A contract that restates facts from this file, or restates the house style, will drift out of sync — point at them instead. `defaultAgentDef` and `defaultReviewerDef` in `prompt.go` share their bodies with the registry constants for the same reason.
+A contract that restates facts from this file, or restates the house style, will drift out of sync — point at them instead. `defaultAgentDef` and `defaultReviewerDef` in `prompt.go` share their bodies with the registry constants for the same reason. `~/.agent-minder/AGENTS.md` is optional — absent or empty, it contributes nothing — and applies identically across runtimes since it is prompt text, not a runtime-native file.
 
 ## Environment variables
 
