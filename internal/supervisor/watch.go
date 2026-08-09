@@ -240,7 +240,13 @@ func hasAllLabels(issueLabels []string, required []string) bool {
 
 // createJobForIssue fetches issue content and inserts a job row.
 func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Client, issue ghpkg.ItemStatus, route TriggerRoute) int {
-	content, _ := ghClient.FetchItemContent(ctx, s.owner, s.repo, issue.Number, "issue")
+	content, err := ghClient.FetchItemContent(ctx, s.owner, s.repo, issue.Number, "issue")
+	if err != nil {
+		// Don't create a job with an empty body on a transient fetch error;
+		// knownJobs only records created jobs, so the next watch poll retries.
+		s.emitEvent("warn", fmt.Sprintf("Skipping #%d: fetch issue content failed: %v", issue.Number, err), 0)
+		return 0
+	}
 	body := ""
 	if content != nil {
 		body = content.Body
