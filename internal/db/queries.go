@@ -93,7 +93,17 @@ func jobInsertArgs(j *Job) []interface{} {
 
 // CreateJob inserts a new job.
 func (s *Store) CreateJob(j *Job) error {
-	res, err := s.db.Exec(fmt.Sprintf(`INSERT INTO jobs (%s)
+	return createJob(s.db, j)
+}
+
+// CreateJobTx inserts a new job inside an existing transaction, so a durable
+// discovery event can commit atomically with the job row (Expedition IV R-1).
+func CreateJobTx(tx *sqlx.Tx, j *Job) error {
+	return createJob(tx, j)
+}
+
+func createJob(e sqlx.Execer, j *Job) error {
+	res, err := e.Exec(fmt.Sprintf(`INSERT INTO jobs (%s)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobInsertColumns),
 		jobInsertArgs(j)...)
 	if err != nil {
@@ -196,22 +206,53 @@ func (s *Store) GetJob(id int64) (*Job, error) {
 	return &j, nil
 }
 
+// The exported *Tx variants below mirror their Store methods so a state write
+// can share a transaction with the durable event describing it (Expedition IV
+// R-1). Both shapes delegate to one statement, so the SQL can never diverge.
+
 // UpdateJobStatus updates the status of a job.
 func (s *Store) UpdateJobStatus(id int64, status string) error {
-	_, err := s.db.Exec("UPDATE jobs SET status = ? WHERE id = ?", status, id)
+	return updateJobStatus(s.db, id, status)
+}
+
+// UpdateJobStatusTx is UpdateJobStatus inside an existing transaction.
+func UpdateJobStatusTx(tx *sqlx.Tx, id int64, status string) error {
+	return updateJobStatus(tx, id, status)
+}
+
+func updateJobStatus(e sqlx.Execer, id int64, status string) error {
+	_, err := e.Exec("UPDATE jobs SET status = ? WHERE id = ?", status, id)
 	return err
 }
 
 // UpdateJobRunning marks a job as running with a start time.
 func (s *Store) UpdateJobRunning(id int64) error {
-	_, err := s.db.Exec("UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
+	return updateJobRunning(s.db, id)
+}
+
+// UpdateJobRunningTx is UpdateJobRunning inside an existing transaction.
+func UpdateJobRunningTx(tx *sqlx.Tx, id int64) error {
+	return updateJobRunning(tx, id)
+}
+
+func updateJobRunning(e sqlx.Execer, id int64) error {
+	_, err := e.Exec("UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
 		time.Now().UTC(), id)
 	return err
 }
 
 // UpdateJobStage updates the current stage and stages JSON for a job.
 func (s *Store) UpdateJobStage(id int64, stage string, stagesJSON string) error {
-	_, err := s.db.Exec("UPDATE jobs SET current_stage = ?, stages_json = ? WHERE id = ?",
+	return updateJobStage(s.db, id, stage, stagesJSON)
+}
+
+// UpdateJobStageTx is UpdateJobStage inside an existing transaction.
+func UpdateJobStageTx(tx *sqlx.Tx, id int64, stage string, stagesJSON string) error {
+	return updateJobStage(tx, id, stage, stagesJSON)
+}
+
+func updateJobStage(e sqlx.Execer, id int64, stage string, stagesJSON string) error {
+	_, err := e.Exec("UPDATE jobs SET current_stage = ?, stages_json = ? WHERE id = ?",
 		stage, stagesJSON, id)
 	return err
 }
@@ -243,7 +284,16 @@ func (s *Store) UpdateJobCost(id int64, cost float64) error {
 
 // UpdateJobFailure sets failure info and marks the job as bailed.
 func (s *Store) UpdateJobFailure(id int64, reason, detail string) error {
-	_, err := s.db.Exec(`UPDATE jobs SET status = 'bailed', failure_reason = ?,
+	return updateJobFailure(s.db, id, reason, detail)
+}
+
+// UpdateJobFailureTx is UpdateJobFailure inside an existing transaction.
+func UpdateJobFailureTx(tx *sqlx.Tx, id int64, reason, detail string) error {
+	return updateJobFailure(tx, id, reason, detail)
+}
+
+func updateJobFailure(e sqlx.Execer, id int64, reason, detail string) error {
+	_, err := e.Exec(`UPDATE jobs SET status = 'bailed', failure_reason = ?,
 		failure_detail = ?, completed_at = ? WHERE id = ?`,
 		reason, detail, time.Now().UTC(), id)
 	return err
@@ -258,7 +308,16 @@ func (s *Store) UpdateJobDeps(id int64, deps []int) error {
 
 // UpdateJobReview sets review-related fields.
 func (s *Store) UpdateJobReview(id int64, risk string, commentID int64) error {
-	_, err := s.db.Exec("UPDATE jobs SET review_risk = ?, review_comment_id = ? WHERE id = ?",
+	return updateJobReview(s.db, id, risk, commentID)
+}
+
+// UpdateJobReviewTx is UpdateJobReview inside an existing transaction.
+func UpdateJobReviewTx(tx *sqlx.Tx, id int64, risk string, commentID int64) error {
+	return updateJobReview(tx, id, risk, commentID)
+}
+
+func updateJobReview(e sqlx.Execer, id int64, risk string, commentID int64) error {
+	_, err := e.Exec("UPDATE jobs SET review_risk = ?, review_comment_id = ? WHERE id = ?",
 		risk, commentID, id)
 	return err
 }
@@ -272,7 +331,16 @@ func (s *Store) UpdateJobOverrides(id int64, turns *int, budget *float64) error 
 
 // CompleteJob marks a job as done with a completion time.
 func (s *Store) CompleteJob(id int64, status string) error {
-	_, err := s.db.Exec("UPDATE jobs SET status = ?, completed_at = ? WHERE id = ?",
+	return completeJob(s.db, id, status)
+}
+
+// CompleteJobTx is CompleteJob inside an existing transaction.
+func CompleteJobTx(tx *sqlx.Tx, id int64, status string) error {
+	return completeJob(tx, id, status)
+}
+
+func completeJob(e sqlx.Execer, id int64, status string) error {
+	_, err := e.Exec("UPDATE jobs SET status = ?, completed_at = ? WHERE id = ?",
 		status, time.Now().UTC(), id)
 	return err
 }

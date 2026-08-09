@@ -15,6 +15,7 @@ import (
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
 	"github.com/aptx-health/agent-minder/internal/lesson"
 	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
+	"github.com/jmoiron/sqlx"
 )
 
 // JobManager is the interface that all agent types implement.
@@ -101,17 +102,38 @@ type SlotContext struct {
 	hasReviewerFeedback bool
 }
 
-// EmitEvent emits a supervisor event for this job.
+// EmitEvent emits an ephemeral supervisor event for this job: live-only
+// telemetry and advisory chatter, never persisted (Expedition IV §5). State
+// transitions and decisions go through EmitDurable/EmitDurableWith.
 func (sc *SlotContext) EmitEvent(typ EventType, summary string) {
 	sc.sup.emitEvent(typ, summary, sc.Job.ID)
 }
 
+// EmitDurable persists a durable event for this job and publishes it to the
+// live bus after commit (Expedition IV R-1/R-2). Use for decisions whose only
+// state change is the event itself.
+func (sc *SlotContext) EmitDurable(typ EventType, summary string) {
+	sc.sup.emitDurableEvent(typ, summary, sc.Job.ID, nil)
+}
+
+// EmitDurableWith commits write and the durable event describing it in one
+// transaction, then publishes after commit. This is the store-first pairing
+// for state transitions: before commit neither the write nor the event is
+// visible anywhere; after commit both are.
+func (sc *SlotContext) EmitDurableWith(typ EventType, summary string, write func(*sqlx.Tx) error) {
+	sc.sup.emitDurableEvent(typ, summary, sc.Job.ID, write)
+}
+
 // JobLabel returns a human-readable identifier: "#42" for reactive, "job-name" for proactive.
 func (sc *SlotContext) JobLabel() string {
-	if sc.Job.IssueNumber > 0 {
-		return fmt.Sprintf("#%d", sc.Job.IssueNumber)
+	return jobLabel(sc.Job)
+}
+
+func jobLabel(job *db.Job) string {
+	if job.IssueNumber > 0 {
+		return fmt.Sprintf("#%d", job.IssueNumber)
 	}
-	return sc.Job.Name
+	return job.Name
 }
 
 // NewGHClient creates a GitHub client.
@@ -485,7 +507,8 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	job := sc.Job
 	contract := m.contract
 
-	sc.EmitEvent(EventStarted, formatJobStartedSummary(sc))
+	// The started event is emitted by markJobLaunched, atomically with the
+	// queued→running transition (Expedition IV R-1).
 
 	// --- One-time setup ---
 
@@ -501,13 +524,13 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 		} else if owner != nil {
 			detail := fmt.Sprintf("branch %s is already owned by active job #%d (status %s); refusing to reset its worktree",
 				sc.Branch, owner.ID, owner.Status)
-			sc.EmitEvent(EventError, fmt.Sprintf("Branch in use for %s: %s", sc.JobLabel(), detail))
-			_ = sc.Store.UpdateJobFailure(job.ID, "branch_in_use", detail)
+			sc.EmitDurableWith(EventError, fmt.Sprintf("Branch in use for %s: %s", sc.JobLabel(), detail),
+				func(tx *sqlx.Tx) error { return db.UpdateJobFailureTx(tx, job.ID, "branch_in_use", detail) })
 			return fmt.Errorf("branch in use: %s", detail)
 		}
 		if err := sc.SetupWorktree(); err != nil {
-			sc.EmitEvent(EventError, fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
-			_ = sc.Store.UpdateJobFailure(job.ID, "worktree", err.Error())
+			sc.EmitDurableWith(EventError, fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err),
+				func(tx *sqlx.Tx) error { return db.UpdateJobFailureTx(tx, job.ID, "worktree", err.Error()) })
 			return err
 		}
 	}
@@ -519,8 +542,8 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			agentName = job.Agent
 		}
 		if _, err := sc.EnsureAgentDef(AgentName(agentName)); err != nil {
-			sc.EmitEvent(EventError, fmt.Sprintf("Agent def error for %s/%s: %v", sc.JobLabel(), stage.Name, err))
-			_ = sc.Store.UpdateJobFailure(job.ID, "agent_def", err.Error())
+			sc.EmitDurableWith(EventError, fmt.Sprintf("Agent def error for %s/%s: %v", sc.JobLabel(), stage.Name, err),
+				func(tx *sqlx.Tx) error { return db.UpdateJobFailureTx(tx, job.ID, "agent_def", err.Error()) })
 			return err
 		}
 	}
@@ -533,8 +556,8 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 	logFile, err := sc.OpenLogFile(false)
 	if err != nil {
-		sc.EmitEvent(EventError, fmt.Sprintf("Log file error for %s: %v", sc.JobLabel(), err))
-		_ = sc.Store.UpdateJobFailure(job.ID, "log", err.Error())
+		sc.EmitDurableWith(EventError, fmt.Sprintf("Log file error for %s: %v", sc.JobLabel(), err),
+			func(tx *sqlx.Tx) error { return db.UpdateJobFailureTx(tx, job.ID, "log", err.Error()) })
 		return err
 	}
 	defer func() { _ = logFile.Close() }()
@@ -567,8 +590,8 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			agentName = job.Agent
 		}
 
-		_ = sc.Store.UpdateJobStage(job.ID, stageName, "")
-		sc.EmitEvent(EventInfo, fmt.Sprintf("Stage %q started on %s (agent: %s)", stageName, sc.JobLabel(), agentName))
+		sc.EmitDurableWith(EventInfo, fmt.Sprintf("Stage %q started on %s (agent: %s)", stageName, sc.JobLabel(), agentName),
+			func(tx *sqlx.Tx) error { return db.UpdateJobStageTx(tx, job.ID, stageName, "") })
 
 		var result stageResult
 
@@ -607,8 +630,8 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 		// Check for user stop.
 		if sc.WasStoppedByUser() {
-			_ = sc.Store.UpdateJobStatus(job.ID, db.StatusStopped)
-			sc.EmitEvent(EventStopped, fmt.Sprintf("Agent stopped by user on %s", sc.JobLabel()))
+			sc.EmitDurableWith(EventStopped, fmt.Sprintf("Agent stopped by user on %s", sc.JobLabel()),
+				func(tx *sqlx.Tx) error { return db.UpdateJobStatusTx(tx, job.ID, db.StatusStopped) })
 			return nil
 		}
 
@@ -622,12 +645,10 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			usageLimitAttempts := 0
 			for result.usageLimit && usageLimitAttempts < maxUsageLimitRetries {
 				usageLimitAttempts++
-				if err := waitForUsageLimitReset(ctx, sc, usageLimitAttempts); err != nil {
+				if err := waitForUsageLimitReset(ctx, sc, usageLimitAttempts, result.sessionID); err != nil {
 					// Context cancelled (daemon shutting down).
 					return nil
 				}
-				sc.EmitEvent(EventInfo, fmt.Sprintf("Resuming %s after usage limit wait (session: %s)",
-					sc.JobLabel(), result.sessionID))
 
 				// Resume the same session with the runtime; on ErrNotSupported
 				// (or when no session ID is available) fall back to a fresh
@@ -696,7 +717,8 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 
 		switch onFailure {
 		case "skip":
-			sc.EmitEvent(EventInfo, formatStageSkippedSummary(stageName, sc.JobLabel(), result))
+			// A stage-finish routing decision: durable, no paired table write.
+			sc.EmitDurable(EventInfo, formatStageSkippedSummary(stageName, sc.JobLabel(), result))
 			continue
 
 		case "retry":
@@ -888,23 +910,23 @@ func truncateFailureDetail(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-func formatJobStartedSummary(sc *SlotContext) string {
-	job := sc.Job
+// formatJobStartedSummary renders the started-event line. rt is the resolved
+// runtime (nil when none is configured; the configured name is used then) —
+// resolved by the caller because the launch path holds the supervisor mutex.
+func formatJobStartedSummary(rt runtimepkg.AgentRuntime, deploy *db.Deployment, job *db.Job) string {
 	title := job.IssueTitle.String
 	if title == "" {
 		title = job.Name
 	}
-	runtimeName := job.EffectiveRuntime(sc.Deploy)
-	if sc.sup != nil {
-		if rt, err := sc.sup.RuntimeForJob(job); err == nil && rt != nil {
-			runtimeName = rt.Name()
-		}
+	runtimeName := job.EffectiveRuntime(deploy)
+	if rt != nil {
+		runtimeName = rt.Name()
 	}
 	parts := []string{fmt.Sprintf("runtime: %s", runtimeName)}
 	if model := job.EffectiveModel(); model != "" {
 		parts = append(parts, fmt.Sprintf("model: %s", model))
 	}
-	return fmt.Sprintf("Agent started on %s (%s): %s", sc.JobLabel(), strings.Join(parts, ", "), title)
+	return fmt.Sprintf("Agent started on %s (%s): %s", jobLabel(job), strings.Join(parts, ", "), title)
 }
 
 func formatStageSkippedSummary(stageName, jobLabel string, result stageResult) string {
@@ -987,25 +1009,29 @@ func isUsageLimitError(result *AgentResult) bool {
 }
 
 // waitForUsageLimitReset sleeps until the usage limit window resets.
-// Returns an error if the context is cancelled during the wait.
-func waitForUsageLimitReset(ctx context.Context, sc *SlotContext, attempt int) error {
+// Returns an error if the context is cancelled during the wait. Both the
+// waiting and resuming transitions commit their status write and durable
+// event in one transaction (Expedition IV R-1/R-2 — this was the flagship
+// emit-before-write site the contract calls out).
+func waitForUsageLimitReset(ctx context.Context, sc *SlotContext, attempt int, sessionID string) error {
 	wait := usageLimitWaitDuration
 	// Back off slightly on repeated hits.
 	if attempt > 1 {
 		wait = time.Duration(attempt) * usageLimitWaitDuration
 	}
 
-	sc.EmitEvent(EventWaiting, fmt.Sprintf(
+	sc.EmitDurableWith(EventWaiting, fmt.Sprintf(
 		"Usage limit hit on %s — waiting %s before retry (attempt %d/%d)",
-		sc.JobLabel(), wait.Truncate(time.Minute), attempt, maxUsageLimitRetries))
-
-	_ = sc.Store.UpdateJobStatus(sc.Job.ID, db.StatusWaiting)
+		sc.JobLabel(), wait.Truncate(time.Minute), attempt, maxUsageLimitRetries),
+		func(tx *sqlx.Tx) error { return db.UpdateJobStatusTx(tx, sc.Job.ID, db.StatusWaiting) })
 
 	select {
 	case <-time.After(wait):
 		// Reset the flag for the next attempt.
 		sc.ClearUsageLimitFlag()
-		_ = sc.Store.UpdateJobStatus(sc.Job.ID, db.StatusRunning)
+		sc.EmitDurableWith(EventInfo, fmt.Sprintf("Resuming %s after usage limit wait (session: %s)",
+			sc.JobLabel(), sessionID),
+			func(tx *sqlx.Tx) error { return db.UpdateJobStatusTx(tx, sc.Job.ID, db.StatusRunning) })
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -1032,8 +1058,10 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		return stageResult{success: false}
 	}
 
-	sc.EmitEvent(EventInfo, fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64))
-	_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewing)
+	// The other flagship emit-before-write site from Expedition IV §2: the
+	// status write and the review-started event now commit atomically.
+	sc.EmitDurableWith(EventInfo, fmt.Sprintf("Review started on %s (PR #%d)", sc.JobLabel(), job.PRNumber.Int64),
+		func(tx *sqlx.Tx) error { return db.UpdateJobStatusTx(tx, job.ID, db.StatusReviewing) })
 
 	_, _ = fmt.Fprintf(logFile, "\n\n--- REVIEW AGENT (%s) ---\n\n", agentName)
 
@@ -1077,9 +1105,8 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		reviewCommentID = commentID
 	}
 
-	_ = sc.Store.UpdateJobReview(job.ID, risk, reviewCommentID)
-
-	sc.EmitEvent(EventInfo, fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk))
+	sc.EmitDurableWith(EventInfo, fmt.Sprintf("Review of %s complete (risk: %s)", sc.JobLabel(), risk),
+		func(tx *sqlx.Tx) error { return db.UpdateJobReviewTx(tx, job.ID, risk, reviewCommentID) })
 	if assessment.Summary != "" {
 		sc.EmitEvent(EventInfo, fmt.Sprintf("Review: %s", assessment.Summary))
 	}
@@ -1124,8 +1151,8 @@ func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk str
 		if job.IssueNumber > 0 {
 			_ = ghClient.AddLabel(ctx, sc.Owner, sc.Repo, job.IssueNumber, "needs-review")
 		}
-		_ = sc.Store.UpdateJobStatus(job.ID, db.StatusReviewed)
-		sc.EmitEvent(EventCompleted, fmt.Sprintf("Pipeline complete for %s — PR #%d", sc.JobLabel(), job.PRNumber.Int64))
+		sc.EmitDurableWith(EventCompleted, fmt.Sprintf("Pipeline complete for %s — PR #%d", sc.JobLabel(), job.PRNumber.Int64),
+			func(tx *sqlx.Tx) error { return db.UpdateJobStatusTx(tx, job.ID, db.StatusReviewed) })
 
 		// Auto-merge if configured and low-risk.
 		if sc.Deploy.AutoMerge && reviewRisk == "low-risk" {
@@ -1142,15 +1169,17 @@ func (m *DefaultJobManager) finalizePipeline(ctx context.Context, reviewRisk str
 				sc.EmitEvent(EventInfo, fmt.Sprintf("Auto-merge skipped for PR #%d: base branch %q is not the deployment default %q", prNum, prBase, sc.BaseBranch))
 			default:
 				if err := sc.enableAutoMerge(ctx, ghClient, prNum, "merge"); err == nil {
-					sc.EmitEvent(EventInfo, fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", prNum))
+					// A pipeline decision worth keeping in history; the effect
+					// itself is GitHub-side (R-10), so no paired table write.
+					sc.EmitDurable(EventInfo, fmt.Sprintf("Auto-merge enabled for PR #%d (will merge when CI passes)", prNum))
 				} else {
 					sc.EmitEvent(EventWarning, fmt.Sprintf("Auto-merge failed for PR #%d: %v", prNum, err))
 				}
 			}
 		}
 	} else {
-		_ = sc.Store.CompleteJob(job.ID, db.StatusDone)
-		sc.EmitEvent(EventCompleted, fmt.Sprintf("Agent completed %s", sc.JobLabel()))
+		sc.EmitDurableWith(EventCompleted, fmt.Sprintf("Agent completed %s", sc.JobLabel()),
+			func(tx *sqlx.Tx) error { return db.CompleteJobTx(tx, job.ID, db.StatusDone) })
 	}
 
 	sc.RecordLessonOutcome(true)
@@ -1186,12 +1215,13 @@ func (m *DefaultJobManager) finalizeBail(ctx context.Context) error {
 	// nothing to report (e.g. clean exit with no max_turns/max_budget/
 	// is_error signal). When classifier has nothing, fall back to just
 	// marking the job bailed so status still transitions. See #517.
-	if reason != "" {
-		_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
-	} else {
-		_ = sc.Store.CompleteJob(job.ID, db.StatusBailed)
-	}
-	sc.EmitEvent(EventBailed, fmt.Sprintf("Agent bailed on %s", sc.JobLabel()))
+	sc.EmitDurableWith(EventBailed, fmt.Sprintf("Agent bailed on %s", sc.JobLabel()),
+		func(tx *sqlx.Tx) error {
+			if reason != "" {
+				return db.UpdateJobFailureTx(tx, job.ID, reason, detail)
+			}
+			return db.CompleteJobTx(tx, job.ID, db.StatusBailed)
+		})
 	sc.RecordLessonOutcome(false)
 
 	return nil
@@ -1215,9 +1245,13 @@ func (m *DefaultJobManager) finalizeFailure(ctx context.Context, reason, detail 
 		detail = "agent failed without additional detail"
 	}
 
-	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
-	_ = sc.Store.CompleteJob(job.ID, db.StatusFailed)
-	sc.EmitEvent(EventError, fmt.Sprintf("Agent failed on %s: %s", sc.JobLabel(), detail))
+	sc.EmitDurableWith(EventError, fmt.Sprintf("Agent failed on %s: %s", sc.JobLabel(), detail),
+		func(tx *sqlx.Tx) error {
+			if err := db.UpdateJobFailureTx(tx, job.ID, reason, detail); err != nil {
+				return err
+			}
+			return db.CompleteJobTx(tx, job.ID, db.StatusFailed)
+		})
 	sc.RecordLessonOutcome(false)
 
 	return nil
@@ -1241,9 +1275,13 @@ func (m *DefaultJobManager) finalizeManual(ctx context.Context, reason, detail s
 		detail = "agent completed work but manual follow-up is required"
 	}
 
-	_ = sc.Store.UpdateJobFailure(job.ID, reason, detail)
-	_ = sc.Store.CompleteJob(job.ID, db.StatusManual)
-	sc.EmitEvent(EventManual, fmt.Sprintf("Agent needs manual follow-up on %s: %s", sc.JobLabel(), detail))
+	sc.EmitDurableWith(EventManual, fmt.Sprintf("Agent needs manual follow-up on %s: %s", sc.JobLabel(), detail),
+		func(tx *sqlx.Tx) error {
+			if err := db.UpdateJobFailureTx(tx, job.ID, reason, detail); err != nil {
+				return err
+			}
+			return db.CompleteJobTx(tx, job.ID, db.StatusManual)
+		})
 	sc.RecordLessonOutcome(false)
 
 	return nil

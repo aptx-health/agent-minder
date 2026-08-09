@@ -11,6 +11,7 @@ import (
 
 	"github.com/aptx-health/agent-minder/internal/db"
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
+	"github.com/jmoiron/sqlx"
 )
 
 // WatchFilter represents a parsed watch filter.
@@ -286,11 +287,27 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 		SourceRef:    sql.NullString{String: sourceRef, Valid: sourceRef != ""},
 	}
 
-	if err := s.store.CreateJob(j); err != nil {
+	// Discovery of new work is durable (Expedition IV §5): the job row and its
+	// discovery event commit in one transaction, published only after commit.
+	// The event's job attribution is only known after the insert assigns j.ID,
+	// so this site composes the store-first pairing directly.
+	record := &db.Event{DeploymentID: s.deploy.ID, Type: string(EventInfo), Severity: string(SeverityInfo),
+		Summary: fmt.Sprintf("Discovered #%d: %s (agent: %s)", issue.Number, issue.Title, agent)}
+	err = s.store.WithTx(func(tx *sqlx.Tx) error {
+		if err := db.CreateJobTx(tx, j); err != nil {
+			return err
+		}
+		record.JobID = j.ID
+		return db.AppendEventTx(tx, record)
+	})
+	if err != nil {
 		return 0
 	}
 
-	s.emitEvent(EventInfo, fmt.Sprintf("Discovered #%d: %s (agent: %s)", issue.Number, issue.Title, agent), j.ID)
+	envelope := s.buildEnvelope(EventInfo, record.Summary, j.ID, 0)
+	envelope.ID = record.ID
+	envelope.Time = record.Time
+	s.publishEnvelope(envelope)
 	return 1
 }
 

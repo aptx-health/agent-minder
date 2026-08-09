@@ -66,6 +66,11 @@ func CheckAndRecoverContext(ctx context.Context, db *sqlx.DB, dbPath string) (bo
 // removeStaleFiles removes -shm and -wal files for a database path.
 // These files are safe to remove when no process has the database open,
 // and their removal allows SQLite to rebuild them on next connection.
+//
+// Removing a -wal file can discard committed-but-uncheckpointed transactions,
+// which for the durable event log is a potential history truncation (Expedition
+// IV F6). A marker file records that recovery ran; db.Open consumes it and
+// rotates the event log epoch so clients discard stale cursors.
 func removeStaleFiles(dbPath string) error {
 	var errs []string
 	for _, suffix := range []string{"-shm", "-wal"} {
@@ -73,6 +78,8 @@ func removeStaleFiles(dbPath string) error {
 		if _, err := os.Stat(path); err == nil {
 			if err := os.Remove(path); err != nil {
 				errs = append(errs, fmt.Sprintf("remove %s: %v", path, err))
+			} else if suffix == "-wal" {
+				_ = os.WriteFile(recoveryMarkerPath(dbPath), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
 			}
 		}
 	}
@@ -80,6 +87,23 @@ func removeStaleFiles(dbPath string) error {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// recoveryMarkerPath returns the sidecar file that records a WAL removal.
+func recoveryMarkerPath(dbPath string) string {
+	return dbPath + ".wal-recovered"
+}
+
+// ConsumeRecoveryMarker reports whether a WAL-recovery marker exists for the
+// database and removes it. A true return means a -wal file was deleted since
+// the marker was last consumed, so committed history may have been truncated.
+func ConsumeRecoveryMarker(dbPath string) bool {
+	path := recoveryMarkerPath(dbPath)
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	_ = os.Remove(path)
+	return true
 }
 
 // isIOError checks if an error is a SQLite disk I/O error (code 10).

@@ -89,6 +89,47 @@ func TestRemoveStaleFiles(t *testing.T) {
 	}
 }
 
+// TestRemoveStaleFilesLeavesRecoveryMarker: deleting a -wal file can truncate
+// committed history (Expedition IV F6), so removal must leave a marker that
+// db.Open consumes to rotate the event log epoch.
+func TestRemoveStaleFilesLeavesRecoveryMarker(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	if err := os.WriteFile(dbPath+"-wal", []byte("stale"), 0o644); err != nil {
+		t.Fatalf("create -wal: %v", err)
+	}
+
+	if err := removeStaleFiles(dbPath); err != nil {
+		t.Fatalf("removeStaleFiles: %v", err)
+	}
+
+	if _, err := os.Stat(recoveryMarkerPath(dbPath)); err != nil {
+		t.Fatalf("recovery marker missing after -wal removal: %v", err)
+	}
+	if !ConsumeRecoveryMarker(dbPath) {
+		t.Fatal("ConsumeRecoveryMarker = false, want true")
+	}
+	if ConsumeRecoveryMarker(dbPath) {
+		t.Fatal("marker not consumed: second ConsumeRecoveryMarker = true")
+	}
+}
+
+// A -shm-only removal is not a history risk and must not leave a marker.
+func TestRemoveStaleFilesSHMOnlyLeavesNoMarker(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	if err := os.WriteFile(dbPath+"-shm", []byte("stale"), 0o644); err != nil {
+		t.Fatalf("create -shm: %v", err)
+	}
+
+	if err := removeStaleFiles(dbPath); err != nil {
+		t.Fatalf("removeStaleFiles: %v", err)
+	}
+	if ConsumeRecoveryMarker(dbPath) {
+		t.Fatal("marker present after -shm-only removal")
+	}
+}
+
 func TestRemoveStaleFilesNoFiles(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "nonexistent.db")

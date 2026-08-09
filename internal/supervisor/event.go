@@ -80,17 +80,18 @@ func AllEventTypes() []EventType {
 
 // Envelope is the typed supervisor event record (Expedition I DM-2). The
 // in-memory bus wrapper (eventbus.Event) carries its cursor; per Expedition IV
-// R-3 that cursor never crosses a process or API boundary — durable ids arrive
-// with M1-18. This issue adds no persistence and no wire exposure.
+// R-3 that cursor never crosses a process or API boundary — ID below is the
+// only wire cursor.
 type Envelope struct {
+	ID           int64 // durable event id (Expedition IV ID-1); 0 for ephemeral events, which are never persisted
 	Time         time.Time
 	DeploymentID string
 	JobID        int64 // 0 when the event is not attributable to a job
-	RunID        int64 // 0 until per-run attribution is wired at emit sites
+	RunID        int64 // 0 when the event is not attributable to an agent run
 	Type         EventType
 	Severity     Severity
 	Summary      string
-	Data         json.RawMessage // structured payload; nil until M1-18 defines shapes
+	Data         json.RawMessage // structured payload; nil until shapes are defined
 }
 
 // Event is the legacy rendering of an Envelope, kept for test harnesses

@@ -19,6 +19,7 @@ import (
 	ghpkg "github.com/aptx-health/agent-minder/internal/github"
 	"github.com/aptx-health/agent-minder/internal/reaper"
 	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
+	"github.com/jmoiron/sqlx"
 )
 
 // debugLogger is a structured JSON logger for supervisor tracing.
@@ -161,11 +162,18 @@ func (s *Supervisor) Runtime() runtimepkg.AgentRuntime {
 // RuntimeForJob returns the job override runtime when present, otherwise the
 // deployment runtime configured on the supervisor.
 func (s *Supervisor) RuntimeForJob(job *db.Job) (runtimepkg.AgentRuntime, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runtimeForJobLocked(job)
+}
+
+// runtimeForJobLocked is RuntimeForJob for callers already holding s.mu.
+func (s *Supervisor) runtimeForJobLocked(job *db.Job) (runtimepkg.AgentRuntime, error) {
 	if job != nil && job.Runtime.Valid && job.Runtime.String != "" {
 		return runtimepkg.Lookup(job.Runtime.String)
 	}
-	if rt := s.Runtime(); rt != nil {
-		return rt, nil
+	if s.runtime != nil {
+		return s.runtime, nil
 	}
 	if s.deploy != nil && s.deploy.Runtime != "" {
 		return runtimepkg.Lookup(s.deploy.Runtime)
@@ -390,6 +398,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 
 		// Startup sweep: reap anything left from prior daemon runs.
 		s.sweepAllInactiveWorktrees()
+		s.pruneEventLog()
 
 		s.fillCapacity(ctx)
 
@@ -411,7 +420,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 				s.mu.Lock()
 				s.active = false
 				s.mu.Unlock()
-				s.emitEvent(EventFinished, "Supervisor cancelled", 0)
+				s.emitDurableEvent(EventFinished, "Supervisor cancelled", 0, nil)
 				return
 
 			case <-watchTicker.C:
@@ -427,6 +436,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 
 			case <-reaperTicker.C:
 				s.sweepAllInactiveWorktrees()
+				s.pruneEventLog()
 
 			default:
 				if s.hasCapacity() {
@@ -449,7 +459,7 @@ func (s *Supervisor) Launch(ctx context.Context) {
 		s.mu.Lock()
 		s.active = false
 		s.mu.Unlock()
-		s.emitEvent(EventFinished, "All agents finished", 0)
+		s.emitDurableEvent(EventFinished, "All agents finished", 0, nil)
 	}()
 }
 
@@ -476,7 +486,73 @@ func (s *Supervisor) Stop() {
 	runtimepkg.ShutdownAll()
 }
 
+// emitEvent publishes an ephemeral event: live-only telemetry and advisory
+// chatter that is never persisted and never replayed (Expedition IV §5). Its
+// envelope carries no durable id. Events that record a state transition or a
+// decision go through emitDurableEvent instead.
 func (s *Supervisor) emitEvent(typ EventType, summary string, jobID int64) {
+	s.publishEnvelope(s.buildEnvelope(typ, summary, jobID, s.currentRunID(jobID)))
+}
+
+// emitDurableEvent persists a durable event and then publishes it to the live
+// bus (Expedition IV R-1/R-2: the append commits first; live fan-out only
+// happens after commit). When write is non-nil it runs in the same transaction
+// as the append, making the state change and its event atomic. If the
+// transaction fails, nothing is published — a phantom live event describing an
+// uncommitted state change is exactly what store-first exists to prevent.
+func (s *Supervisor) emitDurableEvent(typ EventType, summary string, jobID int64, write func(*sqlx.Tx) error) {
+	s.emitDurableEventRun(typ, summary, jobID, s.currentRunID(jobID), write)
+}
+
+// emitDurableEventRun is emitDurableEvent with explicit run attribution, for
+// callers that hold s.mu (currentRunID locks) or know the run id already.
+func (s *Supervisor) emitDurableEventRun(typ EventType, summary string, jobID, runID int64, write func(*sqlx.Tx) error) {
+	envelope := s.buildEnvelope(typ, summary, jobID, runID)
+	if s.store == nil {
+		// Test-only construction without persistence; keep the live stream.
+		s.publishEnvelope(envelope)
+		return
+	}
+	record := &db.Event{
+		Time:         envelope.Time,
+		DeploymentID: envelope.DeploymentID,
+		JobID:        envelope.JobID,
+		RunID:        envelope.RunID,
+		Type:         string(envelope.Type),
+		Severity:     string(envelope.Severity),
+		Summary:      envelope.Summary,
+	}
+	err := s.store.WithTx(func(tx *sqlx.Tx) error {
+		if write != nil {
+			if err := write(tx); err != nil {
+				return err
+			}
+		}
+		return db.AppendEventTx(tx, record)
+	})
+	if err != nil {
+		debugLog("durable event append failed", "type", string(typ), "job_id", jobID, "error", err.Error())
+		return
+	}
+	envelope.ID = record.ID
+	s.publishEnvelope(envelope)
+}
+
+// currentRunID returns the active agent_runs row for a running job, or 0.
+// Callers must not hold s.mu.
+func (s *Supervisor) currentRunID(jobID int64) int64 {
+	if jobID == 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rs, ok := s.running[jobID]; ok {
+		return rs.currentRunID
+	}
+	return 0
+}
+
+func (s *Supervisor) buildEnvelope(typ EventType, summary string, jobID, runID int64) Envelope {
 	if !typ.Known() {
 		debugLog("unregistered supervisor event type", "type", string(typ), "job_id", jobID)
 	}
@@ -484,16 +560,20 @@ func (s *Supervisor) emitEvent(typ EventType, summary string, jobID int64) {
 	if s.deploy != nil {
 		deploymentID = s.deploy.ID
 	}
-	envelope := Envelope{
+	return Envelope{
 		Time:         time.Now(),
 		DeploymentID: deploymentID,
 		JobID:        jobID,
+		RunID:        runID,
 		Type:         typ,
 		Severity:     typ.EventSeverity(),
 		Summary:      summary,
 	}
+}
+
+func (s *Supervisor) publishEnvelope(envelope Envelope) {
 	if _, err := s.eventBus().Publish(envelope); err != nil {
-		debugLog("publish supervisor event", "type", string(typ), "job_id", jobID, "error", err)
+		debugLog("publish supervisor event", "type", string(envelope.Type), "job_id", envelope.JobID, "error", err)
 	}
 }
 
@@ -650,7 +730,9 @@ func (s *Supervisor) checkBudgetCeiling() bool {
 		s.mu.Lock()
 		s.budgetPaused = true
 		s.mu.Unlock()
-		s.emitEvent(EventWarning, fmt.Sprintf("Budget ceiling reached: $%.2f / $%.2f", spent, ceiling), 0)
+		// The pause decision is durable history; the paused flag itself stays
+		// live-state (Expedition IV §15, ID-3).
+		s.emitDurableEvent(EventWarning, fmt.Sprintf("Budget ceiling reached: $%.2f / $%.2f", spent, ceiling), 0, nil)
 		return true
 	}
 
@@ -666,8 +748,7 @@ func (s *Supervisor) checkBudgetCeiling() bool {
 // launchJob creates a SlotContext + JobManager and spawns a goroutine.
 // Must be called with s.mu held.
 func (s *Supervisor) launchJob(ctx context.Context, job *db.Job) {
-	_ = s.store.UpdateJobRunning(job.ID)
-	job.Status = db.StatusRunning
+	s.markJobLaunched(job)
 
 	jobCtx, jobCancel := context.WithCancel(ctx)
 	rs := &runState{
@@ -678,6 +759,37 @@ func (s *Supervisor) launchJob(ctx context.Context, job *db.Job) {
 	s.running[job.ID] = rs
 
 	go s.runJobManager(jobCtx, job)
+}
+
+// markJobLaunched commits the queued→running transition and its started event
+// in one transaction, then publishes after commit (Expedition IV R-1/R-2).
+// The write must land synchronously before the next fillCapacity query so the
+// same job is never launched twice. Safe with s.mu held: the run row does not
+// exist yet, so run attribution is passed explicitly rather than looked up.
+func (s *Supervisor) markJobLaunched(job *db.Job) {
+	rt, _ := s.runtimeForJobLocked(job)
+	summary := formatJobStartedSummary(rt, s.deploy, job)
+	s.emitDurableEventRun(EventStarted, summary, job.ID, 0,
+		func(tx *sqlx.Tx) error { return db.UpdateJobRunningTx(tx, job.ID) })
+	job.Status = db.StatusRunning
+}
+
+// pruneEventLog enforces the durable event retention cap (Expedition IV R-7):
+// oldest rows beyond DefaultEventRetention are deleted and the floor advances
+// in the same transaction, so replay below the floor is refused rather than
+// silently gapped.
+func (s *Supervisor) pruneEventLog() {
+	if s.store == nil {
+		return
+	}
+	pruned, err := s.store.PruneEvents(db.DefaultEventRetention)
+	if err != nil {
+		debugLog("event log prune failed", "error", err.Error())
+		return
+	}
+	if pruned > 0 {
+		debugLog("event log pruned", "deleted", pruned, "retained", db.DefaultEventRetention)
+	}
 }
 
 // runJobManager runs a JobManager for the given job, then cleans up.
@@ -703,8 +815,8 @@ func (s *Supervisor) runJobManager(ctx context.Context, job *db.Job) {
 	if len(contract.Dedup) > 0 {
 		result := EvaluateDedup(ctx, sc, contract.Dedup)
 		if result.Skip {
-			sc.EmitEvent(EventInfo, fmt.Sprintf("Skipped %s: %s", sc.JobLabel(), result.Reason))
-			_ = s.store.UpdateJobStatus(job.ID, "skipped")
+			sc.EmitDurableWith(EventInfo, fmt.Sprintf("Skipped %s: %s", sc.JobLabel(), result.Reason),
+				func(tx *sqlx.Tx) error { return db.UpdateJobStatusTx(tx, job.ID, "skipped") })
 			return
 		}
 	}
@@ -739,9 +851,9 @@ func (s *Supervisor) checkMergedPRs(ctx context.Context) {
 
 		merged, err := ghClient.IsPRMerged(ctx, s.owner, s.repo, int(j.PRNumber.Int64))
 		if err == nil && merged {
-			_ = s.store.CompleteJob(j.ID, db.StatusDone)
+			s.emitDurableEvent(EventCompleted, fmt.Sprintf("PR #%d merged — #%d done", j.PRNumber.Int64, j.IssueNumber), j.ID,
+				func(tx *sqlx.Tx) error { return db.CompleteJobTx(tx, j.ID, db.StatusDone) })
 			ghClient.RemoveLabel(ctx, s.owner, s.repo, j.IssueNumber, "needs-review")
-			s.emitEvent(EventCompleted, fmt.Sprintf("PR #%d merged — #%d done", j.PRNumber.Int64, j.IssueNumber), j.ID)
 		}
 	}
 }
@@ -911,7 +1023,7 @@ func (s *Supervisor) reportSpared(j *db.Job, reason string) {
 func (s *Supervisor) reportReaped(reaped []reaper.Reaped, jobID int64, issueNum int) {
 	for _, r := range reaped {
 		msg := fmt.Sprintf("[reaper] job#%d issue-%d: killed %s", jobID, issueNum, r)
-		s.emitEvent(EventReaped, msg, jobID)
+		s.emitDurableEvent(EventReaped, msg, jobID, nil)
 		debugLog("reaper killed", "job", jobID, "issue", issueNum,
 			"pid", r.PID, "ppid", r.PPID, "command", r.Command,
 			"age_seconds", r.Age.Seconds(), "cpu_percent", r.CPU, "signal", r.Signal)

@@ -47,9 +47,7 @@ func TestFormatJobStartedSummaryIncludesRuntimeAndModel(t *testing.T) {
 		Model:      sql.NullString{String: "gpt-5.5", Valid: true},
 		IssueTitle: sql.NullString{String: "Snapshot layer", Valid: true},
 	}
-	sc := &SlotContext{Deploy: deploy, Job: job}
-
-	got := formatJobStartedSummary(sc)
+	got := formatJobStartedSummary(nil, deploy, job)
 	want := "Agent started on autopilot-issue-8 (runtime: codex, model: gpt-5.5): Snapshot layer"
 	if got != want {
 		t.Fatalf("formatJobStartedSummary() = %q, want %q", got, want)
@@ -63,9 +61,7 @@ func TestFormatJobStartedSummaryOmitsEmptyModel(t *testing.T) {
 		Name:       "weekly-security-20260708-1500",
 		IssueTitle: sql.NullString{},
 	}
-	sc := &SlotContext{Deploy: deploy, Job: job}
-
-	got := formatJobStartedSummary(sc)
+	got := formatJobStartedSummary(nil, deploy, job)
 	want := "Agent started on weekly-security-20260708-1500 (runtime: claude-code): weekly-security-20260708-1500"
 	if got != want {
 		t.Fatalf("formatJobStartedSummary() = %q, want %q", got, want)
