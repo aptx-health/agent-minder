@@ -15,6 +15,23 @@ var ErrNotSupported = errors.New("runtime: capability not supported")
 // its event stream, its result, and its outcome classification so the
 // supervisor can drive multiple runtimes through one contract.
 //
+// Topology (see docs/research/fable-expedition/02-worker-process-topology-adr.md
+// §6 for the full ADR):
+//
+//   - I-4: process-global equals deployment-global. A runtime adapter may own
+//     package-global shared resources (e.g., opencode's shared `opencode
+//     serve` process) and register process-level teardown via
+//     RegisterShutdown, because one process hosts exactly one Coordinator
+//     driving exactly one deployment. Implementations may rely on this — do
+//     not "fix" a runtime-owned singleton toward per-call scoping without
+//     first checking whether the process-per-deployment invariant still
+//     holds.
+//   - I-5: anything that must be shared *across* deployments on a host (a
+//     local inference server, a shared model cache) is an external service
+//     configured per deployment — never a runtime-owned child process. If a
+//     resource needs cross-deployment sharing, it does not belong behind
+//     this interface.
+//
 // Lifecycle for a single stage:
 //
 //  1. PrepareAgentDef once per agent referenced by the stage pipeline.
