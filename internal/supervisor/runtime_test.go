@@ -265,6 +265,32 @@ func TestLaunchPreflightBlocksUnavailableRuntimeCLI(t *testing.T) {
 	}
 }
 
+func TestLaunchPreflightTerminalBlockDoesNotKeepForegroundWork(t *testing.T) {
+	runtimepkg.ResetCapabilityCache()
+	store := testStore(t)
+	deploy := testDeployment(t, store, func(d *db.Deployment) {
+		d.MaxAgents = 1
+	})
+	testJob(t, store, deploy, func(j *db.Job) {
+		j.Status = db.StatusQueued
+		j.Model = sql.NullString{String: "typo-model", Valid: true}
+	})
+
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+	sup.fetchFn = func() error { return nil }
+	sup.SetRuntime(&fakeRuntime{caps: runtimepkg.RuntimeCapabilities{
+		RuntimeName: "fake",
+		Available:   true,
+		Models:      []string{"known-model"},
+	}})
+
+	sup.fillCapacity(context.Background())
+
+	if sup.hasWork() {
+		t.Fatal("hasWork returned true for terminal preflight-blocked job")
+	}
+}
+
 func TestLaunchPreflightCachesRuntimeCapabilities(t *testing.T) {
 	runtimepkg.ResetCapabilityCache()
 	store := testStore(t)
