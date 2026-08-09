@@ -103,7 +103,7 @@ Schema changes go in `internal/db/schema.go`: increment `schemaVersion`, add a m
 - `stop [deploy-id]` — Stop a running deployment (local or `--remote`).
 - `enroll [repo-dir]` — Scan repo, generate `onboarding.yaml`, install agent definitions.
 - `lesson add|list|edit|remove|pin|groom` — Manage the learning system.
-- `jobs list|run` — View and trigger scheduled jobs from `jobs.yaml`.
+- `jobs list|run|history` — View and trigger scheduled jobs from `jobs.yaml`; `history <name>` lists past activations of a cron/trigger automation from provenance columns (`--limit`, `--deploy`, `--json`).
 - `agents list|show <name>` — List available agents or show agent definition details.
 - `auth` — Store and check the GitHub token in the OS keyring.
 - `checkout <issue>` — Check out an agent's worktree for a job locally.
