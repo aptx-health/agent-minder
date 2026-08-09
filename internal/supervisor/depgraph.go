@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -63,6 +64,7 @@ func Prepare(ctx context.Context, store *db.Store, completer claudecli.Completer
 			Owner:        deploy.Owner,
 			Repo:         deploy.Repo,
 			Status:       db.StatusQueued,
+			SourceType:   sql.NullString{String: "explicit", Valid: true},
 		}
 		j.IssueTitle.String = item.Title
 		j.IssueTitle.Valid = true

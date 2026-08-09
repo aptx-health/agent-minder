@@ -171,6 +171,9 @@ func (s *Scheduler) fireSchedule(sched *db.JobSchedule) {
 		Owner:        s.owner,
 		Repo:         s.repo,
 		Status:       db.StatusQueued,
+		SourceType:   sql.NullString{String: "cron", Valid: true},
+		SourceName:   sql.NullString{String: sched.Name, Valid: true},
+		SourceRef:    sql.NullString{String: now.Format(time.RFC3339), Valid: true},
 	}
 
 	if sched.Budget.Valid {
@@ -195,23 +198,15 @@ func (s *Scheduler) fireSchedule(sched *db.JobSchedule) {
 	_ = s.store.UpdateScheduleRun(s.deployID, sched.Name, now, nextRun)
 }
 
-// jobAlreadyActive checks if a job matching this schedule name is queued or running.
+// jobAlreadyActive checks if a job fired by this schedule (by provenance, not
+// name) is queued, running, blocked, or reviewing.
 func (s *Scheduler) jobAlreadyActive(scheduleName string) bool {
-	jobs, err := s.store.GetJobs(s.deployID)
+	count, err := s.store.CountActiveJobsBySource(s.deployID, "cron", scheduleName)
 	if err != nil {
+		log.Printf("[scheduler] CountActiveJobsBySource error for %s: %v", scheduleName, err)
 		return false
 	}
-	for _, j := range jobs {
-		// Match by prefix: schedule jobs are named "schedule-name-YYYYMMDD-HHMM"
-		if len(j.Name) > len(scheduleName) && j.Name[:len(scheduleName)] == scheduleName &&
-			j.Name[len(scheduleName)] == '-' {
-			if j.Status == db.StatusQueued || j.Status == db.StatusRunning ||
-				j.Status == db.StatusBlocked || j.Status == db.StatusReviewing {
-				return true
-			}
-		}
-	}
-	return false
+	return count > 0
 }
 
 // RunOnce fires a specific schedule immediately, regardless of its cron timing.
@@ -234,6 +229,9 @@ func (s *Scheduler) RunOnce(name string) (int64, error) {
 		Owner:        s.owner,
 		Repo:         s.repo,
 		Status:       db.StatusQueued,
+		SourceType:   sql.NullString{String: "cron", Valid: true},
+		SourceName:   sql.NullString{String: sched.Name, Valid: true},
+		SourceRef:    sql.NullString{String: now.Format(time.RFC3339), Valid: true},
 	}
 
 	if sched.Budget.Valid {
