@@ -172,24 +172,27 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		mode = "watch"
 	}
 
+	activationPolicy := activationPolicyFor(issues, flagAgent, flagWatch)
+
 	// Create deployment record.
 	deployID := uuid.New().String()[:8]
 	deploy := &db.Deployment{
-		ID:             deployID,
-		RepoDir:        repoDir,
-		Owner:          owner,
-		Repo:           repo,
-		Mode:           mode,
-		MaxAgents:      flagMaxAgents,
-		MaxTurns:       flagMaxTurns,
-		MaxBudgetUSD:   flagBudget,
-		Runtime:        runtimeResolution.Name,
-		AnalyzerModel:  flagModel,
-		SkipLabel:      flagSkipLabel,
-		AutoMerge:      flagAutoMerge,
-		ReviewEnabled:  true,
-		TotalBudgetUSD: flagTotalBudget,
-		BaseBranch:     baseBranch,
+		ID:               deployID,
+		RepoDir:          repoDir,
+		Owner:            owner,
+		Repo:             repo,
+		Mode:             mode,
+		MaxAgents:        flagMaxAgents,
+		MaxTurns:         flagMaxTurns,
+		MaxBudgetUSD:     flagBudget,
+		Runtime:          runtimeResolution.Name,
+		AnalyzerModel:    flagModel,
+		SkipLabel:        flagSkipLabel,
+		AutoMerge:        flagAutoMerge,
+		ReviewEnabled:    true,
+		TotalBudgetUSD:   flagTotalBudget,
+		BaseBranch:       baseBranch,
+		ActivationPolicy: activationPolicy,
 	}
 	if flagWatch != "" {
 		deploy.WatchFilter.String = flagWatch
@@ -210,7 +213,7 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create deployment: %w", err)
 	}
 
-	fmt.Printf("Deploy %s: %s/%s (%s)\n", deployID, owner, repo, mode)
+	fmt.Printf("Deploy %s: %s/%s (%s, activation: %s)\n", deployID, owner, repo, mode, activationPolicy)
 	fmt.Printf("  Issues: %v\n", issues)
 	fmt.Printf("  Agents: %d, Runtime: %s (%s), Turns: %d, Budget: $%.2f/task, Total: $%.2f\n",
 		flagMaxAgents, deploy.Runtime, runtimeResolution.Source, flagMaxTurns, flagBudget, flagTotalBudget)
@@ -303,6 +306,25 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Stop: minder stop %s\n", deployID)
 
 	return nil
+}
+
+// activationPolicyFor derives the persisted deployment activation policy
+// from the operator's explicit CLI intent. "Explicit work" is issue numbers
+// or a deliberately chosen non-default agent (a proactive job); a bare
+// --watch or no request at all falls back to jobs.yaml automation to
+// preserve legacy behavior. Explicit work plus an explicit watch filter
+// together make the deployment hybrid — the operator asked for both.
+func activationPolicyFor(issues []int, agent, watch string) db.ActivationPolicy {
+	hasExplicitWork := len(issues) > 0 || agent != "autopilot"
+	hasExplicitWatch := watch != ""
+	switch {
+	case hasExplicitWork && hasExplicitWatch:
+		return db.ActivationHybrid
+	case hasExplicitWork:
+		return db.ActivationExplicit
+	default:
+		return db.ActivationAutomated
+	}
 }
 
 func validateServeAPIKey(serveAddr, apiKey string) error {

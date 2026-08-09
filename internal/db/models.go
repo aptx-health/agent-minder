@@ -11,28 +11,52 @@ const (
 	DefaultMaxBudgetUSD = 5.0
 )
 
+// ActivationPolicy classifies why a deployment's automations (jobs.yaml
+// triggers and cron schedules) are or are not installed. Persisted on the
+// deployment record so Coordinator construction — including on daemon
+// re-exec and restart — can consult intent without re-deriving it from the
+// original CLI invocation or from whether jobs happen to already exist.
+type ActivationPolicy string
+
+const (
+	// ActivationExplicit deployments run only the explicitly supplied work
+	// (issues and/or a single proactive-agent job) and never install
+	// jobs.yaml triggers or cron schedules.
+	ActivationExplicit ActivationPolicy = "explicit"
+	// ActivationAutomated deployments install jobs.yaml triggers and cron
+	// schedules and remain alive; this is also used when the operator asked
+	// only for a watch filter with no explicit issues, preserving the
+	// historical no-issue behavior.
+	ActivationAutomated ActivationPolicy = "automated"
+	// ActivationHybrid deployments run explicitly supplied work AND install
+	// jobs.yaml automations, because the operator explicitly requested both
+	// (e.g. issue numbers plus --watch).
+	ActivationHybrid ActivationPolicy = "hybrid"
+)
+
 // Deployment represents a single deploy run configuration.
 type Deployment struct {
-	ID              string          `db:"id"`
-	RepoDir         string          `db:"repo_dir"`
-	Owner           string          `db:"owner"`
-	Repo            string          `db:"repo"`
-	Mode            string          `db:"mode"`
-	WatchFilter     sql.NullString  `db:"watch_filter"`
-	MaxAgents       int             `db:"max_agents"`
-	MaxTurns        int             `db:"max_turns"`
-	MaxBudgetUSD    float64         `db:"max_budget_usd"`
-	Runtime         string          `db:"runtime"`
-	AnalyzerModel   string          `db:"analyzer_model"`
-	SkipLabel       string          `db:"skip_label"`
-	AutoMerge       bool            `db:"auto_merge"`
-	ReviewEnabled   bool            `db:"review_enabled"`
-	ReviewMaxTurns  sql.NullInt64   `db:"review_max_turns"`
-	ReviewMaxBudget sql.NullFloat64 `db:"review_max_budget"`
-	TotalBudgetUSD  float64         `db:"total_budget_usd"`
-	CarriedCostUSD  float64         `db:"carried_cost_usd"`
-	BaseBranch      string          `db:"base_branch"`
-	StartedAt       time.Time       `db:"started_at"`
+	ID               string           `db:"id"`
+	RepoDir          string           `db:"repo_dir"`
+	Owner            string           `db:"owner"`
+	Repo             string           `db:"repo"`
+	Mode             string           `db:"mode"`
+	WatchFilter      sql.NullString   `db:"watch_filter"`
+	MaxAgents        int              `db:"max_agents"`
+	MaxTurns         int              `db:"max_turns"`
+	MaxBudgetUSD     float64          `db:"max_budget_usd"`
+	Runtime          string           `db:"runtime"`
+	AnalyzerModel    string           `db:"analyzer_model"`
+	SkipLabel        string           `db:"skip_label"`
+	AutoMerge        bool             `db:"auto_merge"`
+	ReviewEnabled    bool             `db:"review_enabled"`
+	ReviewMaxTurns   sql.NullInt64    `db:"review_max_turns"`
+	ReviewMaxBudget  sql.NullFloat64  `db:"review_max_budget"`
+	TotalBudgetUSD   float64          `db:"total_budget_usd"`
+	CarriedCostUSD   float64          `db:"carried_cost_usd"`
+	BaseBranch       string           `db:"base_branch"`
+	ActivationPolicy ActivationPolicy `db:"activation_policy"`
+	StartedAt        time.Time        `db:"started_at"`
 }
 
 // Job represents a unit of work assigned to an agent.

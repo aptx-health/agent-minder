@@ -170,6 +170,64 @@ func TestForeground_CronPersists(t *testing.T) {
 	}
 }
 
+// TestActivationPolicyFor covers the behavior matrix from issue #653: which
+// combinations of explicit issues, a proactive --agent, and --watch produce
+// which persisted activation policy.
+func TestActivationPolicyFor(t *testing.T) {
+	tests := []struct {
+		name   string
+		issues []int
+		agent  string
+		watch  string
+		want   db.ActivationPolicy
+	}{
+		{
+			name:   "explicit issues only",
+			issues: []int{42, 55},
+			agent:  "autopilot",
+			want:   db.ActivationExplicit,
+		},
+		{
+			name:  "no issues, no watch falls back to automated",
+			agent: "autopilot",
+			want:  db.ActivationAutomated,
+		},
+		{
+			name:  "watch only stays automated",
+			agent: "autopilot",
+			watch: "label:agent-ready",
+			want:  db.ActivationAutomated,
+		},
+		{
+			name:   "issues plus watch is hybrid",
+			issues: []int{42},
+			agent:  "autopilot",
+			watch:  "label:agent-ready",
+			want:   db.ActivationHybrid,
+		},
+		{
+			name:  "proactive agent alone is explicit",
+			agent: "dependency-updater",
+			want:  db.ActivationExplicit,
+		},
+		{
+			name:  "proactive agent plus watch is hybrid",
+			agent: "dependency-updater",
+			watch: "label:agent-ready",
+			want:  db.ActivationHybrid,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := activationPolicyFor(tt.issues, tt.agent, tt.watch)
+			if got != tt.want {
+				t.Errorf("activationPolicyFor(%v, %q, %q) = %q, want %q", tt.issues, tt.agent, tt.watch, got, tt.want)
+			}
+		})
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
