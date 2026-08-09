@@ -162,6 +162,16 @@ func (sc *SlotContext) SetupWorktree() error {
 	return nil
 }
 
+// branchClaimedByActiveJob returns another non-terminal job that already owns
+// this job's branch, or nil if the branch is free to claim. It scopes the check
+// to the same owner/repo and excludes this job.
+func (sc *SlotContext) branchClaimedByActiveJob() (*db.Job, error) {
+	if sc.Store == nil || sc.Branch == "" {
+		return nil, nil
+	}
+	return sc.Store.ActiveJobOwningBranch(sc.Owner, sc.Repo, sc.Branch, sc.Job.ID)
+}
+
 // EnsureAgentDef ensures the agent definition exists in the worktree.
 func (sc *SlotContext) EnsureAgentDef(name AgentName) (AgentDefSource, error) {
 	if sc.Hooks != nil && sc.Hooks.EnsureAgentDefFn != nil {
@@ -480,6 +490,21 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	// --- One-time setup ---
 
 	if contract.NeedsWorktree() {
+		// Guard against branch collision: two jobs on the same issue with
+		// different agents derive the same branch (agent/issue-<N>). Without
+		// this check the second job's SetupWorktree would remove and recreate
+		// the first job's live worktree/branch, silently destroying its work.
+		// Block the second job instead. The atomic claim transaction is the
+		// full fix (integration-target issue 3); this is the interim guard.
+		if owner, err := sc.branchClaimedByActiveJob(); err != nil {
+			debugLog("branch claim check failed", "job", job.ID, "branch", sc.Branch, "error", err.Error())
+		} else if owner != nil {
+			detail := fmt.Sprintf("branch %s is already owned by active job #%d (status %s); refusing to reset its worktree",
+				sc.Branch, owner.ID, owner.Status)
+			sc.EmitEvent("error", fmt.Sprintf("Branch in use for %s: %s", sc.JobLabel(), detail))
+			_ = sc.Store.UpdateJobFailure(job.ID, "branch_in_use", detail)
+			return fmt.Errorf("branch in use: %s", detail)
+		}
 		if err := sc.SetupWorktree(); err != nil {
 			sc.EmitEvent("error", fmt.Sprintf("Worktree setup failed for %s: %v", sc.JobLabel(), err))
 			_ = sc.Store.UpdateJobFailure(job.ID, "worktree", err.Error())

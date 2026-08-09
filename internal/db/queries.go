@@ -149,6 +149,43 @@ func (s *Store) GetJobsByRepo(owner, repo string) ([]*Job, error) {
 	return jobs, err
 }
 
+// activeBranchClaimStatuses are the job statuses that hold a live claim on a
+// branch and its worktree. Running jobs have in-flight working state; jobs in
+// review/reviewing/reviewed have an open PR backed by the branch (A-4); waiting
+// and manual jobs are paused mid-lifecycle and expect their worktree intact.
+// A second job deriving the same branch must not destroy any of these.
+var activeBranchClaimStatuses = []string{
+	StatusRunning, StatusReview, StatusReviewing, StatusReviewed, StatusWaiting, StatusManual,
+}
+
+// ActiveJobOwningBranch returns the first non-terminal job in the same
+// owner/repo that owns the given branch, excluding excludeID. It returns
+// (nil, nil) when the branch is unclaimed. Callers use this to block a second
+// job from destroying an active job's worktree on a branch collision.
+func (s *Store) ActiveJobOwningBranch(owner, repo, branch string, excludeID int64) (*Job, error) {
+	if branch == "" {
+		return nil, nil
+	}
+	placeholders := make([]string, len(activeBranchClaimStatuses))
+	args := []interface{}{owner, repo, branch, excludeID}
+	for i, st := range activeBranchClaimStatuses {
+		placeholders[i] = "?"
+		args = append(args, st)
+	}
+	query := fmt.Sprintf(`SELECT * FROM jobs
+		WHERE owner = ? AND repo = ? AND branch = ? AND id != ?
+		AND status IN (%s) ORDER BY id LIMIT 1`, strings.Join(placeholders, ","))
+	var j Job
+	err := s.db.Get(&j, query, args...)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
 // GetJob returns a single job by ID.
 func (s *Store) GetJob(id int64) (*Job, error) {
 	var j Job
