@@ -39,6 +39,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 **Paths:**
 - Worktree: `~/.agent-minder/worktrees/<deploy-id>/issue-<N>`, branch: `agent/issue-<N>`
 - Agent logs: `~/.agent-minder/agents/<deploy-id>-issue-<N>.log`
+- Optional local-only worktree files: tracked `.agent-minder/worktreeinclude` in the deploy repo uses gitignore-style allowlist patterns to copy matching untracked files (for example `.env`, certs, or local config) into fresh agent worktrees after `git worktree add`. Files only are copied; symlinks and existing worktree paths are skipped.
 
 **Agent command:** `claude --agent <name> -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var.
 
