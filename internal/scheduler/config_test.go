@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,6 +190,66 @@ jobs:
 		}
 		if got := cfg.Jobs["test"].Model; got != "gpt-5" {
 			t.Errorf("model = %q, want gpt-5", got)
+		}
+	})
+
+	t.Run("script job", func(t *testing.T) {
+		cfg, err := ParseConfig([]byte(`
+jobs:
+  lint:
+    kind: script
+    schedule: "0 * * * *"
+    command: "go test ./..."
+    timeout: 5m
+    env:
+      GOFLAGS: "-count=1"
+    working_dir: tools
+`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		j := cfg.Jobs["lint"]
+		if j.EffectiveKind() != JobKindScript {
+			t.Errorf("kind = %q, want script", j.EffectiveKind())
+		}
+		if j.Command != "go test ./..." {
+			t.Errorf("command = %q", j.Command)
+		}
+		if j.Env["GOFLAGS"] != "-count=1" {
+			t.Errorf("env GOFLAGS = %q", j.Env["GOFLAGS"])
+		}
+		if j.ScriptWorkDir() != "tools" {
+			t.Errorf("workdir = %q, want tools", j.ScriptWorkDir())
+		}
+	})
+
+	t.Run("script rejects agent fields", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  lint:
+    kind: script
+    schedule: "0 * * * *"
+    command: "go test ./..."
+    agent: autopilot
+    runtime: codex
+`))
+		if err == nil {
+			t.Fatal("expected error for mixed script/agent fields")
+		}
+		if got := err.Error(); !strings.Contains(got, "kind script cannot be combined") || !strings.Contains(got, "agent") {
+			t.Fatalf("error = %q, want clear mixed-fields message", got)
+		}
+	})
+
+	t.Run("script requires command", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  lint:
+    kind: script
+    schedule: "0 * * * *"
+`))
+		if err == nil || !strings.Contains(err.Error(), "command is required") {
+			t.Fatalf("error = %v, want command required", err)
 		}
 	})
 

@@ -3,6 +3,7 @@ package scheduler
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +143,90 @@ jobs:
 	}
 }
 
+func TestSyncSchedulesAgentScriptConversionReplacesExecutionConfig(t *testing.T) {
+	store := testStore(t)
+	_ = testDeployment(t, store)
+
+	initial, err := ParseConfig([]byte(`
+jobs:
+  maintenance:
+    schedule: "0 9 * * 1"
+    agent: autopilot
+    runtime: codex
+    model: gpt-5
+    budget: 2.5
+    max_turns: 25
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig initial: %v", err)
+	}
+	if err := New(store, "test-sched", "acme", "widgets", initial).SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules initial: %v", err)
+	}
+
+	asScript, err := ParseConfig([]byte(`
+jobs:
+  maintenance:
+    kind: script
+    schedule: "0 9 * * 1"
+    command: "echo ok"
+    timeout: 10s
+    env:
+      FOO: bar
+    workdir: tools
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig script: %v", err)
+	}
+	if err := New(store, "test-sched", "acme", "widgets", asScript).SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules script: %v", err)
+	}
+	sched, err := store.GetSchedule("test-sched", "maintenance")
+	if err != nil {
+		t.Fatalf("GetSchedule script: %v", err)
+	}
+	if sched.Kind != db.JobKindScript {
+		t.Fatalf("kind = %q, want script", sched.Kind)
+	}
+	if sched.Runtime.Valid || sched.Model.Valid || sched.Budget.Valid || sched.MaxTurns.Valid {
+		t.Fatalf("agent fields survived script conversion: runtime=%v model=%v budget=%v max_turns=%v",
+			sched.Runtime, sched.Model, sched.Budget, sched.MaxTurns)
+	}
+	if !sched.ScriptCommand.Valid || sched.ScriptCommand.String != "echo ok" {
+		t.Fatalf("script_command = %v, want echo ok", sched.ScriptCommand)
+	}
+	if !sched.ScriptEnv.Valid || !strings.Contains(sched.ScriptEnv.String, `"FOO":"bar"`) {
+		t.Fatalf("script_env = %v, want FOO", sched.ScriptEnv)
+	}
+
+	backToAgent, err := ParseConfig([]byte(`
+jobs:
+  maintenance:
+    schedule: "0 9 * * 1"
+    agent: reviewer
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig agent: %v", err)
+	}
+	if err := New(store, "test-sched", "acme", "widgets", backToAgent).SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules agent: %v", err)
+	}
+	sched, err = store.GetSchedule("test-sched", "maintenance")
+	if err != nil {
+		t.Fatalf("GetSchedule agent: %v", err)
+	}
+	if sched.Kind != db.JobKindAgent {
+		t.Fatalf("kind = %q, want agent", sched.Kind)
+	}
+	if sched.Agent != "reviewer" {
+		t.Fatalf("agent = %q, want reviewer", sched.Agent)
+	}
+	if sched.ScriptCommand.Valid || sched.ScriptTimeout.Valid || sched.ScriptEnv.Valid || sched.ScriptWorkDir.Valid {
+		t.Fatalf("script fields survived agent conversion: command=%v timeout=%v env=%v workdir=%v",
+			sched.ScriptCommand, sched.ScriptTimeout, sched.ScriptEnv, sched.ScriptWorkDir)
+	}
+}
+
 func TestFireSchedule(t *testing.T) {
 	store := testStore(t)
 	_ = testDeployment(t, store)
@@ -206,6 +291,56 @@ jobs:
 	jobs2, _ := store.GetJobs("test-sched")
 	if len(jobs2) != 1 {
 		t.Errorf("got %d jobs after second tick, want 1 (dedup)", len(jobs2))
+	}
+}
+
+func TestFireScriptScheduleCreatesScriptJob(t *testing.T) {
+	store := testStore(t)
+	_ = testDeployment(t, store)
+
+	cfg, err := ParseConfig([]byte(`
+jobs:
+  lint:
+    kind: script
+    schedule: "* * * * *"
+    command: "echo lint"
+    timeout: 30s
+`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+
+	s := New(store, "test-sched", "acme", "widgets", cfg)
+	if err := s.SyncSchedules(); err != nil {
+		t.Fatalf("SyncSchedules: %v", err)
+	}
+	_ = store.UpdateScheduleRun("test-sched", "lint", time.Time{}, time.Now().UTC().Add(-time.Minute))
+
+	s.tick()
+
+	jobs, err := store.GetJobs("test-sched")
+	if err != nil {
+		t.Fatalf("GetJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+	job := jobs[0]
+	if job.EffectiveKind() != db.JobKindScript {
+		t.Fatalf("kind = %q, want script", job.EffectiveKind())
+	}
+	if job.Agent != db.JobKindScript {
+		t.Fatalf("agent display = %q, want script", job.Agent)
+	}
+	if !job.ScriptCommand.Valid || job.ScriptCommand.String != "echo lint" {
+		t.Fatalf("script_command = %v, want echo lint", job.ScriptCommand)
+	}
+	if !job.ScriptTimeout.Valid || job.ScriptTimeout.String != "30s" {
+		t.Fatalf("script_timeout = %v, want 30s", job.ScriptTimeout)
+	}
+	if job.Runtime.Valid || job.Model.Valid || job.MaxBudgetOv.Valid || job.MaxTurns.Valid {
+		t.Fatalf("script job carried agent fields: runtime=%v model=%v budget=%v turns=%v",
+			job.Runtime, job.Model, job.MaxBudgetOv, job.MaxTurns)
 	}
 }
 

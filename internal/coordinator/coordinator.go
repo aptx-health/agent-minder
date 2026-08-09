@@ -9,6 +9,7 @@ package coordinator
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -41,6 +42,9 @@ type Automation struct {
 	Expression string
 	Labels     []string
 	Agent      string
+	// ExecutionKind distinguishes agent automations from script automations
+	// (db.JobKindAgent / db.JobKindScript).
+	ExecutionKind string
 	// Runtime, Model, MaxTurns, and MaxBudget are the configured automation
 	// overrides. Keep Runtime's legacy meaning so foreground output does not
 	// start printing deployment defaults as explicit overrides.
@@ -274,26 +278,43 @@ func TriggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 	}
 
 	for name, def := range cfg.Jobs {
+		envJSON := ""
+		if len(def.Env) > 0 {
+			data, err := json.Marshal(def.Env)
+			if err == nil {
+				envJSON = string(data)
+			}
+		}
 		switch {
 		case len(def.TriggerLabels()) > 0:
 			routes = append(routes, supervisor.TriggerRoute{
 				Name:     name,
 				Labels:   def.TriggerLabels(),
-				Agent:    def.Agent,
+				Kind:     def.EffectiveKind(),
+				Agent:    routeAgent(def),
 				Runtime:  def.Runtime,
 				Model:    def.Model,
 				Budget:   def.Budget,
 				MaxTurns: def.MaxTurns,
+				Command:  def.Command,
+				Timeout:  def.Timeout,
+				EnvJSON:  envJSON,
+				WorkDir:  def.ScriptWorkDir(),
 			})
 		case def.TriggerMilestone() != "":
 			routes = append(routes, supervisor.TriggerRoute{
 				Name:      name,
 				Milestone: def.TriggerMilestone(),
-				Agent:     def.Agent,
+				Kind:      def.EffectiveKind(),
+				Agent:     routeAgent(def),
 				Runtime:   def.Runtime,
 				Model:     def.Model,
 				Budget:    def.Budget,
 				MaxTurns:  def.MaxTurns,
+				Command:   def.Command,
+				Timeout:   def.Timeout,
+				EnvJSON:   envJSON,
+				WorkDir:   def.ScriptWorkDir(),
 			})
 		}
 	}
@@ -340,6 +361,7 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 			Expression:         route.FilterString(),
 			Labels:             append([]string(nil), route.Labels...),
 			Agent:              route.Agent,
+			ExecutionKind:      route.Kind,
 			Runtime:            route.Runtime,
 			Model:              route.Model,
 			MaxTurns:           route.MaxTurns,
@@ -363,6 +385,7 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 				Name:               schedule.Name,
 				Expression:         schedule.CronExpr.String,
 				Agent:              schedule.Agent,
+				ExecutionKind:      schedule.Kind,
 				Runtime:            schedule.Runtime.String,
 				Model:              schedule.Model.String,
 				MaxTurns:           int(schedule.MaxTurns.Int64),
@@ -383,6 +406,7 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 				Name:               schedule.Name,
 				Expression:         schedule.AtTime.Time.Format(time.RFC3339),
 				Agent:              schedule.Agent,
+				ExecutionKind:      schedule.Kind,
 				Runtime:            schedule.Runtime.String,
 				Model:              schedule.Model.String,
 				MaxTurns:           int(schedule.MaxTurns.Int64),
@@ -521,4 +545,11 @@ func applyLastActivation(a *Automation, store *db.Store, deployID, sourceType, s
 	if job.QueuedAt.Valid {
 		a.LastActivationAt = job.QueuedAt.Time
 	}
+}
+
+func routeAgent(def scheduler.JobDef) string {
+	if def.EffectiveKind() == scheduler.JobKindScript {
+		return db.JobKindScript
+	}
+	return def.Agent
 }
