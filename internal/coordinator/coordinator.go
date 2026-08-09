@@ -8,6 +8,7 @@ package coordinator
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"time"
@@ -39,6 +40,32 @@ type Automation struct {
 	Runtime    string
 	NextRunAt  time.Time
 	HasNextRun bool
+
+	// Enabled reflects the automation's current activation state. Cron
+	// automations are only ever loaded when enabled (GetEnabledSchedules
+	// filters), and trigger/watch automations are enabled-by-construction
+	// today, so this is always true until a durable table adds per-automation
+	// disable support.
+	Enabled bool
+
+	// LastActivation is derived from job provenance (jobs.source_type,
+	// jobs.source_name), not from a durable automations table: the most
+	// recent job created by this automation, if any.
+	LastActivationAt    time.Time
+	HasLastActivation   bool
+	LastActivationJobID int64
+}
+
+// ConfigRevision identifies the jobs.yaml a Coordinator loaded: its path, a
+// content hash for change detection, when it was loaded, and any validation
+// error encountered. Populated even when jobs.yaml is absent or invalid so
+// callers can distinguish "no automation" from "automation config is broken."
+type ConfigRevision struct {
+	Path        string
+	SHA256      string
+	LoadedAt    time.Time
+	HasConfig   bool
+	ValidateErr error
 }
 
 // Options carries the pre-resolved inputs a Coordinator needs. The caller owns
@@ -65,6 +92,7 @@ type Coordinator struct {
 
 	cancel      context.CancelFunc // cancels the context Start derived; nil before Start
 	syncWarning error
+	configRev   ConfigRevision
 }
 
 // New assembles the supervisor, optional scheduler, and trigger routes for a
@@ -87,15 +115,17 @@ func New(opts Options) (*Coordinator, error) {
 	// (only the issues/proactive job the operator named) must not
 	// auto-subscribe to jobs.yaml triggers or cron schedules.
 	if opts.Deploy.ActivationPolicy != db.ActivationExplicit {
-		cfgPath := scheduler.ConfigPath(opts.Deploy.RepoDir)
-		if _, statErr := os.Stat(cfgPath); statErr == nil {
-			cfg, err := scheduler.LoadConfig(cfgPath)
-			if err != nil {
+		rev, cfg, err := LoadConfigRevision(opts.Deploy.RepoDir)
+		c.configRev = rev
+		if err != nil {
+			if rev.HasConfig {
 				// jobs.yaml exists but is invalid, and automation was
 				// requested (implicitly or explicitly) — surface the error
 				// rather than silently running without automation.
 				return nil, fmt.Errorf("load jobs.yaml: %w", err)
 			}
+			// No jobs.yaml present; nothing to load.
+		} else if cfg != nil {
 			c.cfg = cfg
 			c.sched = scheduler.New(opts.Store, opts.Deploy.ID, opts.Deploy.Owner, opts.Deploy.Repo, cfg)
 			if err := c.sched.SyncSchedules(); err != nil {
@@ -113,6 +143,36 @@ func New(opts Options) (*Coordinator, error) {
 
 	return c, nil
 }
+
+// LoadConfigRevision reads and parses the jobs.yaml for repoDir, returning the
+// computed ConfigRevision alongside the parsed config (nil if absent or
+// invalid) and any parse/validation error. Split out from New so the
+// config-identity computation is directly testable without a full
+// Coordinator/deployment fixture.
+func LoadConfigRevision(repoDir string) (ConfigRevision, *scheduler.Config, error) {
+	cfgPath := scheduler.ConfigPath(repoDir)
+	data, readErr := os.ReadFile(cfgPath)
+	if readErr != nil {
+		// No jobs.yaml present; not an error, just no config to report.
+		return ConfigRevision{Path: cfgPath}, nil, nil
+	}
+	rev := ConfigRevision{
+		Path:      cfgPath,
+		SHA256:    fmt.Sprintf("%x", sha256.Sum256(data)),
+		LoadedAt:  time.Now(),
+		HasConfig: true,
+	}
+	cfg, err := scheduler.ParseConfig(data)
+	if err != nil {
+		rev.ValidateErr = err
+		return rev, nil, err
+	}
+	return rev, cfg, nil
+}
+
+// ConfigRevision returns the identity of the jobs.yaml this Coordinator
+// loaded: path, content hash, load time, and any validation error.
+func (c *Coordinator) ConfigRevision() ConfigRevision { return c.configRev }
 
 // Scheduler returns the loaded scheduler, or nil when no jobs.yaml is present.
 func (c *Coordinator) Scheduler() *scheduler.Scheduler { return c.sched }
@@ -207,16 +267,21 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 			Kind:       AutomationWatch,
 			Expression: deploy.WatchFilter.String,
 			Agent:      "autopilot",
+			Enabled:    true,
 		})
 	}
 	for _, route := range routes {
-		automations = append(automations, Automation{
+		a := Automation{
 			Kind:       AutomationTrigger,
+			Name:       route.Name,
 			Expression: route.FilterString(),
 			Labels:     append([]string(nil), route.Labels...),
 			Agent:      route.Agent,
 			Runtime:    route.Runtime,
-		})
+			Enabled:    true,
+		}
+		applyLastActivation(&a, store, deployID, "trigger", route.Name)
+		automations = append(automations, a)
 	}
 
 	schedules, _ := store.GetEnabledSchedules(deployID)
@@ -224,7 +289,7 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 		if !schedule.CronExpr.Valid {
 			continue
 		}
-		automations = append(automations, Automation{
+		a := Automation{
 			Kind:       AutomationCron,
 			Name:       schedule.Name,
 			Expression: schedule.CronExpr.String,
@@ -232,7 +297,30 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 			Runtime:    schedule.Runtime.String,
 			NextRunAt:  schedule.NextRunAt.Time,
 			HasNextRun: schedule.NextRunAt.Valid,
-		})
+			Enabled:    true,
+		}
+		applyLastActivation(&a, store, deployID, "cron", schedule.Name)
+		automations = append(automations, a)
 	}
 	return automations
+}
+
+// applyLastActivation looks up the most recent job created by this automation
+// (by source_type/source_name provenance) and, if found, populates the
+// automation's last-activation fields. Store errors or a missing job leave
+// the automation's last-activation fields at their zero value, matching the
+// package's best-effort snapshot behavior.
+func applyLastActivation(a *Automation, store *db.Store, deployID, sourceType, sourceName string) {
+	if store == nil || sourceName == "" {
+		return
+	}
+	job, err := store.GetLastJobBySource(deployID, sourceType, sourceName)
+	if err != nil || job == nil {
+		return
+	}
+	a.LastActivationJobID = job.ID
+	a.HasLastActivation = true
+	if job.QueuedAt.Valid {
+		a.LastActivationAt = job.QueuedAt.Time
+	}
 }
