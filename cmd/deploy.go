@@ -355,8 +355,6 @@ func runForeground(deployID string) error {
 		fmt.Printf("Warning: sync schedules: %v\n", w)
 	}
 
-	sup := coord.Supervisor()
-
 	// --- Startup summary ---
 	printStartupSummary(coord.Snapshot())
 
@@ -378,16 +376,14 @@ func runForeground(deployID string) error {
 			DeployID: deployID,
 			APIKey:   flagAPIKey,
 		})
-		srv.StopDaemon = func() { cancel(); coord.Stop() }
-		srv.BudgetResume = sup.ResumeBudget
-		srv.IsBudgetPaused = sup.IsBudgetPaused
+		srv.Provider = coord
 
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 		fmt.Printf("  API: http://localhost%s\n", flagServe)
 	}
 
 	// Print events in foreground mode through an independent bus subscription.
-	events, err := sup.Subscribe(0)
+	events, err := coord.SubscribeEvents(0)
 	if err != nil {
 		return fmt.Errorf("subscribe to supervisor events: %w", err)
 	}
@@ -467,7 +463,6 @@ func runDaemon(deployID string) error {
 		fmt.Printf("Warning: sync schedules: %v\n", w)
 	}
 
-	sup := coord.Supervisor()
 	sched := coord.Scheduler()
 
 	printStartupSummary(coord.Snapshot())
@@ -493,9 +488,7 @@ func runDaemon(deployID string) error {
 			DeployID: deployID,
 			APIKey:   flagAPIKey,
 		})
-		srv.StopDaemon = func() { cancel(); coord.Stop() }
-		srv.BudgetResume = sup.ResumeBudget
-		srv.IsBudgetPaused = sup.IsBudgetPaused
+		srv.Provider = coord
 
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 	}
