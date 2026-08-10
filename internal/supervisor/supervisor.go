@@ -597,8 +597,12 @@ func (s *Supervisor) hasWork() bool {
 	waitingOnMerge := false
 	for _, j := range jobs {
 		switch j.Status {
-		case db.StatusQueued, db.StatusBlocked, db.StatusReviewing, db.StatusManual:
+		case db.StatusQueued, db.StatusReviewing, db.StatusManual:
 			return true
+		case db.StatusBlocked:
+			if !j.FailureReason.Valid {
+				return true
+			}
 		case db.StatusReview, db.StatusReviewed:
 			waitingOnMerge = true
 		}
