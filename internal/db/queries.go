@@ -157,6 +157,25 @@ func (s *Store) CountActiveJobsBySource(deploymentID, sourceType, sourceName str
 	return count, err
 }
 
+// GetLastJobBySource returns the most recently queued job for a deployment
+// with the given source_type/source_name provenance, or nil if none exists.
+// Used to derive an automation's last-activation time and job id without a
+// durable automations table.
+func (s *Store) GetLastJobBySource(deploymentID, sourceType, sourceName string) (*Job, error) {
+	var j Job
+	err := s.db.Get(&j, `SELECT * FROM jobs
+		WHERE deployment_id = ? AND source_type = ? AND source_name = ?
+		ORDER BY queued_at DESC, id DESC LIMIT 1`,
+		deploymentID, sourceType, sourceName)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
 // GetJobsByRepo returns all jobs for a given owner/repo across all deployments,
 // most recent first.
 func (s *Store) GetJobsByRepo(owner, repo string) ([]*Job, error) {

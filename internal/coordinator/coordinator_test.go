@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -231,5 +232,160 @@ func TestNew_ExplicitPolicyIgnoresInvalidJobsYAML(t *testing.T) {
 	}
 	if coord.Scheduler() != nil {
 		t.Fatal("explicit deployment must not load jobs.yaml at all")
+	}
+}
+
+// TestSnapshot_ReportsLastActivationFromProvenance verifies that once a
+// trigger fires and creates a job (source_type=trigger, source_name=<route
+// name>), the next snapshot derives the automation's last-activation time and
+// job id from that job row — no durable automations table involved (DM-3).
+func TestSnapshot_ReportsLastActivationFromProvenance(t *testing.T) {
+	store, deploy := setup(t, jobsYAML)
+
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Before any job exists, the trigger automation reports no activation.
+	before := coord.Snapshot()
+	for _, a := range before {
+		if a.Kind == AutomationTrigger && a.HasLastActivation {
+			t.Fatalf("trigger automation reports activation before any job exists: %#v", a)
+		}
+	}
+
+	// Simulate the trigger firing: a job created with matching provenance.
+	job := &db.Job{
+		DeploymentID: deploy.ID,
+		Agent:        "autopilot",
+		Name:         "autopilot-issue-99",
+		Owner:        deploy.Owner,
+		Repo:         deploy.Repo,
+		IssueNumber:  99,
+		Status:       db.StatusQueued,
+		SourceType:   sql.NullString{String: "trigger", Valid: true},
+		SourceName:   sql.NullString{String: "ready-issues", Valid: true},
+	}
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+
+	after := coord.Snapshot()
+	var found bool
+	for _, a := range after {
+		if a.Kind != AutomationTrigger {
+			continue
+		}
+		found = true
+		if !a.HasLastActivation {
+			t.Fatalf("trigger automation missing last activation after job creation: %#v", a)
+		}
+		if a.LastActivationJobID != job.ID {
+			t.Errorf("LastActivationJobID = %d, want %d", a.LastActivationJobID, job.ID)
+		}
+		if a.LastActivationAt.IsZero() {
+			t.Error("LastActivationAt is zero, want the job's queued_at time")
+		}
+	}
+	if !found {
+		t.Fatal("snapshot did not include the trigger automation")
+	}
+}
+
+// TestConfigRevision_ValidAndInvalid covers both branches DM-3 asks for:
+// LoadConfigRevision reports a content hash and load time for a valid
+// jobs.yaml, and surfaces the parse error (with HasConfig still true) for an
+// invalid one.
+func TestConfigRevision_ValidAndInvalid(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		repoDir := t.TempDir()
+		configPath := scheduler.ConfigPath(repoDir)
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(configPath, []byte(jobsYAML), 0o600); err != nil {
+			t.Fatalf("write jobs.yaml: %v", err)
+		}
+
+		rev, cfg, err := LoadConfigRevision(repoDir)
+		if err != nil {
+			t.Fatalf("LoadConfigRevision: %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("expected parsed config, got nil")
+		}
+		if !rev.HasConfig {
+			t.Error("HasConfig = false, want true")
+		}
+		if rev.SHA256 == "" {
+			t.Error("SHA256 is empty")
+		}
+		if rev.LoadedAt.IsZero() {
+			t.Error("LoadedAt is zero")
+		}
+		if rev.ValidateErr != nil {
+			t.Errorf("ValidateErr = %v, want nil", rev.ValidateErr)
+		}
+		if rev.Path != configPath {
+			t.Errorf("Path = %q, want %q", rev.Path, configPath)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		repoDir := t.TempDir()
+		configPath := scheduler.ConfigPath(repoDir)
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(configPath, []byte("jobs: {}"), 0o600); err != nil {
+			t.Fatalf("write jobs.yaml: %v", err)
+		}
+
+		rev, cfg, err := LoadConfigRevision(repoDir)
+		if err == nil {
+			t.Fatal("expected error for empty jobs config")
+		}
+		if cfg != nil {
+			t.Errorf("cfg = %#v, want nil on validation error", cfg)
+		}
+		if !rev.HasConfig {
+			t.Error("HasConfig = false, want true (file exists, content is invalid)")
+		}
+		if rev.ValidateErr == nil {
+			t.Error("ValidateErr is nil, want the parse error")
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		repoDir := t.TempDir()
+
+		rev, cfg, err := LoadConfigRevision(repoDir)
+		if err != nil {
+			t.Fatalf("LoadConfigRevision: %v", err)
+		}
+		if cfg != nil {
+			t.Errorf("cfg = %#v, want nil when jobs.yaml is absent", cfg)
+		}
+		if rev.HasConfig {
+			t.Error("HasConfig = true, want false when jobs.yaml is absent")
+		}
+	})
+}
+
+// TestNew_ExposesConfigRevision verifies the Coordinator itself surfaces the
+// config revision it loaded during New, matching what a deployed automation
+// worker actually ran with.
+func TestNew_ExposesConfigRevision(t *testing.T) {
+	store, deploy := setup(t, jobsYAML)
+
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rev := coord.ConfigRevision()
+	if !rev.HasConfig || rev.SHA256 == "" {
+		t.Fatalf("ConfigRevision() = %#v, want HasConfig and a SHA256", rev)
 	}
 }
