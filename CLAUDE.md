@@ -2,6 +2,10 @@
 
 Go CLI coordination layer on top of [agent-msg](../agent-msg). Monitors git repos, watches the message bus, and uses Claude Code CLI for LLM analysis to coordinate agents.
 
+## Communication
+
+Write to the user in ASD-STE100 Simplified Technical English (STE): short sentences, one instruction per sentence, active voice, present tense where possible, and approved single-meaning words. Avoid idioms, synonyms for the same concept, and long noun clusters. This applies to prose replies, not to code, identifiers, or quoted output.
+
 ## Quick orientation
 
 - **Module**: `github.com/aptx-health/agent-minder`
