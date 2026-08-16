@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -22,6 +24,26 @@ func NewClient(baseURL, apiKey string) *Client {
 		apiKey:  apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+// NewUnixClient creates a daemon API client that dials the deploy-ID-keyed
+// Unix domain socket instead of TCP. No API key is required — the socket's
+// filesystem permissions (0600) are the auth boundary — so local tooling
+// (TUI, `minder status`) can reach a worker with no network config at all.
+func NewUnixClient(deployID string) *Client {
+	socketPath := SocketPath(deployID)
+	return &Client{
+		baseURL: "http://unix",
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", socketPath)
+				},
+			},
 		},
 	}
 }
@@ -138,8 +160,9 @@ func (c *Client) GetLessons() ([]LessonResponse, error) {
 // GetJobLogStream returns the raw HTTP response for streaming a job's log.
 // Caller is responsible for closing the response body.
 func (c *Client) GetJobLogStream(id int64) (*http.Response, error) {
-	// Use a longer timeout for streaming.
-	streamClient := &http.Client{Timeout: 0}
+	// Use a longer timeout for streaming, but keep the underlying transport
+	// (e.g. the Unix socket dialer) so the stream reaches the same server.
+	streamClient := &http.Client{Timeout: 0, Transport: c.httpClient.Transport}
 	req, err := http.NewRequest("GET", c.baseURL+fmt.Sprintf("/jobs/%d/log", id), nil)
 	if err != nil {
 		return nil, err
