@@ -65,3 +65,20 @@ jobs:
 
       - name: Run supervisor scenario suite
         run: make integration
+
+  exit-gate:
+    # M1 exit-gate proof (#652): a real Coordinator drives a job through a
+    # real worker process; an external client observes snapshot + live
+    # events over the real Unix socket, consistent at every watermark, and
+    # resumes across a simulated worker restart. Split from
+    # integration-tests so its result is visible on its own.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run M1 exit-gate test
+        run: make exit-gate
