@@ -36,6 +36,25 @@ type Event struct {
 	Data         sql.NullString `db:"data"`
 }
 
+// SnapshotMarker identifies the durable event history reflected by a snapshot.
+// Both fields are read in the same SQLite transaction as the snapshot state.
+type SnapshotMarker struct {
+	Watermark int64
+	LogEpoch  string
+}
+
+// ControlSnapshot is the deployment-scoped durable state needed by the v1
+// control API. It is deliberately a database model rather than a wire model:
+// internal/controlapi owns the JSON contract and maps these values through the
+// Coordinator boundary.
+type ControlSnapshot struct {
+	Deployment *Deployment
+	Jobs       []*Job
+	Runs       []*AgentRun
+	Schedules  []*JobSchedule
+	Marker     SnapshotMarker
+}
+
 // WithTx runs fn inside a transaction, committing on nil and rolling back on
 // error. It exists so a durable event can be appended in the same transaction
 // as the state change it describes (R-1: commit is the publish).
@@ -98,6 +117,64 @@ func (s *Store) EventLogEpoch() (string, error) {
 	var epoch string
 	err := s.db.Get(&epoch, "SELECT epoch FROM event_log_meta WHERE id = 1")
 	return epoch, err
+}
+
+// SnapshotMarker reads the durable watermark and log epoch atomically.
+func (s *Store) SnapshotMarker() (SnapshotMarker, error) {
+	var marker SnapshotMarker
+	err := s.WithTx(func(tx *sqlx.Tx) error {
+		var err error
+		marker.Watermark, err = eventWatermark(tx)
+		if err != nil {
+			return err
+		}
+		return tx.Get(&marker.LogEpoch, "SELECT epoch FROM event_log_meta WHERE id = 1")
+	})
+	return marker, err
+}
+
+// SnapshotControl reads all durable state exposed by one worker's v1 read API
+// together with its watermark and log epoch in one transaction. Every query is
+// deployment-scoped, including the agent_runs join, so a Coordinator cannot
+// return rows owned by another deployment sharing the database.
+func (s *Store) SnapshotControl(deploymentID string) (*ControlSnapshot, error) {
+	snapshot := &ControlSnapshot{
+		Jobs:      make([]*Job, 0),
+		Runs:      make([]*AgentRun, 0),
+		Schedules: make([]*JobSchedule, 0),
+	}
+	err := s.WithTx(func(tx *sqlx.Tx) error {
+		var deployment Deployment
+		if err := tx.Get(&deployment, "SELECT * FROM deployments WHERE id = ?", deploymentID); err != nil {
+			return err
+		}
+		snapshot.Deployment = &deployment
+
+		if err := tx.Select(&snapshot.Jobs,
+			"SELECT * FROM jobs WHERE deployment_id = ? ORDER BY id", deploymentID); err != nil {
+			return err
+		}
+		if err := tx.Select(&snapshot.Runs, `SELECT agent_runs.* FROM agent_runs
+			JOIN jobs ON jobs.id = agent_runs.job_id
+			WHERE jobs.deployment_id = ? ORDER BY agent_runs.id`, deploymentID); err != nil {
+			return err
+		}
+		if err := tx.Select(&snapshot.Schedules,
+			"SELECT * FROM job_schedules WHERE deployment_id = ? ORDER BY name", deploymentID); err != nil {
+			return err
+		}
+
+		var err error
+		snapshot.Marker.Watermark, err = eventWatermark(tx)
+		if err != nil {
+			return err
+		}
+		return tx.Get(&snapshot.Marker.LogEpoch, "SELECT epoch FROM event_log_meta WHERE id = 1")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
 }
 
 // EventsTruncatedThrough returns the durable retention floor: the highest

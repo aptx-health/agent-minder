@@ -7,7 +7,9 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,12 +23,18 @@ import (
 
 // Server is the HTTP API server embedded in the deploy daemon.
 type Server struct {
-	store     *db.Store
-	deployID  string
-	apiKey    string
-	startTime time.Time
-	mux       *http.ServeMux
-	srv       *http.Server
+	store        *db.Store
+	deployID     string
+	apiKey       string
+	startTime    time.Time
+	mux          *http.ServeMux
+	srv          *http.Server
+	buildVersion string
+	v1Logger     *slog.Logger
+	v1Limiter    V1RateLimiter
+	v1ClientKey  func(*http.Request) string
+	v1Encoder    func(io.Writer, any) error
+	v1RequestID  func() string
 
 	// Provider is the Coordinator-owned control surface (DM-5), wired by the
 	// entry points. Handlers reach the deployment lifecycle only through it —
@@ -37,19 +45,41 @@ type Server struct {
 
 // ServerConfig holds configuration for the API server.
 type ServerConfig struct {
-	Store    *db.Store
-	DeployID string
-	APIKey   string
+	Store              *db.Store
+	DeployID           string
+	APIKey             string
+	BuildVersion       string
+	Logger             *slog.Logger
+	V1Limiter          V1RateLimiter
+	V1ClientKey        func(*http.Request) string
+	V1Encoder          func(io.Writer, any) error
+	V1RequestID        func() string
+	RateLimitPerMinute int
+	RateLimitBurst     int
 }
 
 // NewServer creates a new API server.
 func NewServer(cfg ServerConfig) *Server {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	limiter := cfg.V1Limiter
+	if limiter == nil {
+		limiter = NewTokenBucketLimiter(cfg.RateLimitPerMinute, cfg.RateLimitBurst)
+	}
 	s := &Server{
-		store:     cfg.Store,
-		deployID:  cfg.DeployID,
-		apiKey:    cfg.APIKey,
-		startTime: time.Now(),
-		mux:       http.NewServeMux(),
+		store:        cfg.Store,
+		deployID:     cfg.DeployID,
+		apiKey:       cfg.APIKey,
+		startTime:    time.Now(),
+		mux:          http.NewServeMux(),
+		buildVersion: cfg.BuildVersion,
+		v1Logger:     logger,
+		v1Limiter:    limiter,
+		v1ClientKey:  cfg.V1ClientKey,
+		v1Encoder:    cfg.V1Encoder,
+		v1RequestID:  cfg.V1RequestID,
 	}
 
 	s.mux.HandleFunc("GET /status", s.handleStatus)
@@ -64,6 +94,9 @@ func NewServer(cfg ServerConfig) *Server {
 	s.mux.HandleFunc("GET /lessons", s.handleLessons)
 	s.mux.HandleFunc("POST /stop", s.handleStop)
 	s.mux.HandleFunc("POST /resume", s.handleResume)
+	v1Mux := http.NewServeMux()
+	v1Mux.HandleFunc("GET /api/v1/meta", s.handleV1Meta)
+	s.mux.Handle("/api/v1/", s.v1Middleware(v1Mux))
 
 	s.srv = &http.Server{
 		Handler:      s.middleware(s.mux),

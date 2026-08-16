@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"database/sql"
 	"errors"
 
 	"github.com/aptx-health/agent-minder/internal/db"
@@ -16,6 +17,43 @@ type (
 	Envelope = supervisor.Envelope
 )
 
+// SnapshotMarker identifies the durable state reflected by an API snapshot.
+// Incarnation is added by the transport envelope because it scopes live state,
+// not the SQLite transaction.
+type SnapshotMarker struct {
+	Watermark int64
+	LogEpoch  string
+}
+
+// DeploymentRead is an endpoint-shaped deployment snapshot. Endpoint-shaped
+// reads keep future handlers from composing a state read with a later
+// EventWatermark call. Their durable fields and Marker always come from one
+// SQLite read transaction.
+type DeploymentRead struct {
+	Deployment *db.Deployment
+	Marker     SnapshotMarker
+}
+
+type AutomationsRead struct {
+	Automations []Automation
+	Marker      SnapshotMarker
+}
+
+type JobsRead struct {
+	Jobs   []*db.Job
+	Marker SnapshotMarker
+}
+
+type JobRead struct {
+	Job    *db.Job
+	Marker SnapshotMarker
+}
+
+type AgentRunsRead struct {
+	Runs   []*db.AgentRun
+	Marker SnapshotMarker
+}
+
 // ErrNotFound is returned by scoped reads when the requested row does not
 // exist within this Coordinator's deployment.
 var ErrNotFound = errors.New("not found in this deployment")
@@ -30,6 +68,14 @@ var ErrNotFound = errors.New("not found in this deployment")
 type StateProvider interface {
 	// DeploymentID identifies the deployment this provider serves.
 	DeploymentID() string
+	// WorkerIncarnation scopes advisory live fields to this Coordinator.
+	WorkerIncarnation() string
+	// SnapshotMarker atomically reads the durable watermark and log epoch.
+	SnapshotMarker() (SnapshotMarker, error)
+	// ConfigRevision and ActivationPolicy expose Coordinator-owned startup
+	// identity without requiring handlers to inspect its internals.
+	ConfigRevision() ConfigRevision
+	ActivationPolicy() db.ActivationPolicy
 
 	// Stop halts the deployment: cancels scheduler and supervisor work and
 	// drains in-flight jobs.
@@ -57,12 +103,25 @@ type StateProvider interface {
 	TotalSpend() (float64, error)
 	DepGraph() (*db.DepGraph, error)
 	ActiveLessons() ([]*db.Lesson, error)
+
+	// Atomic, endpoint-shaped v1 snapshot reads.
+	ReadDeploymentSnapshot() (DeploymentRead, error)
+	ReadAutomationsSnapshot() (AutomationsRead, error)
+	ReadJobsSnapshot() (JobsRead, error)
+	ReadJobSnapshot(id int64) (JobRead, error)
+	ReadAgentRunsSnapshot(jobID int64) (AgentRunsRead, error)
 }
 
 var _ StateProvider = (*Coordinator)(nil)
 
 // DeploymentID identifies the deployment this Coordinator serves.
 func (c *Coordinator) DeploymentID() string { return c.deploy.ID }
+
+// SnapshotMarker reads both durable snapshot identifiers in one transaction.
+func (c *Coordinator) SnapshotMarker() (SnapshotMarker, error) {
+	marker, err := c.store.SnapshotMarker()
+	return SnapshotMarker{Watermark: marker.Watermark, LogEpoch: marker.LogEpoch}, err
+}
 
 // ResumeBudget clears the supervisor's budget-paused state.
 func (c *Coordinator) ResumeBudget() { c.sup.ResumeBudget() }
@@ -94,6 +153,9 @@ func (c *Coordinator) Jobs() ([]*db.Job, error) {
 func (c *Coordinator) Job(id int64) (*db.Job, error) {
 	job, err := c.store.GetJob(id)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
 	if job.DeploymentID != c.deploy.ID {
@@ -115,4 +177,78 @@ func (c *Coordinator) DepGraph() (*db.DepGraph, error) {
 // ActiveLessons returns the active lessons scoped to this deployment's repo.
 func (c *Coordinator) ActiveLessons() ([]*db.Lesson, error) {
 	return c.store.GetActiveLessons(c.deploy.Owner + "/" + c.deploy.Repo)
+}
+
+func markerFromDB(marker db.SnapshotMarker) SnapshotMarker {
+	return SnapshotMarker{Watermark: marker.Watermark, LogEpoch: marker.LogEpoch}
+}
+
+// ReadDeploymentSnapshot returns this deployment and its durable marker from
+// the same SQLite transaction.
+func (c *Coordinator) ReadDeploymentSnapshot() (DeploymentRead, error) {
+	snapshot, err := c.store.SnapshotControl(c.deploy.ID)
+	if err != nil {
+		return DeploymentRead{}, err
+	}
+	return DeploymentRead{Deployment: snapshot.Deployment, Marker: markerFromDB(snapshot.Marker)}, nil
+}
+
+// ReadAutomationsSnapshot combines Coordinator-owned live configuration with
+// deployment-scoped durable schedules/jobs read in one transaction. The live
+// portion is advisory and is scoped by WorkerIncarnation in every envelope.
+func (c *Coordinator) ReadAutomationsSnapshot() (AutomationsRead, error) {
+	snapshot, err := c.store.SnapshotControl(c.deploy.ID)
+	if err != nil {
+		return AutomationsRead{}, err
+	}
+	automations := computeAutomationsFromSnapshot(snapshot.Deployment, c.routes, snapshot.Schedules, snapshot.Jobs)
+	return AutomationsRead{Automations: automations, Marker: markerFromDB(snapshot.Marker)}, nil
+}
+
+// ReadJobsSnapshot returns only jobs owned by this Coordinator's deployment.
+func (c *Coordinator) ReadJobsSnapshot() (JobsRead, error) {
+	snapshot, err := c.store.SnapshotControl(c.deploy.ID)
+	if err != nil {
+		return JobsRead{}, err
+	}
+	return JobsRead{Jobs: snapshot.Jobs, Marker: markerFromDB(snapshot.Marker)}, nil
+}
+
+// ReadJobSnapshot returns a deployment-owned job or ErrNotFound.
+func (c *Coordinator) ReadJobSnapshot(id int64) (JobRead, error) {
+	snapshot, err := c.store.SnapshotControl(c.deploy.ID)
+	if err != nil {
+		return JobRead{}, err
+	}
+	for _, job := range snapshot.Jobs {
+		if job.ID == id {
+			return JobRead{Job: job, Marker: markerFromDB(snapshot.Marker)}, nil
+		}
+	}
+	return JobRead{}, ErrNotFound
+}
+
+// ReadAgentRunsSnapshot verifies job ownership before returning its runs.
+func (c *Coordinator) ReadAgentRunsSnapshot(jobID int64) (AgentRunsRead, error) {
+	snapshot, err := c.store.SnapshotControl(c.deploy.ID)
+	if err != nil {
+		return AgentRunsRead{}, err
+	}
+	owned := false
+	for _, job := range snapshot.Jobs {
+		if job.ID == jobID {
+			owned = true
+			break
+		}
+	}
+	if !owned {
+		return AgentRunsRead{}, ErrNotFound
+	}
+	runs := make([]*db.AgentRun, 0)
+	for _, run := range snapshot.Runs {
+		if run.JobID == jobID {
+			runs = append(runs, run)
+		}
+	}
+	return AgentRunsRead{Runs: runs, Marker: markerFromDB(snapshot.Marker)}, nil
 }

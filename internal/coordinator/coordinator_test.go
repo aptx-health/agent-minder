@@ -141,6 +141,31 @@ func TestSnapshot_ReportsTriggerAndCron(t *testing.T) {
 	}
 }
 
+func TestSnapshot_PreservesOverridesAndReportsEffectiveSettings(t *testing.T) {
+	const config = `jobs:
+  inherited:
+    trigger: "label:ready"
+    agent: autopilot
+`
+	store, deploy := setup(t, config)
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	automations := coord.Snapshot()
+	if len(automations) != 1 {
+		t.Fatalf("snapshot = %#v", automations)
+	}
+	automation := automations[0]
+	if automation.Runtime != "" {
+		t.Fatalf("configured runtime = %q, want empty override (legacy output compatibility)", automation.Runtime)
+	}
+	if automation.EffectiveRuntime != deploy.Runtime || automation.EffectiveMaxTurns != deploy.MaxTurns ||
+		automation.EffectiveMaxBudget != deploy.MaxBudgetUSD {
+		t.Fatalf("effective settings = %#v, deployment = %#v", automation, deploy)
+	}
+}
+
 // TestNew_NoConfig assembles cleanly when no jobs.yaml is present: no scheduler,
 // no routes, empty snapshot.
 func TestNew_NoConfig(t *testing.T) {
