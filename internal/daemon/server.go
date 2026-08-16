@@ -16,6 +16,7 @@ import (
 
 	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/aptx-health/agent-minder/internal/db"
+	"github.com/aptx-health/agent-minder/internal/logresolve"
 )
 
 // Server is the HTTP API server embedded in the deploy daemon.
@@ -206,12 +207,16 @@ func (s *Server) handleJobLog(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job_not_found"})
 		return
 	}
-	if !job.AgentLog.Valid {
+	// Legacy route: always resolves to the job's latest log (C-3). Run-scoped
+	// addressing (stage/attempt) is reserved for the future /api/v1 runs/logs
+	// resources; this route keeps its current shape.
+	logPath, _, err := logresolve.Resolve(s.store, job, logresolve.Selector{})
+	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "log_not_found"})
 		return
 	}
 
-	f, err := os.Open(job.AgentLog.String)
+	f, err := os.Open(logPath)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "log_not_found"})
 		return
