@@ -37,52 +37,92 @@ func New(store *db.Store, deployID, owner, repo string, config *Config) *Schedul
 func (s *Scheduler) SyncSchedules() error {
 	now := time.Now().UTC()
 
-	for name, def := range s.config.Jobs {
-		if !def.IsScheduled() {
-			continue // triggers are handled by watch mode, not the scheduler
-		}
-
-		cron, err := def.ParsedSchedule()
-		if err != nil {
-			return fmt.Errorf("schedule %q: %w", name, err)
-		}
-
-		nextRun := cron.NextAfter(now)
-
-		js := &db.JobSchedule{
-			Name:         name,
-			DeploymentID: s.deployID,
-			CronExpr:     sql.NullString{String: def.Schedule, Valid: true},
-			Agent:        def.Agent,
-			Runtime:      sql.NullString{String: def.Runtime, Valid: def.Runtime != ""},
-			Model:        sql.NullString{String: def.Model, Valid: def.Model != ""},
-			Description:  sql.NullString{String: def.Description, Valid: def.Description != ""},
-			Enabled:      true,
-			NextRunAt:    sql.NullTime{Time: nextRun, Valid: !nextRun.IsZero()},
-		}
-		if def.Budget > 0 {
-			js.Budget = sql.NullFloat64{Float64: def.Budget, Valid: true}
-		}
-		if def.MaxTurns > 0 {
-			js.MaxTurns = sql.NullInt64{Int64: int64(def.MaxTurns), Valid: true}
-		}
-
-		if err := s.store.UpsertSchedule(js); err != nil {
-			return fmt.Errorf("save schedule %q: %w", name, err)
-		}
-	}
-
-	// Reconcile removals: disable any persisted schedule for this deployment
-	// that is no longer cron-scheduled in jobs.yaml, so it stops firing. This
-	// covers both outright removal and in-place conversion from schedule: to
-	// trigger: (a name still present in config but no longer scheduled).
+	// Look up already-fired one-shots so a config reload (e.g. across a
+	// daemon restart) doesn't re-resolve `in:` to a fresh future time and
+	// refire them.
 	existing, err := s.store.GetSchedules(s.deployID)
 	if err != nil {
 		return fmt.Errorf("load existing schedules: %w", err)
 	}
+	firedOneShots := make(map[string]bool, len(existing))
 	for _, sched := range existing {
-		if def, ok := s.config.Jobs[sched.Name]; ok && def.IsScheduled() {
-			continue // still cron-scheduled in config
+		if sched.IsOneShot() && sched.Fired() {
+			firedOneShots[sched.Name] = true
+		}
+	}
+
+	for name, def := range s.config.Jobs {
+		switch {
+		case def.IsScheduled():
+			cron, err := def.ParsedSchedule()
+			if err != nil {
+				return fmt.Errorf("schedule %q: %w", name, err)
+			}
+			nextRun := cron.NextAfter(now)
+
+			js := &db.JobSchedule{
+				Name:         name,
+				DeploymentID: s.deployID,
+				CronExpr:     sql.NullString{String: def.Schedule, Valid: true},
+				Agent:        def.Agent,
+				Runtime:      sql.NullString{String: def.Runtime, Valid: def.Runtime != ""},
+				Model:        sql.NullString{String: def.Model, Valid: def.Model != ""},
+				Description:  sql.NullString{String: def.Description, Valid: def.Description != ""},
+				Enabled:      true,
+				NextRunAt:    sql.NullTime{Time: nextRun, Valid: !nextRun.IsZero()},
+			}
+			if def.Budget > 0 {
+				js.Budget = sql.NullFloat64{Float64: def.Budget, Valid: true}
+			}
+			if def.MaxTurns > 0 {
+				js.MaxTurns = sql.NullInt64{Int64: int64(def.MaxTurns), Valid: true}
+			}
+			if err := s.store.UpsertSchedule(js); err != nil {
+				return fmt.Errorf("save schedule %q: %w", name, err)
+			}
+
+		case def.IsOneShot():
+			if firedOneShots[name] {
+				continue // already fired; do not resurrect or refire it
+			}
+
+			js := &db.JobSchedule{
+				Name:         name,
+				DeploymentID: s.deployID,
+				AtTime:       sql.NullTime{Time: def.ResolvedAt(), Valid: true},
+				Agent:        def.Agent,
+				Runtime:      sql.NullString{String: def.Runtime, Valid: def.Runtime != ""},
+				Model:        sql.NullString{String: def.Model, Valid: def.Model != ""},
+				Description:  sql.NullString{String: def.Description, Valid: def.Description != ""},
+				Enabled:      true,
+			}
+			if def.Budget > 0 {
+				js.Budget = sql.NullFloat64{Float64: def.Budget, Valid: true}
+			}
+			if def.MaxTurns > 0 {
+				js.MaxTurns = sql.NullInt64{Int64: int64(def.MaxTurns), Valid: true}
+			}
+			if err := s.store.UpsertSchedule(js); err != nil {
+				return fmt.Errorf("save schedule %q: %w", name, err)
+			}
+
+		default:
+			continue // triggers are handled by watch mode, not the scheduler
+		}
+	}
+
+	// Reconcile removals: disable any persisted schedule for this deployment
+	// that is no longer cron- or one-shot-scheduled in jobs.yaml, so it stops
+	// firing. This covers outright removal and in-place conversion between
+	// schedule:/at:/in:/trigger: (a name still present in config but no
+	// longer scheduled).
+	existing, err = s.store.GetSchedules(s.deployID)
+	if err != nil {
+		return fmt.Errorf("load existing schedules: %w", err)
+	}
+	for _, sched := range existing {
+		if def, ok := s.config.Jobs[sched.Name]; ok && (def.IsScheduled() || def.IsOneShot()) {
+			continue // still scheduled in config
 		}
 		if !sched.Enabled {
 			continue // already disabled
@@ -131,21 +171,29 @@ func (s *Scheduler) tick() {
 	now := time.Now().UTC()
 
 	for _, sched := range schedules {
-		if !sched.CronExpr.Valid || sched.CronExpr.String == "" {
-			continue
-		}
+		switch {
+		case sched.CronExpr.Valid && sched.CronExpr.String != "":
+			if !sched.NextRunAt.Valid || sched.NextRunAt.Time.After(now) {
+				continue
+			}
+			if s.jobAlreadyActive(sched.Name) {
+				log.Printf("[scheduler] skip %s (already active)", sched.Name)
+				continue
+			}
+			log.Printf("[scheduler] firing %s (agent: %s)", sched.Name, sched.Agent)
+			s.fireSchedule(sched)
 
-		if !sched.NextRunAt.Valid || sched.NextRunAt.Time.After(now) {
-			continue
+		case sched.IsOneShot():
+			if sched.AtTime.Time.After(now) {
+				continue
+			}
+			if s.jobAlreadyActive(sched.Name) {
+				log.Printf("[scheduler] skip %s (already active)", sched.Name)
+				continue
+			}
+			log.Printf("[scheduler] firing one-shot %s (agent: %s)", sched.Name, sched.Agent)
+			s.fireOneShot(sched)
 		}
-
-		if s.jobAlreadyActive(sched.Name) {
-			log.Printf("[scheduler] skip %s (already active)", sched.Name)
-			continue
-		}
-
-		log.Printf("[scheduler] firing %s (agent: %s)", sched.Name, sched.Agent)
-		s.fireSchedule(sched)
 	}
 }
 
@@ -198,10 +246,59 @@ func (s *Scheduler) fireSchedule(sched *db.JobSchedule) {
 	_ = s.store.UpdateScheduleRun(s.deployID, sched.Name, now, nextRun)
 }
 
+// fireOneShot creates a job row for a due one-shot (at:/in:) schedule, then
+// marks it fired so it never fires again — including across a daemon
+// restart that reloads jobs.yaml and re-resolves an `in:` duration.
+func (s *Scheduler) fireOneShot(sched *db.JobSchedule) {
+	now := time.Now().UTC()
+
+	jobName := fmt.Sprintf("%s-%s", sched.Name, now.Format("20060102-1504"))
+
+	title := sched.Name
+	if sched.Description.Valid && sched.Description.String != "" {
+		title = sched.Description.String
+	}
+
+	job := &db.Job{
+		DeploymentID: s.deployID,
+		Agent:        sched.Agent,
+		Name:         jobName,
+		Runtime:      sched.Runtime,
+		Model:        sched.Model,
+		IssueTitle:   sql.NullString{String: title, Valid: true},
+		Owner:        s.owner,
+		Repo:         s.repo,
+		Status:       db.StatusQueued,
+		SourceType:   sql.NullString{String: "at", Valid: true},
+		SourceName:   sql.NullString{String: sched.Name, Valid: true},
+		SourceRef:    sql.NullString{String: now.Format(time.RFC3339), Valid: true},
+	}
+
+	if sched.Budget.Valid {
+		job.MaxBudgetOv = sched.Budget
+	}
+	if sched.MaxTurns.Valid {
+		job.MaxTurns = sched.MaxTurns
+	}
+
+	if err := s.store.CreateJob(job); err != nil {
+		log.Printf("[scheduler] CreateJob error for %s: %v", sched.Name, err)
+		return
+	}
+
+	if err := s.store.MarkScheduleFired(s.deployID, sched.Name, now); err != nil {
+		log.Printf("[scheduler] MarkScheduleFired error for %s: %v", sched.Name, err)
+	}
+}
+
 // jobAlreadyActive checks if a job fired by this schedule (by provenance, not
 // name) is queued, running, blocked, or reviewing.
 func (s *Scheduler) jobAlreadyActive(scheduleName string) bool {
-	count, err := s.store.CountActiveJobsBySource(s.deployID, "cron", scheduleName)
+	return s.jobAlreadyActiveForSource("cron", scheduleName) || s.jobAlreadyActiveForSource("at", scheduleName)
+}
+
+func (s *Scheduler) jobAlreadyActiveForSource(sourceType, scheduleName string) bool {
+	count, err := s.store.CountActiveJobsBySource(s.deployID, sourceType, scheduleName)
 	if err != nil {
 		log.Printf("[scheduler] CountActiveJobsBySource error for %s: %v", scheduleName, err)
 		return false
@@ -220,6 +317,11 @@ func (s *Scheduler) RunOnce(name string) (int64, error) {
 	now := time.Now().UTC()
 	jobName := fmt.Sprintf("%s-%s", name, now.Format("20060102-1504"))
 
+	sourceType := "cron"
+	if sched.IsOneShot() {
+		sourceType = "at"
+	}
+
 	job := &db.Job{
 		DeploymentID: s.deployID,
 		Agent:        sched.Agent,
@@ -229,7 +331,7 @@ func (s *Scheduler) RunOnce(name string) (int64, error) {
 		Owner:        s.owner,
 		Repo:         s.repo,
 		Status:       db.StatusQueued,
-		SourceType:   sql.NullString{String: "cron", Valid: true},
+		SourceType:   sql.NullString{String: sourceType, Valid: true},
 		SourceName:   sql.NullString{String: sched.Name, Valid: true},
 		SourceRef:    sql.NullString{String: now.Format(time.RFC3339), Valid: true},
 	}
@@ -245,8 +347,14 @@ func (s *Scheduler) RunOnce(name string) (int64, error) {
 		return 0, fmt.Errorf("create job: %w", err)
 	}
 
-	// Update last run.
-	if sched.CronExpr.Valid {
+	// Update last run / disable one-shots so a manual trigger doesn't leave
+	// them eligible to also fire automatically once due.
+	switch {
+	case sched.IsOneShot():
+		if err := s.store.MarkScheduleFired(s.deployID, name, now); err != nil {
+			log.Printf("[scheduler] MarkScheduleFired error for %s: %v", name, err)
+		}
+	case sched.CronExpr.Valid:
 		cron, _ := ParseCron(sched.CronExpr.String)
 		if cron != nil {
 			nextRun := cron.NextAfter(now)

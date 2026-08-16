@@ -84,9 +84,13 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 	for name, def := range cfg.Jobs {
 		kind := "cron"
 		expr := def.Schedule
-		if def.IsTrigger() {
+		switch {
+		case def.IsTrigger():
 			kind = "trigger"
 			expr = def.Trigger
+		case def.IsOneShot():
+			kind = "one-shot"
+			expr = def.ResolvedAt().Local().Format("2006-01-02 15:04")
 		}
 
 		fmt.Printf("  %-20s %-8s %-25s agent=%s", name, kind, expr, def.Agent)
@@ -102,13 +106,22 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 
 		// Show DB state if available.
 		if state, ok := schedState[name]; ok {
-			if state.LastRunAt.Valid {
-				fmt.Printf("  last=%s", state.LastRunAt.Time.Format("2006-01-02 15:04"))
-			}
-			if state.NextRunAt.Valid {
-				next := state.NextRunAt.Time
-				if next.After(time.Now()) {
-					fmt.Printf("  next=%s", next.Format("2006-01-02 15:04"))
+			switch {
+			case def.IsOneShot():
+				if state.Fired() {
+					fmt.Printf("  fired=%s", state.LastRunAt.Time.Local().Format("2006-01-02 15:04"))
+				} else {
+					fmt.Printf("  pending")
+				}
+			default:
+				if state.LastRunAt.Valid {
+					fmt.Printf("  last=%s", state.LastRunAt.Time.Format("2006-01-02 15:04"))
+				}
+				if state.NextRunAt.Valid {
+					next := state.NextRunAt.Time
+					if next.After(time.Now()) {
+						fmt.Printf("  next=%s", next.Format("2006-01-02 15:04"))
+					}
 				}
 			}
 		}
@@ -153,7 +166,11 @@ func runJobsRun(cmd *cobra.Command, args []string) error {
 			if def.IsTrigger() {
 				continue
 			}
-			label := fmt.Sprintf("%-20s  %-25s  agent=%s", n, def.Schedule, def.Agent)
+			expr := def.Schedule
+			if def.IsOneShot() {
+				expr = def.ResolvedAt().Local().Format("2006-01-02 15:04")
+			}
+			label := fmt.Sprintf("%-20s  %-25s  agent=%s", n, expr, def.Agent)
 			if def.Description != "" {
 				label += "  " + truncateStr(def.Description, 40)
 			}

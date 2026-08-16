@@ -5,7 +5,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aptx-health/agent-minder/internal/runtime"
 	"go.yaml.in/yaml/v3"
@@ -27,11 +29,13 @@ type SinkDef struct {
 	Exec    string   `yaml:"exec"`    // local command; event JSON delivered on stdin; mutually exclusive with Webhook
 }
 
-// JobDef defines a scheduled or triggered job.
+// JobDef defines a scheduled, triggered, or one-shot job.
 type JobDef struct {
-	// One of schedule or trigger is required.
+	// Exactly one of Schedule, Trigger, At, or In is required.
 	Schedule string `yaml:"schedule"` // cron expression (5-field)
 	Trigger  string `yaml:"trigger"`  // event trigger: "label:<name>" or "milestone:<name>"
+	At       string `yaml:"at"`       // one-shot: RFC3339 timestamp, e.g. "2026-08-09T15:00:00Z"
+	In       string `yaml:"in"`       // one-shot: duration from load time, e.g. "30s", "5m", "2h", "1d"
 
 	Agent       string  `yaml:"agent"`       // agent def name (required)
 	Runtime     string  `yaml:"runtime"`     // optional doer runtime override
@@ -39,6 +43,14 @@ type JobDef struct {
 	Description string  `yaml:"description"` // human-readable description
 	Budget      float64 `yaml:"budget"`      // per-run budget override (0 = use deployment default)
 	MaxTurns    int     `yaml:"max_turns"`   // per-run turn limit override (0 = use default)
+
+	// resolvedAt holds the absolute fire time for a one-shot (At or In) job,
+	// set once during validation. In particular, an `in:` duration is resolved
+	// relative to load time here — reloading jobs.yaml (e.g. across a daemon
+	// restart) re-resolves it to a fresh future time. The scheduler guards
+	// against refiring an already-fired one-shot by skipping the resync when
+	// its persisted job_schedules row shows a prior run.
+	resolvedAt time.Time
 }
 
 // IsScheduled returns true if this job is cron-scheduled.
@@ -49,6 +61,19 @@ func (j *JobDef) IsScheduled() bool {
 // IsTrigger returns true if this job is event-triggered.
 func (j *JobDef) IsTrigger() bool {
 	return j.Trigger != ""
+}
+
+// IsOneShot returns true if this job fires once at a resolved absolute time
+// (declared via `at:` or `in:`). Only valid after validation (ParseConfig /
+// LoadConfig) has run.
+func (j *JobDef) IsOneShot() bool {
+	return !j.resolvedAt.IsZero()
+}
+
+// ResolvedAt returns the absolute fire time for a one-shot job, or the zero
+// time if this is not a one-shot job or validation has not run yet.
+func (j *JobDef) ResolvedAt() time.Time {
+	return j.resolvedAt
 }
 
 // TriggerLabels returns the label names if this is a label trigger (comma-separated = AND logic).
@@ -141,23 +166,35 @@ func validateJobDef(name string, job *JobDef) error {
 		return fmt.Errorf("job %q: %w", name, err)
 	}
 
-	if job.Schedule == "" && job.Trigger == "" {
-		return fmt.Errorf("job %q: schedule or trigger is required", name)
-	}
-
-	if job.Schedule != "" && job.Trigger != "" {
-		return fmt.Errorf("job %q: cannot have both schedule and trigger", name)
-	}
-
-	// Validate cron expression.
+	kindsSet := 0
 	if job.Schedule != "" {
+		kindsSet++
+	}
+	if job.Trigger != "" {
+		kindsSet++
+	}
+	if job.At != "" {
+		kindsSet++
+	}
+	if job.In != "" {
+		kindsSet++
+	}
+	if kindsSet == 0 {
+		return fmt.Errorf("job %q: exactly one of schedule, trigger, at, or in is required", name)
+	}
+	if kindsSet > 1 {
+		return fmt.Errorf("job %q: only one of schedule, trigger, at, or in may be set", name)
+	}
+
+	switch {
+	case job.Schedule != "":
+		// Validate cron expression.
 		if _, err := ParseCron(job.Schedule); err != nil {
 			return fmt.Errorf("job %q: %w", name, err)
 		}
-	}
 
-	// Validate trigger format.
-	if job.Trigger != "" {
+	case job.Trigger != "":
+		// Validate trigger format.
 		parts := strings.SplitN(job.Trigger, ":", 2)
 		if len(parts) != 2 || parts[1] == "" {
 			return fmt.Errorf("job %q: invalid trigger %q (expected label:<name> or milestone:<name>)", name, job.Trigger)
@@ -166,6 +203,26 @@ func validateJobDef(name string, job *JobDef) error {
 		if typ != "label" && typ != "milestone" {
 			return fmt.Errorf("job %q: unsupported trigger type %q", name, typ)
 		}
+
+	case job.At != "":
+		at, err := parseOneShotTimestamp(job.At)
+		if err != nil {
+			return fmt.Errorf("job %q: %w", name, err)
+		}
+		if !at.After(time.Now().UTC()) {
+			return fmt.Errorf("job %q: at %q is in the past", name, job.At)
+		}
+		job.resolvedAt = at
+
+	case job.In != "":
+		d, err := parseOneShotDuration(job.In)
+		if err != nil {
+			return fmt.Errorf("job %q: %w", name, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("job %q: in %q must be a positive duration", name, job.In)
+		}
+		job.resolvedAt = time.Now().UTC().Add(d)
 	}
 
 	if job.Budget < 0 {
@@ -203,4 +260,32 @@ func validateSinkDef(index int, sink *SinkDef) error {
 	}
 
 	return nil
+}
+
+// parseOneShotTimestamp parses an `at:` value as an RFC3339 timestamp.
+func parseOneShotTimestamp(s string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid at timestamp %q (expected RFC3339, e.g. 2026-08-09T15:00:00Z): %w", s, err)
+	}
+	return t.UTC(), nil
+}
+
+// parseOneShotDuration parses an `in:` value: standard Go duration syntax
+// (30s, 5m, 2h, combinations like 1h30m) plus a "d" (day) suffix that
+// time.ParseDuration doesn't support.
+func parseOneShotDuration(s string) (time.Duration, error) {
+	if strings.HasSuffix(s, "d") {
+		numPart := strings.TrimSuffix(s, "d")
+		n, err := strconv.Atoi(numPart)
+		if err != nil {
+			return 0, fmt.Errorf("invalid in duration %q (expected e.g. 30s, 5m, 2h, 1d)", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid in duration %q (expected e.g. 30s, 5m, 2h, 1d): %w", s, err)
+	}
+	return d, nil
 }

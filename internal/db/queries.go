@@ -860,11 +860,12 @@ func (s *Store) GetOnboarding(repoDir string) (*RepoOnboarding, error) {
 // last-run history.
 func (s *Store) UpsertSchedule(js *JobSchedule) error {
 	_, err := s.db.Exec(`INSERT INTO job_schedules
-		(name, deployment_id, cron_expr, trigger_expr, agent, runtime, model, description, budget, max_turns, enabled, next_run_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(name, deployment_id, cron_expr, trigger_expr, at_time, agent, runtime, model, description, budget, max_turns, enabled, next_run_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(deployment_id, name) DO UPDATE SET
 			cron_expr = excluded.cron_expr,
 			trigger_expr = excluded.trigger_expr,
+			at_time = excluded.at_time,
 			agent = excluded.agent,
 			runtime = excluded.runtime,
 			model = excluded.model,
@@ -873,7 +874,7 @@ func (s *Store) UpsertSchedule(js *JobSchedule) error {
 			max_turns = excluded.max_turns,
 			enabled = excluded.enabled,
 			next_run_at = excluded.next_run_at`,
-		js.Name, js.DeploymentID, js.CronExpr, js.TriggerExpr,
+		js.Name, js.DeploymentID, js.CronExpr, js.TriggerExpr, js.AtTime,
 		js.Agent, js.Runtime, js.Model, js.Description, js.Budget, js.MaxTurns, js.Enabled, js.NextRunAt)
 	return err
 }
@@ -910,6 +911,16 @@ func (s *Store) UpdateScheduleRun(deploymentID, name string, lastRun, nextRun ti
 	_, err := s.db.Exec(
 		"UPDATE job_schedules SET last_run_at = ?, next_run_at = ? WHERE deployment_id = ? AND name = ?",
 		lastRun, nextRun, deploymentID, name)
+	return err
+}
+
+// MarkScheduleFired records that a one-shot schedule fired and disables it so
+// it never fires again, even if jobs.yaml is reloaded (e.g. across a daemon
+// restart) and re-resolves `in:` to a fresh future time.
+func (s *Store) MarkScheduleFired(deploymentID, name string, firedAt time.Time) error {
+	_, err := s.db.Exec(
+		"UPDATE job_schedules SET last_run_at = ?, enabled = 0 WHERE deployment_id = ? AND name = ?",
+		firedAt, deploymentID, name)
 	return err
 }
 

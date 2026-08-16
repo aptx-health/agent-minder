@@ -219,6 +219,7 @@ type JobSchedule struct {
 	DeploymentID string          `db:"deployment_id"`
 	CronExpr     sql.NullString  `db:"cron_expr"`
 	TriggerExpr  sql.NullString  `db:"trigger_expr"`
+	AtTime       sql.NullTime    `db:"at_time"`
 	Agent        string          `db:"agent"`
 	Runtime      sql.NullString  `db:"runtime"`
 	Model        sql.NullString  `db:"model"`
@@ -229,6 +230,18 @@ type JobSchedule struct {
 	LastRunAt    sql.NullTime    `db:"last_run_at"`
 	NextRunAt    sql.NullTime    `db:"next_run_at"`
 	CreatedAt    time.Time       `db:"created_at"`
+}
+
+// IsOneShot returns true if this row is a one-shot (at:/in:) schedule rather
+// than a cron or trigger schedule.
+func (j *JobSchedule) IsOneShot() bool {
+	return j.AtTime.Valid
+}
+
+// Fired returns true if a one-shot schedule has already run. Cron schedules
+// also set LastRunAt, so callers should check IsOneShot first.
+func (j *JobSchedule) Fired() bool {
+	return j.LastRunAt.Valid
 }
 
 // AgentRun is a durable record of a single agent execution within a job: one

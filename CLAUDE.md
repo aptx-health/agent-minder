@@ -47,7 +47,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **Agent command:** `claude --agent <name> -p --max-turns <N> --max-budget-usd <B> --allowedTools <tool> ... "<prompt>"` with `GITHUB_TOKEN` env var.
 
-### DB schema (internal/db) — currently v14
+### DB schema (internal/db) — currently v15
 
 **deployments**: id, repo_dir, owner, repo, mode, watch_filter, max_agents, max_turns, max_budget_usd, runtime, analyzer_model, skip_label, auto_merge, review_enabled, review_max_turns, review_max_budget, total_budget_usd, carried_cost_usd, base_branch, activation_policy, started_at
 
@@ -61,7 +61,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **repo_onboarding**: repo_dir (PK), owner, repo, yaml_content, validation_status, validation_failures, scanned_at
 
-**job_schedules**: name, deployment_id, cron_expr, trigger_expr, agent, description, budget, max_turns, runtime, model, enabled, last_run_at, next_run_at, created_at — PK (deployment_id, name)
+**job_schedules**: name, deployment_id, cron_expr, trigger_expr, at_time, agent, description, budget, max_turns, runtime, model, enabled, last_run_at, next_run_at, created_at — PK (deployment_id, name). A row is exactly one of cron (cron_expr), trigger (trigger_expr, though triggers aren't actually persisted here — see watch mode), or one-shot (at_time, from `at:`/`in:` in jobs.yaml); one-shots are disabled after firing (reusing enabled/last_run_at) so a config reload never refires them.
 
 **agent_runs**: id, job_id, stage, attempt, agent, runtime, model, runtime_version, session_id, status (running/success/failed/bailed/manual/usage_limit), stop_reason, failure_detail, step_count, final_turns, cost_usd, max_turns, max_budget_usd, final_text, log_path, started_at, last_activity_at, completed_at — one durable row per (job, stage, attempt); indexed on job_id
 
@@ -69,7 +69,7 @@ Manages N concurrent Claude Code agents working on GitHub issues in isolated wor
 
 **event_log_meta**: id (=1), epoch (rotated only when history is destroyed, incl. WAL-recovery truncation), truncated_through (durable retention floor; replay at/below it gets `db.ErrEventsTruncated`), created_at
 
-Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents), v4→v5 (add last_helpful_at/last_unhelpful_at to lessons for decay-weighted scoring), v5→v6 (deployments.runtime), v6→v7 (per-job and per-schedule runtime overrides), v7→v8 (per-job and per-schedule model overrides), v8→v9 (job_schedules PK rescoped from name-only to (deployment_id, name), preserving last-run history), v9→v10 (jobs.source_type/source_name/source_ref for job provenance), v10→v11 (agent_runs table for durable per-run/attempt records), v11→v12 (deployments.activation_policy: explicit/automated/hybrid, gates whether jobs.yaml triggers and cron schedules are installed), v12→v13 (events + event_log_meta tables for the durable event log with store-first publish), v13→v14 (agent_runs.runtime_version for resolved runtime CLI version metadata).
+Migrations: v1→v2 (tasks→jobs rename, add agent/name/stage columns), v2→v3 (job_schedules table), v3→v4 (UNIQUE constraint change from deployment_id+issue_number to deployment_id+name for proactive agents), v4→v5 (add last_helpful_at/last_unhelpful_at to lessons for decay-weighted scoring), v5→v6 (deployments.runtime), v6→v7 (per-job and per-schedule runtime overrides), v7→v8 (per-job and per-schedule model overrides), v8→v9 (job_schedules PK rescoped from name-only to (deployment_id, name), preserving last-run history), v9→v10 (jobs.source_type/source_name/source_ref for job provenance), v10→v11 (agent_runs table for durable per-run/attempt records), v11→v12 (deployments.activation_policy: explicit/automated/hybrid, gates whether jobs.yaml triggers and cron schedules are installed), v12→v13 (events + event_log_meta tables for the durable event log with store-first publish), v13→v14 (agent_runs.runtime_version for resolved runtime CLI version metadata), v14→v15 (job_schedules.at_time for one-shot `at:`/`in:` jobs.yaml entries).
 
 Schema changes go in `internal/db/schema.go`: increment `schemaVersion`, add a migration guard, and never edit an existing migration constant. `TestClaudeMDSchemaVersion` in `internal/supervisor` asserts the version documented above matches the constant.
 

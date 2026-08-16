@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 14
+const schemaVersion = 15
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS job_schedules (
 	deployment_id TEXT NOT NULL,
 	cron_expr TEXT,
 	trigger_expr TEXT,
+	at_time DATETIME,
 	agent TEXT NOT NULL,
 	runtime TEXT,
 	model TEXT,
@@ -248,6 +249,33 @@ const migrateV11toV12 = `
 ALTER TABLE deployments ADD COLUMN activation_policy TEXT NOT NULL DEFAULT 'automated';
 UPDATE schema_version SET version = 12;
 `
+
+// migrateV14toV15 adds one-shot (at:/in:) schedule support: job_schedules
+// rows can now carry a resolved at_time instead of a cron_expr. Additive —
+// existing cron and trigger rows are untouched. Guards on job_schedules'
+// existence and the at_time column's absence, in Go rather than a plain SQL
+// constant, because minimal pre-v15 fixtures used elsewhere in the migration
+// test suite don't seed every table, and a bare ALTER TABLE would fail
+// against them.
+func migrateV14toV15(db *sqlx.DB) error {
+	var hasTable bool
+	if err := db.Get(&hasTable, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'job_schedules'`); err != nil {
+		return err
+	}
+	if hasTable {
+		var hasColumn bool
+		if err := db.Get(&hasColumn, `SELECT COUNT(*) > 0 FROM pragma_table_info('job_schedules') WHERE name = 'at_time'`); err != nil {
+			return err
+		}
+		if !hasColumn {
+			if _, err := db.Exec(`ALTER TABLE job_schedules ADD COLUMN at_time DATETIME`); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := db.Exec(`UPDATE schema_version SET version = 15`)
+	return err
+}
 
 // migrateV1toV2 migrates a v1 database (tasks table) to v2 (jobs table).
 const migrateV1toV2 = `
@@ -610,6 +638,12 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV13toV14); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v13→v14: %w", err)
+			}
+		}
+		if version < 15 {
+			if err := migrateV14toV15(db); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v14→v15: %w", err)
 			}
 		}
 	} else if !hasVersion {
