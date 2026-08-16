@@ -2,6 +2,7 @@ package controlapi
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -162,6 +163,58 @@ func (s Service) requireDeployment(deploymentID string) error {
 
 func (s Service) snapshot(marker coordinator.SnapshotMarker) Snapshot {
 	return Snapshot{Watermark: marker.Watermark, LogEpoch: marker.LogEpoch, Incarnation: s.Provider.WorkerIncarnation()}
+}
+
+// DurableEventDTO validates and freezes a database event into the v1 wire
+// contract. Invalid structured data is treated as an internal failure instead
+// of allowing json.Marshal to corrupt an SSE frame.
+func DurableEventDTO(event *db.Event) (DurableEvent, error) {
+	data, err := eventData(event.Data)
+	if err != nil {
+		return DurableEvent{}, err
+	}
+	return DurableEvent{
+		ID: event.ID, Timestamp: NewTimestamp(event.Time), DeploymentID: event.DeploymentID,
+		JobID: positiveInt64Ptr(event.JobID), RunID: positiveInt64Ptr(event.RunID),
+		Type: EventType(event.Type), Severity: Severity(event.Severity),
+		Summary: event.Summary, Data: data,
+	}, nil
+}
+
+// EphemeralEventDTO renders a live-only envelope without exposing its internal
+// bus cursor or assigning a durable SSE id.
+func EphemeralEventDTO(envelope coordinator.Envelope, incarnation string) (EphemeralEvent, error) {
+	data := json.RawMessage(nil)
+	if len(envelope.Data) > 0 {
+		if !json.Valid(envelope.Data) {
+			return EphemeralEvent{}, fmt.Errorf("invalid ephemeral event data")
+		}
+		data = append(json.RawMessage(nil), envelope.Data...)
+	}
+	return EphemeralEvent{Event: LiveEvent{
+		Timestamp: NewTimestamp(envelope.Time), DeploymentID: envelope.DeploymentID,
+		JobID: positiveInt64Ptr(envelope.JobID), RunID: positiveInt64Ptr(envelope.RunID),
+		Type: EventType(envelope.Type), Severity: Severity(envelope.Severity),
+		Summary: envelope.Summary, Data: data,
+	}, Incarnation: incarnation}, nil
+}
+
+func eventData(value sql.NullString) (json.RawMessage, error) {
+	if !value.Valid || value.String == "" {
+		return nil, nil
+	}
+	data := json.RawMessage(value.String)
+	if !json.Valid(data) {
+		return nil, fmt.Errorf("invalid durable event data")
+	}
+	return append(json.RawMessage(nil), data...), nil
+}
+
+func positiveInt64Ptr(value int64) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }
 
 func (s Service) deploymentDTO(deployment *db.Deployment) Deployment {

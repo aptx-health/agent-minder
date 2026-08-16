@@ -238,8 +238,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if len(m.sinks) == 0 {
 		return nil
 	}
-	cursor := m.bus.Cursor()
-	sub, err := m.bus.Subscribe(cursor)
+	sub, _, err := m.bus.SubscribeFromNow()
 	if err != nil {
 		return fmt.Errorf("subscribe event sinks: %w", err)
 	}

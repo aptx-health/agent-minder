@@ -3,7 +3,7 @@
     "api_version": "v1",
     "build_version": "1.2.3",
     "mode": "worker",
-    "capabilities": ["automations", "deployments", "jobs", "logs", "meta", "pagination", "runs", "snapshot"],
+    "capabilities": ["automations", "deployments", "events", "jobs", "logs", "meta", "pagination", "runs", "snapshot"],
     "pending_capabilities": ["deliverables"]
   },
   "snapshot": {

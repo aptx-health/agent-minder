@@ -84,6 +84,7 @@ func (l *TokenBucketLimiter) Allow(key string, now time.Time) (bool, time.Durati
 
 type v1RequestState struct {
 	internalErr error
+	streamKey   string
 }
 
 type v1StateKey struct{}
@@ -165,6 +166,12 @@ func (s *Server) v1Middleware(next http.Handler) http.Handler {
 		if s.v1ClientKey != nil {
 			key = s.v1ClientKey(r)
 		}
+		// Concurrent streams are counted by authenticated API-key identity,
+		// independent of a client's changing remote address.
+		state.streamKey = s.defaultV1StreamClientKey(r)
+		if s.v1ClientKey != nil {
+			state.streamKey = key
+		}
 		if allowed, retry := s.v1Limiter.Allow(key, started); !allowed {
 			seconds := int(math.Ceil(retry.Seconds()))
 			if seconds < 1 {
@@ -193,6 +200,11 @@ func (s *Server) defaultV1ClientKey(r *http.Request) string {
 	}
 	identity := sha256.Sum256([]byte(r.Header.Get("X-API-Key")))
 	return hex.EncodeToString(identity[:]) + "@" + remote
+}
+
+func (s *Server) defaultV1StreamClientKey(r *http.Request) string {
+	identity := sha256.Sum256([]byte(r.Header.Get("X-API-Key")))
+	return hex.EncodeToString(identity[:])
 }
 
 func (s *Server) handleV1Meta(w http.ResponseWriter, r *http.Request) {

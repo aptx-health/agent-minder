@@ -223,6 +223,14 @@ func (s *Supervisor) Subscribe(afterCursor uint64) (*eventbus.Subscription[Envel
 	return s.eventBus().Subscribe(afterCursor)
 }
 
+// SubscribeFromNow atomically registers for events published after this call.
+// Its bus cursor remains process-local and is intentionally discarded by
+// external transports, which use SQLite durable event ids instead.
+func (s *Supervisor) SubscribeFromNow() (*eventbus.Subscription[Envelope], error) {
+	subscription, _, err := s.eventBus().SubscribeFromNow()
+	return subscription, err
+}
+
 // EventBus exposes the supervisor's event bus for consumers that need direct
 // bus operations (e.g. eventsink.Manager, which needs Cursor() to subscribe
 // from "now" rather than replaying history). Prefer Subscribe for simple
