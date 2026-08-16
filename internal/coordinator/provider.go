@@ -165,17 +165,15 @@ func (c *Coordinator) Jobs() ([]*db.Job, error) {
 }
 
 // Job returns one of this deployment's jobs by id, or ErrNotFound when the id
-// is unknown or belongs to another deployment.
+// is unknown or belongs to another deployment. The scoping lives in
+// Store.GetJobForDeployment's query itself, not in a comparison here.
 func (c *Coordinator) Job(id int64) (*db.Job, error) {
-	job, err := c.store.GetJob(id)
+	job, err := c.store.GetJobForDeployment(c.deploy.ID, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
-	}
-	if job.DeploymentID != c.deploy.ID {
-		return nil, ErrNotFound
 	}
 	return job, nil
 }
