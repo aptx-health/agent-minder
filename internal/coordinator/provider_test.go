@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 
@@ -38,7 +39,8 @@ func TestProviderScopedReads(t *testing.T) {
 	if err := store.CreateJob(foreign); err != nil {
 		t.Fatalf("create foreign job: %v", err)
 	}
-	ownRun := &db.AgentRun{JobID: own.ID, Stage: "implement", Attempt: 1, Agent: "autopilot"}
+	ownRun := &db.AgentRun{JobID: own.ID, Stage: "implement", Attempt: 1, Agent: "autopilot",
+		LogPath: sql.NullString{String: "/tmp/own-agent.log", Valid: true}}
 	if err := store.StartAgentRun(ownRun); err != nil {
 		t.Fatalf("create own run: %v", err)
 	}
@@ -101,6 +103,16 @@ func TestProviderScopedReads(t *testing.T) {
 	if _, err := coord.ReadAgentRunsSnapshot(foreign.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("ReadAgentRunsSnapshot(foreign) = %v, want ErrNotFound", err)
 	}
+	logs, err := coord.ReadLogsSnapshot(own.ID)
+	if err != nil {
+		t.Fatalf("ReadLogsSnapshot(own): %v", err)
+	}
+	if len(logs.Logs) != 1 || logs.Logs[0].Run.ID != ownRun.ID || !logs.Logs[0].Available {
+		t.Fatalf("log snapshot = %#v, want own available run", logs.Logs)
+	}
+	if _, err := coord.ReadLogsSnapshot(foreign.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ReadLogsSnapshot(foreign) = %v, want ErrNotFound", err)
+	}
 }
 
 func TestProviderSnapshotIdentity(t *testing.T) {
@@ -131,6 +143,46 @@ func TestProviderSnapshotIdentity(t *testing.T) {
 	}
 	if after.LogEpoch == "" || after.LogEpoch != before.LogEpoch {
 		t.Fatalf("log epoch changed across Coordinator restart: %q -> %q", before.LogEpoch, after.LogEpoch)
+	}
+}
+
+func TestReadLogsSnapshotMultiStageAndRetry(t *testing.T) {
+	store, deploy := setup(t, "")
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	job := &db.Job{DeploymentID: deploy.ID, Agent: "autopilot", Name: "issue-648",
+		Owner: deploy.Owner, Repo: deploy.Repo, Status: db.StatusRunning}
+	if err := store.CreateJob(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	for _, run := range []*db.AgentRun{
+		{JobID: job.ID, Stage: "implement", Attempt: 1, Agent: "autopilot", LogPath: sql.NullString{String: "/tmp/implement-1.log", Valid: true}},
+		{JobID: job.ID, Stage: "review", Attempt: 1, Agent: "reviewer"},
+		{JobID: job.ID, Stage: "implement", Attempt: 2, Agent: "autopilot", LogPath: sql.NullString{String: "/tmp/implement-2.log", Valid: true}},
+	} {
+		if err := store.StartAgentRun(run); err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+	}
+	logs, err := coord.ReadLogsSnapshot(job.ID)
+	if err != nil {
+		t.Fatalf("ReadLogsSnapshot: %v", err)
+	}
+	if len(logs.Logs) != 3 {
+		t.Fatalf("logs = %d, want 3", len(logs.Logs))
+	}
+	for i, want := range []struct {
+		stage     string
+		attempt   int
+		available bool
+	}{{"implement", 1, true}, {"review", 1, false}, {"implement", 2, true}} {
+		got := logs.Logs[i]
+		if got.Run.Stage != want.stage || got.Run.Attempt != want.attempt || got.Available != want.available {
+			t.Errorf("log %d = %s/%d available=%v, want %s/%d available=%v",
+				i, got.Run.Stage, got.Run.Attempt, got.Available, want.stage, want.attempt, want.available)
+		}
 	}
 }
 

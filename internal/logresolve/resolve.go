@@ -68,6 +68,16 @@ func Resolve(store *db.Store, job *db.Job, sel Selector) (string, *db.AgentRun, 
 	if err != nil {
 		return "", nil, fmt.Errorf("logresolve: get agent runs: %w", err)
 	}
+	return ResolveFromRuns(job, runs, sel)
+}
+
+// ResolveFromRuns resolves a log from an already-loaded run snapshot. This is
+// the API-read counterpart to Resolve: it avoids a second database read after
+// the Coordinator has atomically loaded state and its durable marker.
+func ResolveFromRuns(job *db.Job, runs []*db.AgentRun, sel Selector) (string, *db.AgentRun, error) {
+	if job == nil {
+		return "", nil, fmt.Errorf("logresolve: nil job")
+	}
 
 	if run := pickRun(runs, sel); run != nil {
 		if run.LogPath.Valid && run.LogPath.String != "" {

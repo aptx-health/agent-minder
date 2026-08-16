@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -173,5 +174,20 @@ func TestEndpointSortOrders(t *testing.T) {
 	deliverables, _, err := PaginateDeliverables([]Deliverable{{ID: 10}, {ID: 2}}, Pagination{Limit: 50})
 	if err != nil || deliverables[0].ID != 2 || deliverables[1].ID != 10 {
 		t.Fatalf("deliverable order = %#v, %v", deliverables, err)
+	}
+	logs, _, err := PaginateLogs([]LogDescriptor{{ID: "job-7-run-10", RunID: 10}, {ID: "job-7-run-2", RunID: 2}}, Pagination{Limit: 50})
+	if err != nil || logs[0].RunID != 2 || logs[1].RunID != 10 {
+		t.Fatalf("log order = %#v, %v", logs, err)
+	}
+}
+
+func TestCapabilityNegotiation(t *testing.T) {
+	implemented := ImplementedCapabilities()
+	pending := PendingCapabilities()
+	if slices.Contains(implemented, CapabilityDeliverables) {
+		t.Fatalf("deliverables advertised as implemented: %v", implemented)
+	}
+	if !slices.Contains(pending, CapabilityDeliverables) {
+		t.Fatalf("deliverables not advertised as pending: %v", pending)
 	}
 }

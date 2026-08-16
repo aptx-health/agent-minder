@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/controlapi"
+	"github.com/aptx-health/agent-minder/internal/coordinator"
 	"github.com/google/uuid"
 )
 
@@ -200,6 +202,144 @@ func (s *Server) handleV1Meta(w http.ResponseWriter, r *http.Request) {
 		writeV1Error(w, http.StatusServiceUnavailable, controlapi.ErrorProviderUnavailable, "state provider is unavailable")
 		return
 	}
+	if err := s.writeV1JSON(w, http.StatusOK, response); err != nil {
+		markV1InternalError(r, err)
+		writeV1Error(w, http.StatusInternalServerError, controlapi.ErrorInternal, "an internal error occurred")
+	}
+}
+
+func (s *Server) handleV1Deployments(w http.ResponseWriter, r *http.Request) {
+	params, ok := parseV1Pagination(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.controlAPI().Deployments(params)
+	if err != nil {
+		s.handleV1ServiceError(w, r, err)
+		return
+	}
+	s.writeV1Success(w, r, response)
+}
+
+func (s *Server) handleV1Deployment(w http.ResponseWriter, r *http.Request) {
+	response, err := s.controlAPI().Deployment(r.PathValue("deployment_id"))
+	if err != nil {
+		s.handleV1ServiceError(w, r, err)
+		return
+	}
+	s.writeV1Success(w, r, response)
+}
+
+func (s *Server) handleV1Automations(w http.ResponseWriter, r *http.Request) {
+	params, ok := parseV1Pagination(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.controlAPI().Automations(r.PathValue("deployment_id"), params)
+	if err != nil {
+		s.handleV1ServiceError(w, r, err)
+		return
+	}
+	s.writeV1Success(w, r, response)
+}
+
+func (s *Server) handleV1Jobs(w http.ResponseWriter, r *http.Request) {
+	params, ok := parseV1Pagination(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.controlAPI().Jobs(r.PathValue("deployment_id"), params)
+	if err != nil {
+		s.handleV1ServiceError(w, r, err)
+		return
+	}
+	s.writeV1Success(w, r, response)
+}
+
+func (s *Server) handleV1Job(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := parseV1JobID(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.controlAPI().Job(r.PathValue("deployment_id"), jobID)
+	if err != nil {
+		s.handleV1ServiceError(w, r, err)
+		return
+	}
+	s.writeV1Success(w, r, response)
+}
+
+func (s *Server) handleV1Runs(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := parseV1JobID(w, r)
+	if !ok {
+		return
+	}
+	params, ok := parseV1Pagination(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.controlAPI().Runs(r.PathValue("deployment_id"), jobID, params)
+	if err != nil {
+		s.handleV1ServiceError(w, r, err)
+		return
+	}
+	s.writeV1Success(w, r, response)
+}
+
+func (s *Server) handleV1Logs(w http.ResponseWriter, r *http.Request) {
+	jobID, ok := parseV1JobID(w, r)
+	if !ok {
+		return
+	}
+	params, ok := parseV1Pagination(w, r)
+	if !ok {
+		return
+	}
+	response, err := s.controlAPI().Logs(r.PathValue("deployment_id"), jobID, params)
+	if err != nil {
+		s.handleV1ServiceError(w, r, err)
+		return
+	}
+	s.writeV1Success(w, r, response)
+}
+
+func (s *Server) controlAPI() controlapi.Service {
+	return controlapi.Service{Provider: s.Provider, BuildVersion: s.buildVersion}
+}
+
+func parseV1Pagination(w http.ResponseWriter, r *http.Request) (controlapi.Pagination, bool) {
+	params, err := controlapi.ParsePagination(r.URL.Query())
+	if err != nil {
+		contractErr := err.(*controlapi.ContractError)
+		writeV1Error(w, http.StatusBadRequest, contractErr.Code, contractErr.Message)
+		return controlapi.Pagination{}, false
+	}
+	return params, true
+}
+
+func parseV1JobID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("job_id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeV1Error(w, http.StatusNotFound, controlapi.ErrorNotFound, "resource was not found")
+		return 0, false
+	}
+	return id, true
+}
+
+func (s *Server) handleV1ServiceError(w http.ResponseWriter, r *http.Request, err error) {
+	var contractErr *controlapi.ContractError
+	switch {
+	case errors.As(err, &contractErr):
+		writeV1Error(w, http.StatusBadRequest, contractErr.Code, contractErr.Message)
+	case errors.Is(err, coordinator.ErrNotFound):
+		writeV1Error(w, http.StatusNotFound, controlapi.ErrorNotFound, "resource was not found")
+	default:
+		markV1InternalError(r, err)
+		writeV1Error(w, http.StatusServiceUnavailable, controlapi.ErrorProviderUnavailable, "state provider is unavailable")
+	}
+}
+
+func (s *Server) writeV1Success(w http.ResponseWriter, r *http.Request, response any) {
 	if err := s.writeV1JSON(w, http.StatusOK, response); err != nil {
 		markV1InternalError(r, err)
 		writeV1Error(w, http.StatusInternalServerError, controlapi.ErrorInternal, "an internal error occurred")

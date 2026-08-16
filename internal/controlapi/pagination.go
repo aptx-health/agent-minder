@@ -17,6 +17,7 @@ const (
 	EndpointJobs         = "jobs"
 	EndpointRuns         = "runs"
 	EndpointDeliverables = "deliverables"
+	EndpointLogs         = "logs"
 )
 
 type Pagination struct {
@@ -167,5 +168,14 @@ func PaginateDeliverables(items []Deliverable, params Pagination) ([]Deliverable
 		func(item Deliverable) CursorPosition {
 			id := strconv.FormatInt(item.ID, 10)
 			return CursorPosition{SortKey: id, FinalID: id}
+		})
+}
+
+func PaginateLogs(items []LogDescriptor, params Pagination) ([]LogDescriptor, Page, error) {
+	return Paginate(items, EndpointLogs, params,
+		func(a, b LogDescriptor) bool { return a.RunID < b.RunID },
+		func(item LogDescriptor) CursorPosition {
+			id := strconv.FormatInt(item.RunID, 10)
+			return CursorPosition{SortKey: id, FinalID: item.ID}
 		})
 }

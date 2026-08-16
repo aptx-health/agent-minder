@@ -6,6 +6,7 @@ import (
 
 	"github.com/aptx-health/agent-minder/internal/db"
 	"github.com/aptx-health/agent-minder/internal/eventbus"
+	"github.com/aptx-health/agent-minder/internal/logresolve"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
 )
 
@@ -40,17 +41,31 @@ type AutomationsRead struct {
 }
 
 type JobsRead struct {
-	Jobs   []*db.Job
-	Marker SnapshotMarker
+	Deployment *db.Deployment
+	Jobs       []*db.Job
+	Marker     SnapshotMarker
 }
 
 type JobRead struct {
-	Job    *db.Job
-	Marker SnapshotMarker
+	Deployment *db.Deployment
+	Job        *db.Job
+	Marker     SnapshotMarker
 }
 
 type AgentRunsRead struct {
 	Runs   []*db.AgentRun
+	Marker SnapshotMarker
+}
+
+// LogRead couples a run identity with whether the shared resolver can address
+// its log. The local path intentionally does not cross the provider boundary.
+type LogRead struct {
+	Run       *db.AgentRun
+	Available bool
+}
+
+type LogsRead struct {
+	Logs   []LogRead
 	Marker SnapshotMarker
 }
 
@@ -110,6 +125,7 @@ type StateProvider interface {
 	ReadJobsSnapshot() (JobsRead, error)
 	ReadJobSnapshot(id int64) (JobRead, error)
 	ReadAgentRunsSnapshot(jobID int64) (AgentRunsRead, error)
+	ReadLogsSnapshot(jobID int64) (LogsRead, error)
 }
 
 var _ StateProvider = (*Coordinator)(nil)
@@ -211,7 +227,7 @@ func (c *Coordinator) ReadJobsSnapshot() (JobsRead, error) {
 	if err != nil {
 		return JobsRead{}, err
 	}
-	return JobsRead{Jobs: snapshot.Jobs, Marker: markerFromDB(snapshot.Marker)}, nil
+	return JobsRead{Deployment: snapshot.Deployment, Jobs: snapshot.Jobs, Marker: markerFromDB(snapshot.Marker)}, nil
 }
 
 // ReadJobSnapshot returns a deployment-owned job or ErrNotFound.
@@ -222,7 +238,7 @@ func (c *Coordinator) ReadJobSnapshot(id int64) (JobRead, error) {
 	}
 	for _, job := range snapshot.Jobs {
 		if job.ID == id {
-			return JobRead{Job: job, Marker: markerFromDB(snapshot.Marker)}, nil
+			return JobRead{Deployment: snapshot.Deployment, Job: job, Marker: markerFromDB(snapshot.Marker)}, nil
 		}
 	}
 	return JobRead{}, ErrNotFound
@@ -251,4 +267,38 @@ func (c *Coordinator) ReadAgentRunsSnapshot(jobID int64) (AgentRunsRead, error) 
 		}
 	}
 	return AgentRunsRead{Runs: runs, Marker: markerFromDB(snapshot.Marker)}, nil
+}
+
+// ReadLogsSnapshot verifies job ownership and resolves each run's log from the
+// same preloaded snapshot used to produce the durable marker. Resolution is
+// advisory filesystem state and is scoped by the worker incarnation.
+func (c *Coordinator) ReadLogsSnapshot(jobID int64) (LogsRead, error) {
+	snapshot, err := c.store.SnapshotControl(c.deploy.ID)
+	if err != nil {
+		return LogsRead{}, err
+	}
+	var ownedJob *db.Job
+	for _, job := range snapshot.Jobs {
+		if job.ID == jobID {
+			ownedJob = job
+			break
+		}
+	}
+	if ownedJob == nil {
+		return LogsRead{}, ErrNotFound
+	}
+	runs := make([]*db.AgentRun, 0)
+	for _, run := range snapshot.Runs {
+		if run.JobID == jobID {
+			runs = append(runs, run)
+		}
+	}
+	logs := make([]LogRead, 0, len(runs))
+	for _, run := range runs {
+		_, _, resolveErr := logresolve.ResolveFromRuns(ownedJob, runs, logresolve.Selector{
+			Stage: run.Stage, Attempt: run.Attempt,
+		})
+		logs = append(logs, LogRead{Run: run, Available: resolveErr == nil})
+	}
+	return LogsRead{Logs: logs, Marker: markerFromDB(snapshot.Marker)}, nil
 }
