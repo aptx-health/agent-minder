@@ -45,6 +45,17 @@ func init() {
 // Name returns the runtime identifier.
 func (c *ClaudeRuntime) Name() string { return Name }
 
+// ResolveRunMetadata reports the normalized fresh-run model and best-effort
+// Claude CLI version before process launch.
+func (c *ClaudeRuntime) ResolveRunMetadata(ctx context.Context, inv runtime.Invocation) (runtime.RunMetadata, error) {
+	version, err := runtime.CommandVersion(ctx, c.binPath(), "--version")
+	return runtime.RunMetadata{
+		RuntimeName:    c.Name(),
+		Model:          runtime.NormalizeModelName(inv.Model),
+		RuntimeVersion: version,
+	}, err
+}
+
 // binPath returns the configured binary path or the default.
 func (c *ClaudeRuntime) binPath() string {
 	if c.Bin != "" {
@@ -209,6 +220,7 @@ func (c *ClaudeRuntime) ParseResult(logPath string) (*runtime.Result, error) {
 
 	return &runtime.Result{
 		SessionID:         evt.SessionID,
+		Model:             evt.Model,
 		NumTurns:          evt.NumTurns,
 		TotalCostUSD:      evt.TotalCost,
 		FinalText:         evt.Result,

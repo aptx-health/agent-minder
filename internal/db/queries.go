@@ -516,10 +516,10 @@ func (s *Store) StartAgentRun(r *AgentRun) error {
 		r.Status = RunStatusRunning
 	}
 	res, err := s.db.Exec(`INSERT INTO agent_runs
-		(job_id, stage, attempt, agent, runtime, model, session_id, status,
+		(job_id, stage, attempt, agent, runtime, model, runtime_version, session_id, status,
 		 max_turns, max_budget_usd, log_path, started_at, last_activity_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.JobID, r.Stage, r.Attempt, r.Agent, r.Runtime, r.Model, r.SessionID,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.JobID, r.Stage, r.Attempt, r.Agent, r.Runtime, r.Model, r.RuntimeVersion, r.SessionID,
 		r.Status, r.MaxTurns, r.MaxBudgetUSD, r.LogPath, now, now)
 	if err != nil {
 		return err
@@ -546,11 +546,11 @@ func (s *Store) TouchAgentRun(id int64, stepCount int) error {
 func (s *Store) CompleteAgentRun(id int64, f AgentRunResult) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`UPDATE agent_runs SET
-		status = ?, stop_reason = ?, failure_detail = ?, session_id = ?,
+		status = ?, stop_reason = ?, failure_detail = ?, session_id = ?, model = COALESCE(?, model),
 		final_text = ?, final_turns = ?, cost_usd = ?, step_count = ?,
 		last_activity_at = ?, completed_at = ? WHERE id = ?`,
 		f.Status, toNullString(f.StopReason), toNullString(f.FailureDetail),
-		toNullString(f.SessionID), toNullString(f.FinalText),
+		toNullString(f.SessionID), toNullString(f.Model), toNullString(f.FinalText),
 		f.FinalTurns, f.CostUSD, f.StepCount, now, now, id)
 	return err
 }
@@ -561,6 +561,7 @@ type AgentRunResult struct {
 	StopReason    string
 	FailureDetail string
 	SessionID     string
+	Model         string
 	FinalText     string
 	FinalTurns    int
 	CostUSD       float64

@@ -67,6 +67,21 @@ func TestPromptParamsMapping(t *testing.T) {
 	}
 }
 
+func TestModelOverrideReachesPromptConfig(t *testing.T) {
+	params := promptParams(runtime.Invocation{
+		Model:  " openrouter/anthropic/claude-sonnet-4 ",
+		Prompt: "do the thing",
+	}, "/work/dir")
+	if !params.Model.Present {
+		t.Fatalf("model override did not reach opencode prompt config: %#v", params.Model)
+	}
+	model := params.Model.Value
+	if model.ProviderID.Value != "openrouter" || model.ModelID.Value != "anthropic/claude-sonnet-4" {
+		t.Fatalf("model config = %q/%q, want openrouter/anthropic/claude-sonnet-4",
+			model.ProviderID.Value, model.ModelID.Value)
+	}
+}
+
 func TestPromptParamsOmitsEmptyOptionals(t *testing.T) {
 	// No model, agent, system, or tools set: those fields must stay unset so
 	// opencode falls back to its configured defaults.

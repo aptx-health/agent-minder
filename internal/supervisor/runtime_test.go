@@ -26,9 +26,22 @@ type fakeRuntime struct {
 	lastInv       runtimepkg.Invocation
 	lastDef       runtimepkg.AgentDefinition
 	lastWorkspace runtimepkg.Workspace
+	metadata      runtimepkg.RunMetadata
+	metadataErr   error
 }
 
 func (f *fakeRuntime) Name() string { return "fake" }
+
+func (f *fakeRuntime) ResolveRunMetadata(_ context.Context, inv runtimepkg.Invocation) (runtimepkg.RunMetadata, error) {
+	meta := f.metadata
+	if meta.RuntimeName == "" {
+		meta.RuntimeName = f.Name()
+	}
+	if meta.Model == "" {
+		meta.Model = runtimepkg.NormalizeModelName(inv.Model)
+	}
+	return meta, f.metadataErr
+}
 
 func (f *fakeRuntime) PrepareAgentDef(_ context.Context, ws runtimepkg.Workspace, def runtimepkg.AgentDefinition) error {
 	f.prepareCalled++
