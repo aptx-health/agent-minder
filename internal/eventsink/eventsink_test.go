@@ -108,19 +108,18 @@ func TestManagerDeliversToWebhookAndExec(t *testing.T) {
 	}
 
 	waitFor(t, 2*time.Second, func() bool { return got.Load() == 1 })
-	waitFor(t, 2*time.Second, func() bool {
-		_, err := os.Stat(execOut)
-		return err == nil
-	})
 
-	data, err := os.ReadFile(execOut)
-	if err != nil {
-		t.Fatalf("read exec output: %v", err)
-	}
+	// The shell truncates/creates execOut via redirection before cat writes
+	// its content, so a bare os.Stat can observe the file mid-write (or just
+	// after creation, still empty). Poll until it holds valid JSON instead.
 	var p Payload
-	if err := json.Unmarshal(data, &p); err != nil {
-		t.Fatalf("unmarshal exec payload: %v", err)
-	}
+	waitFor(t, 2*time.Second, func() bool {
+		data, err := os.ReadFile(execOut)
+		if err != nil {
+			return false
+		}
+		return json.Unmarshal(data, &p) == nil
+	})
 	if p.Type != string(supervisor.EventCompleted) {
 		t.Errorf("exec got type %q, want %q", p.Type, supervisor.EventCompleted)
 	}
