@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/coordinator"
@@ -31,6 +32,7 @@ type Server struct {
 	mux               *http.ServeMux
 	srv               *http.Server
 	unixSrv           *http.Server
+	unixSocketMu      sync.Mutex
 	unixSocketPath    string
 	buildVersion      string
 	v1Logger          *slog.Logger
@@ -193,7 +195,9 @@ func (s *Server) ListenAndServeUnix(deployID string) error {
 	if err != nil {
 		return err
 	}
+	s.unixSocketMu.Lock()
 	s.unixSocketPath = path
+	s.unixSocketMu.Unlock()
 
 	log.Printf("API server listening on unix socket %s", path)
 	err = s.unixSrv.Serve(ln)
@@ -208,8 +212,11 @@ func (s *Server) ListenAndServeUnix(deployID string) error {
 // socket file.
 func (s *Server) ShutdownUnix(ctx context.Context) error {
 	err := s.unixSrv.Shutdown(ctx)
-	if s.unixSocketPath != "" {
-		_ = os.Remove(s.unixSocketPath)
+	s.unixSocketMu.Lock()
+	path := s.unixSocketPath
+	s.unixSocketMu.Unlock()
+	if path != "" {
+		_ = os.Remove(path)
 	}
 	return err
 }
