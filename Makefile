@@ -5,7 +5,7 @@
 # invoke directly; the Makefile only adds names for the integration suite and
 # any other multi-step recipe we want to keep in one place.
 
-.PHONY: build test integration vet lint fmt-check all
+.PHONY: build test integration exit-gate vet lint fmt-check all
 
 build:
 	go build ./...
@@ -19,6 +19,13 @@ test:
 # pre-push lefthook and surfaced as its own CI check.
 integration:
 	go test ./internal/supervisor/... -run TestScenarios -count=1 -timeout 2m
+
+# exit-gate runs the M1 exit-gate proof (#652): a real Coordinator drives a
+# job through a real worker process; an external client observes snapshot +
+# live events over the real Unix socket transport, consistent at every
+# watermark, and resumes cleanly across a simulated worker restart.
+exit-gate:
+	go test ./internal/daemon/... -run TestE2E_SnapshotEventConsistencyAcrossRestart -count=1 -timeout 2m
 
 vet:
 	go vet ./...
