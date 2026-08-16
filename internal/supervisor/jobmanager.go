@@ -180,6 +180,17 @@ func (sc *SlotContext) SetupWorktree() error {
 		return fmt.Errorf("worktree setup: %w", err)
 	}
 
+	includeResult, includeErr := copyWorktreeIncludes(sc.RepoDir, sc.WorktreePath)
+	if includeErr != nil {
+		fmt.Printf("[worktreeinclude] warning: %v\n", includeErr)
+	}
+	for _, warning := range includeResult.Warnings {
+		fmt.Printf("[worktreeinclude] warning: %s\n", warning)
+	}
+	if len(includeResult.Copied) > 0 {
+		fmt.Printf("[worktreeinclude] copied: %s\n", strings.Join(includeResult.Copied, ", "))
+	}
+
 	_ = sc.Store.UpdateJobWorktree(sc.Job.ID, sc.WorktreePath, sc.Branch)
 	return nil
 }
