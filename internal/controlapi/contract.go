@@ -17,15 +17,39 @@ const WorkerMode = "worker"
 type Capability string
 
 const (
-	CapabilityMeta       Capability = "meta"
-	CapabilitySnapshot   Capability = "snapshot"
-	CapabilityPagination Capability = "pagination"
+	CapabilityAutomations  Capability = "automations"
+	CapabilityDeliverables Capability = "deliverables"
+	CapabilityDeployments  Capability = "deployments"
+	CapabilityJobs         Capability = "jobs"
+	CapabilityLogs         Capability = "logs"
+	CapabilityMeta         Capability = "meta"
+	CapabilityPagination   Capability = "pagination"
+	CapabilityRuns         Capability = "runs"
+	CapabilitySnapshot     Capability = "snapshot"
 )
 
 // ImplementedCapabilities returns a new, sorted slice so callers cannot
 // mutate package state and wire output is deterministic.
 func ImplementedCapabilities() []Capability {
-	capabilities := []Capability{CapabilityMeta, CapabilitySnapshot, CapabilityPagination}
+	capabilities := []Capability{
+		CapabilityAutomations,
+		CapabilityDeployments,
+		CapabilityJobs,
+		CapabilityLogs,
+		CapabilityMeta,
+		CapabilityPagination,
+		CapabilityRuns,
+		CapabilitySnapshot,
+	}
+	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
+	return capabilities
+}
+
+// PendingCapabilities advertises planned resources whose routes are not yet
+// available. Clients must negotiate these separately from implemented
+// capabilities and must not infer support from a pending entry.
+func PendingCapabilities() []Capability {
+	capabilities := []Capability{CapabilityDeliverables}
 	sort.Slice(capabilities, func(i, j int) bool { return capabilities[i] < capabilities[j] })
 	return capabilities
 }
@@ -75,10 +99,11 @@ func NewCollectionEnvelope[T any](data []T, snapshot Snapshot, page Page) Collec
 }
 
 type Meta struct {
-	APIVersion   string       `json:"api_version"`
-	BuildVersion string       `json:"build_version"`
-	Mode         string       `json:"mode"`
-	Capabilities []Capability `json:"capabilities"`
+	APIVersion          string       `json:"api_version"`
+	BuildVersion        string       `json:"build_version"`
+	Mode                string       `json:"mode"`
+	Capabilities        []Capability `json:"capabilities"`
+	PendingCapabilities []Capability `json:"pending_capabilities"`
 }
 
 type ConfigurationRevision struct {

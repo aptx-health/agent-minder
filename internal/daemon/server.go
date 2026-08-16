@@ -96,6 +96,13 @@ func NewServer(cfg ServerConfig) *Server {
 	s.mux.HandleFunc("POST /resume", s.handleResume)
 	v1Mux := http.NewServeMux()
 	v1Mux.HandleFunc("GET /api/v1/meta", s.handleV1Meta)
+	v1Mux.HandleFunc("GET /api/v1/deployments", s.handleV1Deployments)
+	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}", s.handleV1Deployment)
+	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}/automations", s.handleV1Automations)
+	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}/jobs", s.handleV1Jobs)
+	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}/jobs/{job_id}", s.handleV1Job)
+	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}/jobs/{job_id}/runs", s.handleV1Runs)
+	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}/jobs/{job_id}/logs", s.handleV1Logs)
 	s.mux.Handle("/api/v1/", s.v1Middleware(v1Mux))
 
 	s.srv = &http.Server{

@@ -2,20 +2,25 @@ package daemon
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/controlapi"
 	"github.com/aptx-health/agent-minder/internal/coordinator"
+	"github.com/aptx-health/agent-minder/internal/db"
 )
 
 type metaProvider struct {
@@ -34,6 +39,97 @@ func (p *metaProvider) SnapshotMarker() (coordinator.SnapshotMarker, error) {
 }
 
 func (p *metaProvider) WorkerIncarnation() string { return p.incarnation }
+
+type readProvider struct {
+	coordinator.StateProvider
+	deployment  *db.Deployment
+	automations []coordinator.Automation
+	jobs        []*db.Job
+	runs        []*db.AgentRun
+	logs        []coordinator.LogRead
+	marker      coordinator.SnapshotMarker
+	config      coordinator.ConfigRevision
+	incarnation string
+}
+
+type failingReadProvider struct {
+	*readProvider
+	err error
+}
+
+func (p *failingReadProvider) ReadJobsSnapshot() (coordinator.JobsRead, error) {
+	return coordinator.JobsRead{}, p.err
+}
+
+func newReadProvider() *readProvider {
+	at := time.Date(2026, 8, 15, 18, 34, 56, 123456789, time.UTC)
+	deployment := &db.Deployment{
+		ID: "deploy-1", Owner: "acme", Repo: "widgets", Mode: "issues",
+		ActivationPolicy: db.ActivationExplicit, StartedAt: at, Runtime: "codex",
+		MaxTurns: 50, MaxBudgetUSD: 5,
+	}
+	job := &db.Job{
+		ID: 7, DeploymentID: deployment.ID, Name: "issue-648", Agent: "autopilot",
+		IssueNumber: 648, IssueTitle: sql.NullString{String: "Read endpoints", Valid: true},
+		Owner: "acme", Repo: "widgets", Status: db.StatusRunning,
+		CurrentStage: sql.NullString{String: "implement", Valid: true},
+		QueuedAt:     sql.NullTime{Time: at, Valid: true}, StartedAt: sql.NullTime{Time: at, Valid: true},
+	}
+	run := &db.AgentRun{
+		ID: 9, JobID: job.ID, Stage: "implement", Attempt: 1, Agent: "autopilot",
+		Runtime: sql.NullString{String: "codex", Valid: true}, Status: db.RunStatusRunning,
+		StepCount: 3, StartedAt: sql.NullTime{Time: at, Valid: true},
+		LastActivityAt: sql.NullTime{Time: at, Valid: true},
+	}
+	return &readProvider{
+		deployment: deployment,
+		automations: []coordinator.Automation{{
+			Kind: coordinator.AutomationCron, Name: "daily", Expression: "0 9 * * *",
+			Agent: "autopilot", EffectiveRuntime: "codex", EffectiveModel: "gpt-5.6",
+			EffectiveMaxTurns: 50, EffectiveMaxBudget: 5, Enabled: true,
+		}},
+		jobs: []*db.Job{job}, runs: []*db.AgentRun{run},
+		logs:        []coordinator.LogRead{{Run: run, Available: true}},
+		marker:      coordinator.SnapshotMarker{Watermark: 42, LogEpoch: "epoch-1"},
+		config:      coordinator.ConfigRevision{SHA256: "revision-1", LoadedAt: at, HasConfig: true},
+		incarnation: "incarnation-1",
+	}
+}
+
+func (p *readProvider) DeploymentID() string                       { return p.deployment.ID }
+func (p *readProvider) WorkerIncarnation() string                  { return p.incarnation }
+func (p *readProvider) ConfigRevision() coordinator.ConfigRevision { return p.config }
+func (p *readProvider) ActivationPolicy() db.ActivationPolicy      { return p.deployment.ActivationPolicy }
+func (p *readProvider) SnapshotMarker() (coordinator.SnapshotMarker, error) {
+	return p.marker, nil
+}
+func (p *readProvider) ReadDeploymentSnapshot() (coordinator.DeploymentRead, error) {
+	return coordinator.DeploymentRead{Deployment: p.deployment, Marker: p.marker}, nil
+}
+func (p *readProvider) ReadAutomationsSnapshot() (coordinator.AutomationsRead, error) {
+	return coordinator.AutomationsRead{Automations: p.automations, Marker: p.marker}, nil
+}
+func (p *readProvider) ReadJobsSnapshot() (coordinator.JobsRead, error) {
+	return coordinator.JobsRead{Deployment: p.deployment, Jobs: p.jobs, Marker: p.marker}, nil
+}
+func (p *readProvider) ReadJobSnapshot(id int64) (coordinator.JobRead, error) {
+	if len(p.jobs) == 0 || p.jobs[0].ID != id {
+		return coordinator.JobRead{}, coordinator.ErrNotFound
+	}
+	return coordinator.JobRead{Deployment: p.deployment, Job: p.jobs[0], Marker: p.marker}, nil
+}
+func (p *readProvider) ReadAgentRunsSnapshot(jobID int64) (coordinator.AgentRunsRead, error) {
+	if len(p.jobs) == 0 || p.jobs[0].ID != jobID {
+		return coordinator.AgentRunsRead{}, coordinator.ErrNotFound
+	}
+	return coordinator.AgentRunsRead{Runs: p.runs, Marker: p.marker}, nil
+}
+func (p *readProvider) ReadLogsSnapshot(jobID int64) (coordinator.LogsRead, error) {
+	if len(p.jobs) == 0 || p.jobs[0].ID != jobID {
+		return coordinator.LogsRead{}, coordinator.ErrNotFound
+	}
+	return coordinator.LogsRead{Logs: p.logs, Marker: p.marker}, nil
+}
 
 type fixedLimiter struct {
 	allowed bool
@@ -93,6 +189,191 @@ func TestV1MetaGolden(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotJSON, wantJSON) {
 		t.Fatalf("meta changed\n got: %s\nwant: %s", recorder.Body.Bytes(), want)
+	}
+}
+
+func TestV1ReadEndpointsGolden(t *testing.T) {
+	server := newV1TestServer(newReadProvider(), nil)
+	routes := map[string]string{
+		"deployments": "/api/v1/deployments",
+		"deployment":  "/api/v1/deployments/deploy-1",
+		"automations": "/api/v1/deployments/deploy-1/automations",
+		"jobs":        "/api/v1/deployments/deploy-1/jobs",
+		"job":         "/api/v1/deployments/deploy-1/jobs/7",
+		"runs":        "/api/v1/deployments/deploy-1/jobs/7/runs",
+		"logs":        "/api/v1/deployments/deploy-1/jobs/7/logs",
+	}
+	got := make(map[string]any, len(routes))
+	for name, route := range routes {
+		recorder := requestV1(server, route)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, body = %s", route, recorder.Code, recorder.Body.String())
+		}
+		var value any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &value); err != nil {
+			t.Fatalf("decode %s: %v", route, err)
+		}
+		got[name] = value
+	}
+	assertV1GoldenFile(t, "testdata/read_endpoints.golden.json", got)
+}
+
+func assertV1GoldenFile(t *testing.T, path string, value any) {
+	t.Helper()
+	wantData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	gotData, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal value: %v", err)
+	}
+	var got, want any
+	if err := json.Unmarshal(gotData, &got); err != nil {
+		t.Fatalf("decode actual: %v", err)
+	}
+	if err := json.Unmarshal(wantData, &want); err != nil {
+		t.Fatalf("decode golden: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		prettyGot, _ := json.MarshalIndent(got, "", "  ")
+		prettyWant, _ := json.MarshalIndent(want, "", "  ")
+		t.Fatalf("contract changed\n got: %s\nwant: %s", prettyGot, prettyWant)
+	}
+}
+
+func TestV1DeliverablesPendingAndRouteAbsent(t *testing.T) {
+	server := newV1TestServer(newReadProvider(), nil)
+	metaRecorder := requestV1(server, "/api/v1/meta")
+	var meta controlapi.ResourceEnvelope[controlapi.Meta]
+	if err := json.Unmarshal(metaRecorder.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("decode meta: %v", err)
+	}
+	if slices.Contains(meta.Data.Capabilities, controlapi.CapabilityDeliverables) {
+		t.Fatalf("deliverables advertised as implemented: %v", meta.Data.Capabilities)
+	}
+	if !slices.Contains(meta.Data.PendingCapabilities, controlapi.CapabilityDeliverables) {
+		t.Fatalf("deliverables not advertised as pending: %v", meta.Data.PendingCapabilities)
+	}
+	recorder := requestV1(server, "/api/v1/deployments/deploy-1/jobs/7/deliverables")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("deliverables status = %d, want 404", recorder.Code)
+	}
+}
+
+func TestV1ReadEndpointScopingAndValidation(t *testing.T) {
+	server := newV1TestServer(newReadProvider(), nil)
+	for _, route := range []string{
+		"/api/v1/deployments/foreign",
+		"/api/v1/deployments/foreign/automations",
+		"/api/v1/deployments/foreign/jobs",
+		"/api/v1/deployments/foreign/jobs/7",
+		"/api/v1/deployments/foreign/jobs/7/runs",
+		"/api/v1/deployments/foreign/jobs/7/logs",
+		"/api/v1/deployments/deploy-1/jobs/999",
+		"/api/v1/deployments/deploy-1/jobs/not-a-number",
+	} {
+		recorder := requestV1(server, route)
+		assertV1Error(t, recorder, http.StatusNotFound, controlapi.ErrorNotFound)
+	}
+	for _, route := range []string{
+		"/api/v1/deployments?limit=0",
+		"/api/v1/deployments/deploy-1/jobs?cursor=malformed",
+	} {
+		recorder := requestV1(server, route)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400; body: %s", route, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestV1ReadEndpointFailuresUseStableErrors(t *testing.T) {
+	provider := &failingReadProvider{readProvider: newReadProvider(), err: errors.New("sqlite details must stay private")}
+	server := newV1TestServer(provider, nil)
+	recorder := requestV1(server, "/api/v1/deployments/deploy-1/jobs")
+	assertV1Error(t, recorder, http.StatusServiceUnavailable, controlapi.ErrorProviderUnavailable)
+	if strings.Contains(recorder.Body.String(), "sqlite") {
+		t.Fatalf("response exposed provider error: %s", recorder.Body.String())
+	}
+
+	server = newV1TestServer(newReadProvider(), func(cfg *ServerConfig) {
+		cfg.V1Encoder = func(io.Writer, any) error { return errors.New("encoder failure") }
+	})
+	recorder = requestV1(server, "/api/v1/deployments")
+	assertV1Error(t, recorder, http.StatusInternalServerError, controlapi.ErrorInternal)
+}
+
+func TestV1TwoDeploymentIsolation(t *testing.T) {
+	conn, err := db.Open(filepath.Join(t.TempDir(), "control-api.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	store := db.NewStore(conn)
+	deployA := &db.Deployment{
+		ID: "deploy-a", RepoDir: t.TempDir(), Owner: "acme", Repo: "alpha", Mode: "issues",
+		Runtime: "codex", MaxTurns: 50, MaxBudgetUSD: 5, ActivationPolicy: db.ActivationExplicit,
+	}
+	deployB := &db.Deployment{
+		ID: "deploy-b", RepoDir: t.TempDir(), Owner: "acme", Repo: "beta", Mode: "issues",
+		Runtime: "codex", MaxTurns: 50, MaxBudgetUSD: 5, ActivationPolicy: db.ActivationExplicit,
+	}
+	for _, deployment := range []*db.Deployment{deployA, deployB} {
+		if err := store.CreateDeployment(deployment); err != nil {
+			t.Fatalf("create deployment %s: %v", deployment.ID, err)
+		}
+	}
+	jobA := &db.Job{DeploymentID: deployA.ID, Agent: "autopilot", Name: "issue-1", Owner: "acme", Repo: "alpha", Status: db.StatusQueued}
+	jobB := &db.Job{DeploymentID: deployB.ID, Agent: "autopilot", Name: "issue-2", Owner: "acme", Repo: "beta", Status: db.StatusQueued}
+	for _, job := range []*db.Job{jobA, jobB} {
+		if err := store.CreateJob(job); err != nil {
+			t.Fatalf("create job %s: %v", job.Name, err)
+		}
+	}
+	for _, run := range []*db.AgentRun{
+		{JobID: jobA.ID, Stage: "implement", Attempt: 1, Agent: "autopilot", LogPath: sql.NullString{String: "/tmp/a.log", Valid: true}},
+		{JobID: jobB.ID, Stage: "implement", Attempt: 1, Agent: "autopilot", LogPath: sql.NullString{String: "/tmp/b.log", Valid: true}},
+	} {
+		if err := store.StartAgentRun(run); err != nil {
+			t.Fatalf("create run: %v", err)
+		}
+	}
+	coordA, err := coordinator.New(coordinator.Options{Store: store, Deploy: deployA})
+	if err != nil {
+		t.Fatalf("create coordinator: %v", err)
+	}
+	server := newV1TestServer(coordA, nil)
+
+	var deployments controlapi.CollectionEnvelope[controlapi.Deployment]
+	decodeV1Response(t, requestV1(server, "/api/v1/deployments"), &deployments)
+	if len(deployments.Data) != 1 || deployments.Data[0].ID != deployA.ID {
+		t.Fatalf("deployment list leaked shared state: %#v", deployments.Data)
+	}
+	var jobs controlapi.CollectionEnvelope[controlapi.Job]
+	decodeV1Response(t, requestV1(server, "/api/v1/deployments/deploy-a/jobs"), &jobs)
+	if len(jobs.Data) != 1 || jobs.Data[0].ID != jobA.ID {
+		t.Fatalf("job list leaked shared state: %#v", jobs.Data)
+	}
+
+	for _, route := range []string{
+		"/api/v1/deployments/deploy-b",
+		"/api/v1/deployments/deploy-b/automations",
+		"/api/v1/deployments/deploy-b/jobs",
+		fmt.Sprintf("/api/v1/deployments/deploy-a/jobs/%d", jobB.ID),
+		fmt.Sprintf("/api/v1/deployments/deploy-a/jobs/%d/runs", jobB.ID),
+		fmt.Sprintf("/api/v1/deployments/deploy-a/jobs/%d/logs", jobB.ID),
+	} {
+		assertV1Error(t, requestV1(server, route), http.StatusNotFound, controlapi.ErrorNotFound)
+	}
+}
+
+func decodeV1Response(t *testing.T, recorder *httptest.ResponseRecorder, target any) {
+	t.Helper()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", recorder.Code, recorder.Body.String())
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), target); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
 }
 
