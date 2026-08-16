@@ -232,6 +232,22 @@ func (s *Store) GetJob(id int64) (*Job, error) {
 	return &j, nil
 }
 
+// GetJobForDeployment returns a single job by ID, scoped to deploymentID.
+// The deployment_id filter is part of the query itself, so a job that exists
+// but belongs to another deployment returns sql.ErrNoRows exactly like an
+// unknown ID — there is no separate comparison step for a caller to forget.
+// This is the one scoped read every job/log lookup (legacy routes, the v1
+// control API) must go through to keep the ownership check structural
+// instead of per-handler.
+func (s *Store) GetJobForDeployment(deploymentID string, id int64) (*Job, error) {
+	var j Job
+	err := s.db.Get(&j, "SELECT * FROM jobs WHERE id = ? AND deployment_id = ?", id, deploymentID)
+	if err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
 // The exported *Tx variants below mirror their Store methods so a state write
 // can share a transaction with the durable event describing it (Expedition IV
 // R-1). Both shapes delegate to one statement, so the SQL can never diverge.

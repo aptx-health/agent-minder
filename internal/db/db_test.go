@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,6 +131,41 @@ func TestJobCRUD(t *testing.T) {
 	}
 	if !got.Runtime.Valid || got.Runtime.String != "codex" {
 		t.Errorf("got runtime %v, want codex", got.Runtime)
+	}
+}
+
+// TestGetJobForDeployment_Scoping guards the one scoped read every job/log
+// lookup (legacy daemon routes, coordinator.Job) must go through: a job that
+// belongs to another deployment is indistinguishable from an unknown ID.
+func TestGetJobForDeployment_Scoping(t *testing.T) {
+	s := testStore(t)
+
+	for _, id := range []string{"deploy-a", "deploy-b"} {
+		d := &Deployment{ID: id, RepoDir: "/tmp", Owner: "o", Repo: "r", Mode: "issues"}
+		if err := s.CreateDeployment(d); err != nil {
+			t.Fatalf("CreateDeployment(%s): %v", id, err)
+		}
+	}
+
+	jobA := &Job{DeploymentID: "deploy-a", Agent: "autopilot", Name: "issue-1", Owner: "o", Repo: "r", Status: StatusQueued}
+	if err := s.CreateJob(jobA); err != nil {
+		t.Fatalf("CreateJob(a): %v", err)
+	}
+
+	got, err := s.GetJobForDeployment("deploy-a", jobA.ID)
+	if err != nil {
+		t.Fatalf("GetJobForDeployment(own): %v", err)
+	}
+	if got.ID != jobA.ID {
+		t.Errorf("got job %d, want %d", got.ID, jobA.ID)
+	}
+
+	if _, err := s.GetJobForDeployment("deploy-b", jobA.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("GetJobForDeployment(foreign deployment) error = %v, want sql.ErrNoRows", err)
+	}
+
+	if _, err := s.GetJobForDeployment("deploy-a", jobA.ID+1000); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("GetJobForDeployment(unknown id) error = %v, want sql.ErrNoRows", err)
 	}
 }
 
