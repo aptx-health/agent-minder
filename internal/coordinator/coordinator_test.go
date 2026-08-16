@@ -1,10 +1,15 @@
 package coordinator
 
 import (
+	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
 	// Side-effect imports register the runtime factories so jobs.yaml
@@ -14,6 +19,7 @@ import (
 	_ "github.com/aptx-health/agent-minder/internal/runtime/codex"
 	_ "github.com/aptx-health/agent-minder/internal/runtime/opencode"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
+	"github.com/aptx-health/agent-minder/internal/supervisor"
 )
 
 const jobsYAML = `jobs:
@@ -412,5 +418,75 @@ func TestNew_ExposesConfigRevision(t *testing.T) {
 	rev := coord.ConfigRevision()
 	if !rev.HasConfig || rev.SHA256 == "" {
 		t.Fatalf("ConfigRevision() = %#v, want HasConfig and a SHA256", rev)
+	}
+}
+
+// TestNew_LoadsSinksFromJobsYAML verifies a `sinks:` block in jobs.yaml is
+// parsed into the Coordinator's eventsink.Manager, and that starting the
+// coordinator delivers a matching supervisor event to the configured webhook.
+func TestNew_LoadsSinksFromJobsYAML(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := jobsYAML + `
+sinks:
+  - events: ["completed"]
+    webhook: ` + srv.URL + `
+`
+	store, deploy := setup(t, cfg)
+
+	coord, err := New(Options{Store: store, Deploy: deploy})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if w := coord.SyncWarning(); w != nil {
+		t.Fatalf("unexpected sync warning: %v", w)
+	}
+	if coord.sinks == nil {
+		t.Fatal("expected sinks manager to be assembled from jobs.yaml")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	coord.cancel = cancel
+	if err := coord.sinks.Start(ctx); err != nil {
+		t.Fatalf("sinks.Start: %v", err)
+	}
+	defer coord.sinks.Stop()
+
+	if _, err := coord.sup.EventBus().Publish(supervisor.Envelope{
+		Type: supervisor.EventCompleted, Summary: "done",
+	}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if _, err := coord.sup.EventBus().Publish(supervisor.Envelope{
+		Type: supervisor.EventInfo, Summary: "noise",
+	}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&hits) == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("webhook hit %d times, want 1 (only the matching event)", got)
+	}
+}
+
+// TestNew_RejectsInvalidSinkDelivery verifies an assembly-time sink error
+// (e.g. neither webhook nor exec) fails Coordinator.New rather than silently
+// dropping the sink, matching the invalid-jobs.yaml behavior above.
+func TestNew_RejectsInvalidSinkDelivery(t *testing.T) {
+	cfg := jobsYAML + `
+sinks:
+  - events: ["completed"]
+`
+	store, deploy := setup(t, cfg)
+	if _, err := New(Options{Store: store, Deploy: deploy}); err == nil {
+		t.Fatal("expected error: config validation should already reject this, but New must not silently succeed either")
 	}
 }

@@ -247,6 +247,78 @@ jobs:
 	}
 }
 
+func TestParseConfigSinks(t *testing.T) {
+	base := `
+jobs:
+  test:
+    agent: autopilot
+    schedule: "0 * * * *"
+`
+
+	t.Run("valid webhook sink", func(t *testing.T) {
+		cfg, err := ParseConfig([]byte(base + `
+sinks:
+  - events: ["completed", "job.done"]
+    webhook: https://hooks.example.com/notify
+`))
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		if len(cfg.Sinks) != 1 {
+			t.Fatalf("got %d sinks, want 1", len(cfg.Sinks))
+		}
+		if cfg.Sinks[0].Webhook != "https://hooks.example.com/notify" {
+			t.Errorf("webhook = %q", cfg.Sinks[0].Webhook)
+		}
+	})
+
+	t.Run("valid exec sink", func(t *testing.T) {
+		cfg, err := ParseConfig([]byte(base + `
+sinks:
+  - events: ["bailed"]
+    exec: ./scripts/notify.sh
+`))
+		if err != nil {
+			t.Fatalf("ParseConfig: %v", err)
+		}
+		if cfg.Sinks[0].Exec != "./scripts/notify.sh" {
+			t.Errorf("exec = %q", cfg.Sinks[0].Exec)
+		}
+	})
+
+	t.Run("both webhook and exec rejected", func(t *testing.T) {
+		_, err := ParseConfig([]byte(base + `
+sinks:
+  - events: ["completed"]
+    webhook: https://hooks.example.com/notify
+    exec: ./scripts/notify.sh
+`))
+		if err == nil {
+			t.Error("expected error for sink with both webhook and exec")
+		}
+	})
+
+	t.Run("neither webhook nor exec rejected", func(t *testing.T) {
+		_, err := ParseConfig([]byte(base + `
+sinks:
+  - events: ["completed"]
+`))
+		if err == nil {
+			t.Error("expected error for sink with neither webhook nor exec")
+		}
+	})
+
+	t.Run("empty events rejected", func(t *testing.T) {
+		_, err := ParseConfig([]byte(base + `
+sinks:
+  - webhook: https://hooks.example.com/notify
+`))
+		if err == nil {
+			t.Error("expected error for sink with no events")
+		}
+	})
+}
+
 func TestConfigPath(t *testing.T) {
 	got := ConfigPath("/home/user/repo")
 	want := "/home/user/repo/.agent-minder/jobs.yaml"

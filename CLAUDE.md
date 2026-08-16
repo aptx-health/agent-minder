@@ -81,6 +81,7 @@ Schema changes go in `internal/db/schema.go`: increment `schemaVersion`, add a m
 | `internal/runtime` | Doer runtime abstraction | `AgentRuntime` interface + registry; `claudecode`, `codex`, `opencode` implementations |
 | `internal/daemon` | Deploy daemon | PID files, heartbeat, HTTP API server + client |
 | `internal/scheduler` | Job scheduler | Cron parser, `jobs.yaml` config, scheduled job firing |
+| `internal/eventsink` | Event sink delivery | `jobs.yaml` `sinks:` block; webhook/exec delivery of matching supervisor events, bounded per-sink queue + timeout, best-effort |
 | `internal/db` | SQLite schema + CRUD | sqlx.DB wrapper, migrations in `schema.go` |
 | `internal/claudecli` | Claude Code CLI wrapper | `Completer` interface, `claude -p` for analysis calls |
 | `internal/auth` | Credential resolution | OS keyring via go-keyring, env var fallback |
