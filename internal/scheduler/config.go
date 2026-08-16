@@ -3,6 +3,7 @@ package scheduler
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -12,7 +13,18 @@ import (
 
 // Config represents the top-level jobs.yaml file.
 type Config struct {
-	Jobs map[string]JobDef `yaml:"jobs"`
+	Jobs  map[string]JobDef `yaml:"jobs"`
+	Sinks []SinkDef         `yaml:"sinks"`
+}
+
+// SinkDef declares an event sink: a subscription to a set of event-type
+// patterns delivered to exactly one destination (a webhook or a local
+// command). See internal/eventsink for the pattern matching and delivery
+// machinery; this type is just the jobs.yaml wire shape.
+type SinkDef struct {
+	Events  []string `yaml:"events"`  // glob patterns matched against the event type, e.g. "completed", "review*"
+	Webhook string   `yaml:"webhook"` // POST target; mutually exclusive with Exec
+	Exec    string   `yaml:"exec"`    // local command; event JSON delivered on stdin; mutually exclusive with Webhook
 }
 
 // JobDef defines a scheduled or triggered job.
@@ -106,6 +118,12 @@ func ParseConfig(data []byte) (*Config, error) {
 		cfg.Jobs[name] = job
 	}
 
+	for i := range cfg.Sinks {
+		if err := validateSinkDef(i, &cfg.Sinks[i]); err != nil {
+			return nil, err
+		}
+	}
+
 	return &cfg, nil
 }
 
@@ -156,6 +174,32 @@ func validateJobDef(name string, job *JobDef) error {
 
 	if job.MaxTurns < 0 {
 		return fmt.Errorf("job %q: max_turns cannot be negative", name)
+	}
+
+	return nil
+}
+
+func validateSinkDef(index int, sink *SinkDef) error {
+	label := fmt.Sprintf("sink[%d]", index)
+	if len(sink.Events) == 0 {
+		return fmt.Errorf("%s: events is required", label)
+	}
+	for _, pattern := range sink.Events {
+		if pattern == "" {
+			return fmt.Errorf("%s: event pattern cannot be empty", label)
+		}
+		if _, err := path.Match(pattern, ""); err != nil {
+			return fmt.Errorf("%s: invalid event pattern %q: %w", label, pattern, err)
+		}
+	}
+
+	hasWebhook := sink.Webhook != ""
+	hasExec := sink.Exec != ""
+	switch {
+	case hasWebhook && hasExec:
+		return fmt.Errorf("%s: cannot have both webhook and exec", label)
+	case !hasWebhook && !hasExec:
+		return fmt.Errorf("%s: one of webhook or exec is required", label)
 	}
 
 	return nil

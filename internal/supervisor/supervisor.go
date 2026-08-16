@@ -223,6 +223,14 @@ func (s *Supervisor) Subscribe(afterCursor uint64) (*eventbus.Subscription[Envel
 	return s.eventBus().Subscribe(afterCursor)
 }
 
+// EventBus exposes the supervisor's event bus for consumers that need direct
+// bus operations (e.g. eventsink.Manager, which needs Cursor() to subscribe
+// from "now" rather than replaying history). Prefer Subscribe for simple
+// live-event consumption.
+func (s *Supervisor) EventBus() *eventbus.Bus[Envelope] {
+	return s.eventBus()
+}
+
 func (s *Supervisor) eventBus() *eventbus.Bus[Envelope] {
 	s.eventBusOnce.Do(func() {
 		if s.events == nil {

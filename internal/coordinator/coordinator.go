@@ -9,11 +9,13 @@ package coordinator
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/aptx-health/agent-minder/internal/db"
+	"github.com/aptx-health/agent-minder/internal/eventsink"
 	"github.com/aptx-health/agent-minder/internal/runtime"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
@@ -104,6 +106,7 @@ type Coordinator struct {
 	sched  *scheduler.Scheduler // nil when no jobs.yaml is present
 	cfg    *scheduler.Config    // nil when no jobs.yaml is present
 	routes []supervisor.TriggerRoute
+	sinks  *eventsink.Manager // nil when jobs.yaml declares no sinks
 
 	cancel      context.CancelFunc // cancels the context Start derived; nil before Start
 	syncWarning error
@@ -150,6 +153,16 @@ func New(opts Options) (*Coordinator, error) {
 			c.routes = TriggerRoutesFromConfig(cfg)
 			if len(c.routes) > 0 {
 				c.sup.SetTriggerRoutes(c.routes)
+			}
+			if len(cfg.Sinks) > 0 {
+				sinks, err := eventsink.NewManager(c.sup.EventBus(), SinkConfigsFromConfig(cfg), eventsink.Options{})
+				if err != nil {
+					// jobs.yaml passed scheduler-side validation but the
+					// sink manager rejects it; treat like the invalid-config
+					// case above rather than silently running without sinks.
+					return nil, fmt.Errorf("load jobs.yaml sinks: %w", err)
+				}
+				c.sinks = sinks
 			}
 		}
 	}
@@ -223,6 +236,13 @@ func (c *Coordinator) Start(ctx context.Context) {
 	if c.sched != nil {
 		go c.sched.Run(ctx)
 	}
+	if c.sinks != nil {
+		if err := c.sinks.Start(ctx); err != nil {
+			// Best-effort: a sink subscription failure never blocks the
+			// deployment, only the (already best-effort) notifications.
+			c.syncWarning = errors.Join(c.syncWarning, fmt.Errorf("start event sinks: %w", err))
+		}
+	}
 	c.sup.Launch(ctx)
 }
 
@@ -237,6 +257,9 @@ func (c *Coordinator) Run(ctx context.Context) {
 func (c *Coordinator) Stop() {
 	if c.cancel != nil {
 		c.cancel()
+	}
+	if c.sinks != nil {
+		c.sinks.Stop()
 	}
 	c.sup.Stop()
 }
@@ -274,6 +297,23 @@ func TriggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 		}
 	}
 	return routes
+}
+
+// SinkConfigsFromConfig converts the jobs.yaml sink declarations into the
+// shape eventsink.Manager consumes.
+func SinkConfigsFromConfig(cfg *scheduler.Config) []eventsink.Config {
+	if cfg == nil {
+		return nil
+	}
+	configs := make([]eventsink.Config, 0, len(cfg.Sinks))
+	for _, sink := range cfg.Sinks {
+		configs = append(configs, eventsink.Config{
+			Events:  sink.Events,
+			Webhook: sink.Webhook,
+			Exec:    sink.Exec,
+		})
+	}
+	return configs
 }
 
 // ComputeAutomations snapshots the active watch, trigger, and cron automations.
