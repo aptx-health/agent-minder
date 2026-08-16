@@ -150,6 +150,7 @@ The `lnav/agent-minder.json` format file ships with the repo. It color-codes sta
 - Agent contracts (`.claude/agents/*.md`) declare mode, output, context providers, dedup strategies, and pipeline stages
 - Context providers assemble prompt context from declared providers (issue, repo_info, file_list, recent_commits, lessons, sibling_jobs, dep_graph)
 - Stage executor iterates declared pipeline stages with conditional routing and context passing
+- Fresh worktrees run tracked `.agent-minder/setup.sh` before agent startup when present; stdout/stderr go to the job log, failures block the job, and `context.setup_timeout` in onboarding.yaml defaults to 5m
 - Dedup engine prevents duplicate work via stackable strategies (branch_exists, open_pr_with_label, recent_run)
 - Doer agents run through `internal/runtime`; `internal/claudecli` handles analysis calls only
 - SQLite uses single-writer (`SetMaxOpenConns(1)`) to prevent SQLITE_BUSY contention between supervisor, scheduler, and API goroutines

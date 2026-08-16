@@ -60,6 +60,32 @@ func TestShutdown_StopsCleanly(t *testing.T) {
 	}
 }
 
+func TestHasWorkIgnoresTerminalBlockedFailures(t *testing.T) {
+	store := testStore(t)
+	deploy := testDeployment(t, store)
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+
+	blockedFailure := testJob(t, store, deploy, func(j *db.Job) {
+		j.Status = db.StatusQueued
+	})
+	if err := store.UpdateJobBlockedFailure(blockedFailure.ID, "setup_hook", "setup failed"); err != nil {
+		t.Fatalf("UpdateJobBlockedFailure: %v", err)
+	}
+
+	if sup.hasWork() {
+		t.Fatal("hasWork returned true for only terminal blocked failures")
+	}
+
+	dependencyBlocked := testJob(t, store, deploy, func(j *db.Job) {
+		j.Status = db.StatusBlocked
+		j.Name = "dependency-blocked"
+	})
+
+	if !sup.hasWork() {
+		t.Fatalf("hasWork returned false with dependency-blocked job #%d", dependencyBlocked.ID)
+	}
+}
+
 // newTestSupervisor creates a Supervisor with pre-populated running jobs for testing.
 func newTestSupervisor(t *testing.T, jobIDs []int64) *Supervisor {
 	t.Helper()

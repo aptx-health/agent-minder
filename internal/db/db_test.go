@@ -222,6 +222,14 @@ func TestQueuedUnblockedJobs(t *testing.T) {
 		Dependencies: sql.NullString{String: "[99]", Valid: true},
 	})
 
+	// Job 45: terminal blocked failure → not requeued.
+	blockedFailure := &Job{
+		DeploymentID: "deploy-deps", Agent: "autopilot", Name: "issue-45",
+		IssueNumber: 45, Owner: "o", Repo: "r", Status: StatusQueued,
+	}
+	_ = s.CreateJob(blockedFailure)
+	_ = s.UpdateJobBlockedFailure(blockedFailure.ID, "setup_hook", "setup failed")
+
 	unblocked, err := s.QueuedUnblockedJobs("deploy-deps")
 	if err != nil {
 		t.Fatalf("QueuedUnblockedJobs: %v", err)

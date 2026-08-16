@@ -222,8 +222,8 @@ func detectTestCommand(repoDir string) string {
 	return ""
 }
 
-// resolveTimeout reads test or build timeout from onboarding.yaml.
-// Returns a default of "3m" for tests and "2m" for builds if not configured.
+// resolveTimeout reads test, build, or setup timeout from onboarding.yaml.
+// Returns default timeouts when not configured.
 func resolveTimeout(repoDir string, kind string) string {
 	f, err := onboarding.Parse(onboarding.FilePath(repoDir))
 	if err == nil {
@@ -236,6 +236,10 @@ func resolveTimeout(repoDir string, kind string) string {
 			if f.Context.BuildTimeout != "" {
 				return f.Context.BuildTimeout
 			}
+		case "setup":
+			if f.Context.SetupTimeout != "" {
+				return f.Context.SetupTimeout
+			}
 		}
 	}
 
@@ -245,6 +249,8 @@ func resolveTimeout(repoDir string, kind string) string {
 		return "5m"
 	case "build":
 		return "3m"
+	case "setup":
+		return "5m"
 	default:
 		return "5m"
 	}

@@ -140,6 +140,7 @@ func TestWriteAndParse(t *testing.T) {
 	f.Context = Context{
 		BuildCommand: "go build ./...",
 		TestCommand:  "go test ./...",
+		SetupTimeout: "4m",
 	}
 
 	if err := Write(path, f); err != nil {
@@ -161,6 +162,9 @@ func TestWriteAndParse(t *testing.T) {
 	}
 	if parsed.Context.BuildCommand != "go build ./..." {
 		t.Errorf("BuildCommand = %q, want %q", parsed.Context.BuildCommand, "go build ./...")
+	}
+	if parsed.Context.SetupTimeout != "4m" {
+		t.Errorf("SetupTimeout = %q, want %q", parsed.Context.SetupTimeout, "4m")
 	}
 }
 

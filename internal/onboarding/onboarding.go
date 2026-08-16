@@ -58,6 +58,7 @@ type Context struct {
 	LintCommand         string   `yaml:"lint_command"`
 	TestTimeout         string   `yaml:"test_timeout"`  // e.g., "3m", "5m" — timeout for test/build commands
 	BuildTimeout        string   `yaml:"build_timeout"` // e.g., "2m", "5m" — timeout for build commands
+	SetupTimeout        string   `yaml:"setup_timeout"` // e.g., "5m" — timeout for .agent-minder/setup.sh
 	BaseBranch          string   `yaml:"base_branch"`
 	SpecialInstructions string   `yaml:"special_instructions"`
 	ToolsNeeded         []string `yaml:"tools_needed"`
