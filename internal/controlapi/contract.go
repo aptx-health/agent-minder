@@ -20,6 +20,7 @@ const (
 	CapabilityAutomations  Capability = "automations"
 	CapabilityDeliverables Capability = "deliverables"
 	CapabilityDeployments  Capability = "deployments"
+	CapabilityEvents       Capability = "events"
 	CapabilityJobs         Capability = "jobs"
 	CapabilityLogs         Capability = "logs"
 	CapabilityMeta         Capability = "meta"
@@ -34,6 +35,7 @@ func ImplementedCapabilities() []Capability {
 	capabilities := []Capability{
 		CapabilityAutomations,
 		CapabilityDeployments,
+		CapabilityEvents,
 		CapabilityJobs,
 		CapabilityLogs,
 		CapabilityMeta,
@@ -322,3 +324,48 @@ type DurableEvent struct {
 // EventCursor is the durable integer event ID used by replay/SSE. It is
 // intentionally unrelated to opaque collection cursors.
 type EventCursor int64
+
+// EventReady is the id-less SSE preamble. Snapshot identifies the durable
+// point visible when the stream was accepted; heartbeat interval lets clients
+// set an appropriate liveness timeout without hard-coding server policy.
+type EventReady struct {
+	Snapshot                 Snapshot `json:"snapshot"`
+	HeartbeatIntervalSeconds int      `json:"heartbeat_interval_seconds"`
+}
+
+// LiveEvent is the explicit wire rendering of an in-memory envelope. It has
+// no durable id by construction and therefore can never update Last-Event-ID.
+type LiveEvent struct {
+	Timestamp    Timestamp       `json:"timestamp"`
+	DeploymentID string          `json:"deployment_id"`
+	JobID        *int64          `json:"job_id"`
+	RunID        *int64          `json:"run_id"`
+	Type         EventType       `json:"type"`
+	Severity     Severity        `json:"severity"`
+	Summary      string          `json:"summary"`
+	Data         json.RawMessage `json:"data"`
+}
+
+type EphemeralEvent struct {
+	Event       LiveEvent `json:"event"`
+	Incarnation string    `json:"incarnation"`
+}
+
+// ResyncReason is the closed set of discontinuities requiring a fresh
+// snapshot before reconnecting.
+type ResyncReason string
+
+const (
+	ResyncCursorTruncated     ResyncReason = "cursor_truncated"
+	ResyncCursorAhead         ResyncReason = "cursor_ahead"
+	ResyncEpochMismatch       ResyncReason = "epoch_mismatch"
+	ResyncEpochRequired       ResyncReason = "epoch_required"
+	ResyncSubscriberSaturated ResyncReason = "subscriber_saturated"
+)
+
+type ResyncRequired struct {
+	Reason          ResyncReason `json:"reason"`
+	RequestedCursor int64        `json:"requested_cursor"`
+	RetentionFloor  int64        `json:"retention_floor"`
+	Snapshot        Snapshot     `json:"snapshot"`
+}

@@ -69,9 +69,27 @@ type LogsRead struct {
 	Marker SnapshotMarker
 }
 
+// EventBatchRead is one atomic deployment-scoped durable event read. Its
+// metadata is available even when ErrEventCursorTruncated,
+// ErrEventCursorAhead, ErrEventEpochMismatch, or ErrEventEpochRequired is
+// returned, allowing the transport to send an actionable resync signal.
+type EventBatchRead struct {
+	Events         []*db.Event
+	RetentionFloor int64
+	Head           int64
+	LogEpoch       string
+}
+
 // ErrNotFound is returned by scoped reads when the requested row does not
 // exist within this Coordinator's deployment.
 var ErrNotFound = errors.New("not found in this deployment")
+
+var (
+	ErrEventCursorTruncated = db.ErrEventsTruncated
+	ErrEventCursorAhead     = db.ErrEventCursorAhead
+	ErrEventEpochMismatch   = db.ErrEventEpochMismatch
+	ErrEventEpochRequired   = db.ErrEventEpochRequired
+)
 
 // StateProvider is the control surface API handlers consume (Expedition I
 // DM-5): the lifecycle trio (stop, budget-resume, budget-paused), live run
@@ -108,6 +126,10 @@ type StateProvider interface {
 	// followed by live events. The cursor is in-process only and never crosses
 	// an API boundary (Expedition IV R-3).
 	SubscribeEvents(afterCursor uint64) (*eventbus.Subscription[Envelope], error)
+	// SubscribeEventsFromNow atomically captures the internal bus position and
+	// registers for live wake-ups. The captured cursor never crosses this
+	// boundary; SQLite event ids remain the only external cursors.
+	SubscribeEventsFromNow() (*eventbus.Subscription[Envelope], error)
 
 	// Deployment-scoped store reads. Job returns ErrNotFound for rows that
 	// exist but belong to another deployment, so handlers cannot leak across
@@ -126,6 +148,9 @@ type StateProvider interface {
 	ReadJobSnapshot(id int64) (JobRead, error)
 	ReadAgentRunsSnapshot(jobID int64) (AgentRunsRead, error)
 	ReadLogsSnapshot(jobID int64) (LogsRead, error)
+	// ReadEventBatch atomically validates and reads durable events after a
+	// durable cursor together with the current retention/head/epoch metadata.
+	ReadEventBatch(afterID int64, logEpoch string, limit int) (EventBatchRead, error)
 }
 
 var _ StateProvider = (*Coordinator)(nil)
@@ -152,6 +177,10 @@ func (c *Coordinator) RunningJobs() []RunInfo { return c.sup.RunningJobs() }
 // followed by live events.
 func (c *Coordinator) SubscribeEvents(afterCursor uint64) (*eventbus.Subscription[Envelope], error) {
 	return c.sup.Subscribe(afterCursor)
+}
+
+func (c *Coordinator) SubscribeEventsFromNow() (*eventbus.Subscription[Envelope], error) {
+	return c.sup.SubscribeFromNow()
 }
 
 // Deployment returns this deployment's record.
@@ -299,4 +328,14 @@ func (c *Coordinator) ReadLogsSnapshot(jobID int64) (LogsRead, error) {
 		logs = append(logs, LogRead{Run: run, Available: resolveErr == nil})
 	}
 	return LogsRead{Logs: logs, Marker: markerFromDB(snapshot.Marker)}, nil
+}
+
+// ReadEventBatch returns only this Coordinator's deployment events. SQLite
+// performs cursor validation and the event query in one read transaction.
+func (c *Coordinator) ReadEventBatch(afterID int64, logEpoch string, limit int) (EventBatchRead, error) {
+	batch, err := c.store.ReadEventBatch(c.deploy.ID, afterID, logEpoch, limit)
+	return EventBatchRead{
+		Events: batch.Events, RetentionFloor: batch.RetentionFloor,
+		Head: batch.Head, LogEpoch: batch.LogEpoch,
+	}, err
 }

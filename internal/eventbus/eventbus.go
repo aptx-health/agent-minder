@@ -148,6 +148,32 @@ func (b *Bus[T]) Subscribe(afterCursor uint64) (*Subscription[T], error) {
 		return nil, fmt.Errorf("%w: requested %d, current %d", ErrCursorAhead, afterCursor, current)
 	}
 
+	subscriber := b.subscribeLocked(afterCursor)
+	if afterCursor < current {
+		subscriber.notify()
+	}
+	return subscriber, nil
+}
+
+// SubscribeFromNow atomically captures the current internal cursor and
+// registers a subscriber for values published after it. Callers must use this
+// instead of Cursor followed by Subscribe: a Publish between those two calls
+// would otherwise be replayed even though the caller asked for live-only
+// delivery. The returned cursor is internal bookkeeping and must never be
+// exposed as a durable or wire cursor.
+func (b *Bus[T]) SubscribeFromNow() (*Subscription[T], uint64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil, 0, ErrClosed
+	}
+	cursor := b.truncatedThrough + uint64(len(b.events))
+	return b.subscribeLocked(cursor), cursor, nil
+}
+
+// subscribeLocked registers a subscription whose cursor has already been
+// validated. Callers must hold b.mu.
+func (b *Bus[T]) subscribeLocked(afterCursor uint64) *Subscription[T] {
 	subscriber := &Subscription[T]{
 		bus:        b,
 		nextCursor: afterCursor + 1,
@@ -158,10 +184,7 @@ func (b *Bus[T]) Subscribe(afterCursor uint64) (*Subscription[T], error) {
 	}
 	b.subscribers[subscriber] = struct{}{}
 	go subscriber.run()
-	if afterCursor < current {
-		subscriber.notify()
-	}
-	return subscriber, nil
+	return subscriber
 }
 
 // Replay returns a point-in-time copy of all retained events strictly after

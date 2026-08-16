@@ -260,6 +260,55 @@ func TestEventsAfterScopedByDeployment(t *testing.T) {
 	}
 }
 
+func TestReadEventBatchAtomicMetadataAndRefusals(t *testing.T) {
+	s := testStore(t)
+	first := appendTestEvent(t, s, "d1", "one")
+	foreign := appendTestEvent(t, s, "d2", "global hole")
+	third := appendTestEvent(t, s, "d1", "three")
+	epoch, err := s.EventLogEpoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	batch, err := s.ReadEventBatch("d1", 0, "", 10)
+	if err != nil {
+		t.Fatalf("ReadEventBatch: %v", err)
+	}
+	if batch.Head != third.ID || batch.LogEpoch != epoch || batch.RetentionFloor != 0 {
+		t.Fatalf("metadata = %#v", batch)
+	}
+	if len(batch.Events) != 2 || batch.Events[0].ID != first.ID || batch.Events[1].ID != third.ID {
+		t.Fatalf("deployment-scoped events = %#v", batch.Events)
+	}
+
+	// A cursor landing on another deployment's id is valid; clients must not
+	// infer loss from holes in the host-global sequence.
+	batch, err = s.ReadEventBatch("d1", foreign.ID, epoch, 10)
+	if err != nil || len(batch.Events) != 1 || batch.Events[0].ID != third.ID {
+		t.Fatalf("read from global hole = (%#v, %v)", batch, err)
+	}
+	if _, err := s.ReadEventBatch("d1", third.ID, "", 10); !errors.Is(err, ErrEventEpochRequired) {
+		t.Fatalf("missing epoch error = %v", err)
+	}
+	if batch, err := s.ReadEventBatch("d1", third.ID, "wrong", 10); !errors.Is(err, ErrEventEpochMismatch) || batch.Head != third.ID {
+		t.Fatalf("wrong epoch = (%#v, %v)", batch, err)
+	}
+	if batch, err := s.ReadEventBatch("d1", third.ID+1, epoch, 10); !errors.Is(err, ErrEventCursorAhead) || batch.Head != third.ID {
+		t.Fatalf("ahead = (%#v, %v)", batch, err)
+	}
+
+	if _, err := s.PruneEvents(2); err != nil {
+		t.Fatal(err)
+	}
+	floor, _ := s.EventsTruncatedThrough()
+	if _, err := s.ReadEventBatch("d1", floor, epoch, 10); err != nil {
+		t.Fatalf("cursor at floor refused: %v", err)
+	}
+	if batch, err := s.ReadEventBatch("d1", floor-1, epoch, 10); !errors.Is(err, ErrEventsTruncated) || batch.RetentionFloor != floor {
+		t.Fatalf("below floor = (%#v, %v)", batch, err)
+	}
+}
+
 func TestEventLogEpochStableAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "epoch.db")

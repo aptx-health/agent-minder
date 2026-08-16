@@ -23,18 +23,23 @@ import (
 
 // Server is the HTTP API server embedded in the deploy daemon.
 type Server struct {
-	store        *db.Store
-	deployID     string
-	apiKey       string
-	startTime    time.Time
-	mux          *http.ServeMux
-	srv          *http.Server
-	buildVersion string
-	v1Logger     *slog.Logger
-	v1Limiter    V1RateLimiter
-	v1ClientKey  func(*http.Request) string
-	v1Encoder    func(io.Writer, any) error
-	v1RequestID  func() string
+	store             *db.Store
+	deployID          string
+	apiKey            string
+	startTime         time.Time
+	mux               *http.ServeMux
+	srv               *http.Server
+	buildVersion      string
+	v1Logger          *slog.Logger
+	v1Limiter         V1RateLimiter
+	v1ClientKey       func(*http.Request) string
+	v1Encoder         func(io.Writer, any) error
+	v1RequestID       func() string
+	v1Streams         *StreamLimiter
+	eventHeartbeat    time.Duration
+	eventWriteTimeout time.Duration
+	eventQueueSize    int
+	eventBatchSize    int
 
 	// Provider is the Coordinator-owned control surface (DM-5), wired by the
 	// entry points. Handlers reach the deployment lifecycle only through it —
@@ -45,17 +50,22 @@ type Server struct {
 
 // ServerConfig holds configuration for the API server.
 type ServerConfig struct {
-	Store              *db.Store
-	DeployID           string
-	APIKey             string
-	BuildVersion       string
-	Logger             *slog.Logger
-	V1Limiter          V1RateLimiter
-	V1ClientKey        func(*http.Request) string
-	V1Encoder          func(io.Writer, any) error
-	V1RequestID        func() string
-	RateLimitPerMinute int
-	RateLimitBurst     int
+	Store                  *db.Store
+	DeployID               string
+	APIKey                 string
+	BuildVersion           string
+	Logger                 *slog.Logger
+	V1Limiter              V1RateLimiter
+	V1ClientKey            func(*http.Request) string
+	V1Encoder              func(io.Writer, any) error
+	V1RequestID            func() string
+	V1StreamLimiter        *StreamLimiter
+	EventHeartbeatInterval time.Duration
+	EventWriteTimeout      time.Duration
+	EventQueueSize         int
+	EventBatchSize         int
+	RateLimitPerMinute     int
+	RateLimitBurst         int
 }
 
 // NewServer creates a new API server.
@@ -68,18 +78,43 @@ func NewServer(cfg ServerConfig) *Server {
 	if limiter == nil {
 		limiter = NewTokenBucketLimiter(cfg.RateLimitPerMinute, cfg.RateLimitBurst)
 	}
+	streamLimiter := cfg.V1StreamLimiter
+	if streamLimiter == nil {
+		streamLimiter = processV1StreamLimiter
+	}
+	heartbeat := cfg.EventHeartbeatInterval
+	if heartbeat <= 0 {
+		heartbeat = defaultEventHeartbeatInterval
+	}
+	writeTimeout := cfg.EventWriteTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = defaultEventWriteTimeout
+	}
+	queueSize := cfg.EventQueueSize
+	if queueSize <= 0 {
+		queueSize = defaultEventQueueSize
+	}
+	batchSize := cfg.EventBatchSize
+	if batchSize <= 0 {
+		batchSize = defaultEventBatchSize
+	}
 	s := &Server{
-		store:        cfg.Store,
-		deployID:     cfg.DeployID,
-		apiKey:       cfg.APIKey,
-		startTime:    time.Now(),
-		mux:          http.NewServeMux(),
-		buildVersion: cfg.BuildVersion,
-		v1Logger:     logger,
-		v1Limiter:    limiter,
-		v1ClientKey:  cfg.V1ClientKey,
-		v1Encoder:    cfg.V1Encoder,
-		v1RequestID:  cfg.V1RequestID,
+		store:             cfg.Store,
+		deployID:          cfg.DeployID,
+		apiKey:            cfg.APIKey,
+		startTime:         time.Now(),
+		mux:               http.NewServeMux(),
+		buildVersion:      cfg.BuildVersion,
+		v1Logger:          logger,
+		v1Limiter:         limiter,
+		v1ClientKey:       cfg.V1ClientKey,
+		v1Encoder:         cfg.V1Encoder,
+		v1RequestID:       cfg.V1RequestID,
+		v1Streams:         streamLimiter,
+		eventHeartbeat:    heartbeat,
+		eventWriteTimeout: writeTimeout,
+		eventQueueSize:    queueSize,
+		eventBatchSize:    batchSize,
 	}
 
 	s.mux.HandleFunc("GET /status", s.handleStatus)
@@ -96,6 +131,7 @@ func NewServer(cfg ServerConfig) *Server {
 	s.mux.HandleFunc("POST /resume", s.handleResume)
 	v1Mux := http.NewServeMux()
 	v1Mux.HandleFunc("GET /api/v1/meta", s.handleV1Meta)
+	v1Mux.HandleFunc("GET /api/v1/events", s.handleV1Events)
 	v1Mux.HandleFunc("GET /api/v1/deployments", s.handleV1Deployments)
 	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}", s.handleV1Deployment)
 	v1Mux.HandleFunc("GET /api/v1/deployments/{deployment_id}/automations", s.handleV1Automations)
@@ -138,7 +174,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "X-API-Key, Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "X-API-Key, Content-Type, Last-Event-ID")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

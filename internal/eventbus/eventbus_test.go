@@ -129,6 +129,33 @@ func TestSubscribeDuringPublishHasNoCatchUpLiveGap(t *testing.T) {
 	assertSequence(t, events, beforeSubscribe+1, totalEvents)
 }
 
+func TestSubscribeFromNowAtomicallyExcludesHistory(t *testing.T) {
+	bus := New[int](2)
+	t.Cleanup(bus.Close)
+	if _, err := bus.Publish(1); err != nil {
+		t.Fatal(err)
+	}
+	subscription, captured, err := bus.SubscribeFromNow()
+	if err != nil {
+		t.Fatalf("SubscribeFromNow: %v", err)
+	}
+	defer subscription.Close()
+	if captured != 1 {
+		t.Fatalf("captured cursor = %d, want 1", captured)
+	}
+	if _, err := bus.Publish(2); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-subscription.Events():
+		if event.Cursor != 2 || event.Value != 2 {
+			t.Fatalf("event = %#v, want only live value 2", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for live event")
+	}
+}
+
 func TestSlowSubscriberDoesNotBlockOrLoseEventsForOthers(t *testing.T) {
 	const eventCount = 500
 	bus := New[int](1)

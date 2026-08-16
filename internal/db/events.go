@@ -17,10 +17,23 @@ import (
 // starvation case appears.
 const DefaultEventRetention = 10000
 
-// ErrEventsTruncated is the typed refusal for a replay cursor at or below the
+// ErrEventsTruncated is the typed refusal for a replay cursor below the
 // durable retention floor (R-7). The documented client response is
 // snapshot-then-resubscribe from the snapshot's watermark.
 var ErrEventsTruncated = errors.New("events truncated below requested cursor; resync from a snapshot")
+
+var (
+	// ErrEventCursorAhead refuses a cursor from beyond the current durable
+	// head. Global event ids can legitimately have deployment-local holes, so
+	// only the host-global head is authoritative for this check.
+	ErrEventCursorAhead = errors.New("event cursor is ahead of the durable log")
+	// ErrEventEpochMismatch refuses a cursor belonging to another durable log
+	// history (for example after WAL recovery rotated the epoch).
+	ErrEventEpochMismatch = errors.New("event log epoch does not match")
+	// ErrEventEpochRequired refuses nonzero cursors that cannot be associated
+	// with a durable log history.
+	ErrEventEpochRequired = errors.New("event log epoch is required for a nonzero cursor")
+)
 
 // Event is one durable event row (Expedition IV §5). Its id is the only cursor
 // that ever crosses a process or API boundary (ID-1, R-3).
@@ -41,6 +54,16 @@ type Event struct {
 type SnapshotMarker struct {
 	Watermark int64
 	LogEpoch  string
+}
+
+// EventBatch is an atomic view of one deployment's durable tail and the
+// metadata needed to decide whether its cursor can be replayed. Events,
+// retention floor, host-global head, and epoch are read in one transaction.
+type EventBatch struct {
+	Events         []*Event
+	RetentionFloor int64
+	Head           int64
+	LogEpoch       string
 }
 
 // ControlSnapshot is the deployment-scoped durable state needed by the v1
@@ -212,6 +235,46 @@ func (s *Store) EventsAfter(deploymentID string, afterID int64, limit int) ([]*E
 		return nil, err
 	}
 	return events, nil
+}
+
+// ReadEventBatch atomically validates and reads a deployment-scoped durable
+// tail. A cursor equal to RetentionFloor is valid; only smaller cursors have
+// lost history. The returned batch remains populated with floor/head/epoch on
+// typed cursor refusals so transports can issue a complete resync signal.
+func (s *Store) ReadEventBatch(deploymentID string, afterID int64, logEpoch string, limit int) (EventBatch, error) {
+	batch := EventBatch{Events: make([]*Event, 0)}
+	err := s.WithTx(func(tx *sqlx.Tx) error {
+		if err := tx.Get(&batch.RetentionFloor, "SELECT truncated_through FROM event_log_meta WHERE id = 1"); err != nil {
+			return err
+		}
+		if err := tx.Get(&batch.LogEpoch, "SELECT epoch FROM event_log_meta WHERE id = 1"); err != nil {
+			return err
+		}
+		var err error
+		batch.Head, err = eventWatermark(tx)
+		if err != nil {
+			return err
+		}
+		switch {
+		case afterID > 0 && logEpoch == "":
+			return fmt.Errorf("%w (cursor %d)", ErrEventEpochRequired, afterID)
+		case logEpoch != "" && logEpoch != batch.LogEpoch:
+			return fmt.Errorf("%w (got %q, current %q)", ErrEventEpochMismatch, logEpoch, batch.LogEpoch)
+		case afterID < batch.RetentionFloor:
+			return fmt.Errorf("%w (cursor %d, floor %d)", ErrEventsTruncated, afterID, batch.RetentionFloor)
+		case afterID > batch.Head:
+			return fmt.Errorf("%w (cursor %d, head %d)", ErrEventCursorAhead, afterID, batch.Head)
+		}
+
+		query := "SELECT * FROM events WHERE deployment_id = ? AND id > ? ORDER BY id"
+		args := []interface{}{deploymentID, afterID}
+		if limit > 0 {
+			query += " LIMIT ?"
+			args = append(args, limit)
+		}
+		return tx.Select(&batch.Events, query, args...)
+	})
+	return batch, err
 }
 
 // SnapshotJobs returns a deployment's jobs plus the event watermark, read in a
