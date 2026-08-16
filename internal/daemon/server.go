@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -29,6 +30,8 @@ type Server struct {
 	startTime         time.Time
 	mux               *http.ServeMux
 	srv               *http.Server
+	unixSrv           *http.Server
+	unixSocketPath    string
 	buildVersion      string
 	v1Logger          *slog.Logger
 	v1Limiter         V1RateLimiter
@@ -147,11 +150,19 @@ func NewServer(cfg ServerConfig) *Server {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+	// Unix socket server shares the same routes but skips the API-key check:
+	// filesystem permissions on the socket file (0600) are the auth boundary.
+	s.unixSrv = &http.Server{
+		Handler:      s.unixMiddleware(s.mux),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 
 	return s
 }
 
-// ListenAndServe starts the server.
+// ListenAndServe starts the TCP server. Requires an API key (opt-in surface).
 func (s *Server) ListenAndServe(addr string) error {
 	if s.apiKey == "" {
 		return fmt.Errorf("api key required")
@@ -165,9 +176,71 @@ func (s *Server) ListenAndServe(addr string) error {
 	return s.srv.Serve(ln)
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the TCP server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
+}
+
+// ListenAndServeUnix starts the API server on the deploy-ID-keyed Unix
+// domain socket under ~/.agent-minder/deploys, default-on for every worker.
+// The socket file is created 0600; if a stale socket is left behind by a
+// crashed process (heartbeat/PID show it is dead), it is removed and
+// recreated — the same discipline as stale PID-file handling. Blocks until
+// the server is shut down or fails; call in a goroutine.
+func (s *Server) ListenAndServeUnix(deployID string) error {
+	path := SocketPath(deployID)
+	ln, err := bindUnixSocket(deployID, path)
+	if err != nil {
+		return err
+	}
+	s.unixSocketPath = path
+
+	log.Printf("API server listening on unix socket %s", path)
+	err = s.unixSrv.Serve(ln)
+	_ = os.Remove(path)
+	if err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// ShutdownUnix gracefully stops the Unix socket server and removes the
+// socket file.
+func (s *Server) ShutdownUnix(ctx context.Context) error {
+	err := s.unixSrv.Shutdown(ctx)
+	if s.unixSocketPath != "" {
+		_ = os.Remove(s.unixSocketPath)
+	}
+	return err
+}
+
+// bindUnixSocket binds a Unix domain socket at path, recovering from a
+// stale socket left by a crashed process for the given deployment. If the
+// owning process is still alive (per PID/heartbeat), binding is refused
+// rather than clobbering a live server.
+func bindUnixSocket(deployID, path string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt.Errorf("mkdir socket dir: %w", err)
+	}
+
+	if _, err := os.Stat(path); err == nil {
+		if alive, _ := IsRunning(deployID); alive {
+			return nil, fmt.Errorf("socket %s already in use by a running daemon", path)
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("remove stale socket: %w", err)
+		}
+	}
+
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("listen unix %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("chmod socket: %w", err)
+	}
+	return ln, nil
 }
 
 func (s *Server) middleware(next http.Handler) http.Handler {
@@ -188,6 +261,13 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// unixMiddleware wraps the Unix-socket handler chain. No API key check: the
+// socket file's 0600 permissions are the auth boundary (design per #650).
+// CORS headers are omitted — a browser cannot dial a Unix socket.
+func (s *Server) unixMiddleware(next http.Handler) http.Handler {
+	return next
 }
 
 // constantTimeEqual reports whether the two strings are equal using a

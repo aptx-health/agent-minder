@@ -391,16 +391,25 @@ func runForeground(deployID string) error {
 		coord.Stop()
 	}()
 
-	// Start HTTP API if requested.
-	if flagServe != "" {
-		srv := daemon.NewServer(daemon.ServerConfig{
-			Store:        store,
-			DeployID:     deployID,
-			APIKey:       flagAPIKey,
-			BuildVersion: Version,
-		})
-		srv.Provider = coord
+	// Unix socket API: default-on for every worker, no --serve or API key
+	// required. Local tooling (TUI, `minder status`) reaches it via
+	// daemon.NewUnixClient. TCP remains opt-in via --serve, below.
+	srv := daemon.NewServer(daemon.ServerConfig{
+		Store:        store,
+		DeployID:     deployID,
+		APIKey:       flagAPIKey,
+		BuildVersion: Version,
+	})
+	srv.Provider = coord
+	go func() { _ = srv.ListenAndServeUnix(deployID) }()
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.ShutdownUnix(shutdownCtx)
+	}()
 
+	// Start TCP HTTP API if requested (opt-in, requires --api-key).
+	if flagServe != "" {
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 		fmt.Printf("  API: http://localhost%s\n", flagServe)
 	}
@@ -504,16 +513,24 @@ func runDaemon(deployID string) error {
 		coord.Stop()
 	}()
 
-	// Start HTTP API if configured.
-	if flagServe != "" {
-		srv := daemon.NewServer(daemon.ServerConfig{
-			Store:        store,
-			DeployID:     deployID,
-			APIKey:       flagAPIKey,
-			BuildVersion: Version,
-		})
-		srv.Provider = coord
+	// Unix socket API: default-on for every worker, no --serve or API key
+	// required.
+	srv := daemon.NewServer(daemon.ServerConfig{
+		Store:        store,
+		DeployID:     deployID,
+		APIKey:       flagAPIKey,
+		BuildVersion: Version,
+	})
+	srv.Provider = coord
+	go func() { _ = srv.ListenAndServeUnix(deployID) }()
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.ShutdownUnix(shutdownCtx)
+	}()
 
+	// Start TCP HTTP API if configured (opt-in, requires --api-key).
+	if flagServe != "" {
 		go func() { _ = srv.ListenAndServe(flagServe) }()
 	}
 
