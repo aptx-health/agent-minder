@@ -1,0 +1,13 @@
+{
+  "data": {
+    "api_version": "v1",
+    "build_version": "1.2.3",
+    "mode": "worker",
+    "capabilities": ["meta", "pagination", "snapshot"]
+  },
+  "snapshot": {
+    "watermark": 42,
+    "log_epoch": "epoch-1",
+    "incarnation": "incarnation-1"
+  }
+}

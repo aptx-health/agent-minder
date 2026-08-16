@@ -394,9 +394,10 @@ func runForeground(deployID string) error {
 	// Start HTTP API if requested.
 	if flagServe != "" {
 		srv := daemon.NewServer(daemon.ServerConfig{
-			Store:    store,
-			DeployID: deployID,
-			APIKey:   flagAPIKey,
+			Store:        store,
+			DeployID:     deployID,
+			APIKey:       flagAPIKey,
+			BuildVersion: Version,
 		})
 		srv.Provider = coord
 
@@ -506,9 +507,10 @@ func runDaemon(deployID string) error {
 	// Start HTTP API if configured.
 	if flagServe != "" {
 		srv := daemon.NewServer(daemon.ServerConfig{
-			Store:    store,
-			DeployID: deployID,
-			APIKey:   flagAPIKey,
+			Store:        store,
+			DeployID:     deployID,
+			APIKey:       flagAPIKey,
+			BuildVersion: Version,
 		})
 		srv.Provider = coord
 

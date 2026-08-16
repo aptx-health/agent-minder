@@ -1,0 +1,110 @@
+{
+  "single_resource": {
+    "data": {
+      "id": "deploy-1",
+      "owner": "acme",
+      "repository": "widgets",
+      "mode": "issues",
+      "activation_policy": "explicit",
+      "started_at": "2026-08-15T18:34:56.123456789Z",
+      "config_revision": {
+        "revision": null,
+        "loaded_at": null,
+        "available": false,
+        "valid": true,
+        "error": null
+      }
+    },
+    "snapshot": {"watermark": 42, "log_epoch": "epoch-1", "incarnation": "incarnation-1"}
+  },
+  "collection": {
+    "data": [],
+    "snapshot": {"watermark": 42, "log_epoch": "epoch-1", "incarnation": "incarnation-1"},
+    "page": {"next_cursor": null, "has_more": false}
+  },
+  "error": {"error": {"code": "not_found", "message": "resource was not found"}},
+  "automation": {
+    "id": "cron:daily",
+    "deployment_id": "deploy-1",
+    "kind": "cron",
+    "name": "daily",
+    "expression": "0 9 * * *",
+    "labels": [],
+    "effective": {"agent": "autopilot", "runtime": "codex", "model": "gpt-5.6", "max_turns": 50, "max_budget_usd": 5},
+    "enabled": true,
+    "error": null,
+    "revision": null,
+    "last_activation_at": null,
+    "last_activation_job_id": null,
+    "next_run_at": null
+  },
+  "job": {
+    "id": 7,
+    "deployment_id": "deploy-1",
+    "name": "issue-647",
+    "issue_number": null,
+    "issue_title": null,
+    "owner": "acme",
+    "repository": "widgets",
+    "provenance": {"type": null, "name": null, "reference": null},
+    "lifecycle": {"status": "queued", "current_stage": null},
+    "effective": {"agent": "autopilot", "runtime": "codex", "model": null, "max_turns": 50, "max_budget_usd": 5},
+    "cost_usd": 0,
+    "branch": null,
+    "pull_request": null,
+    "failure": {"reason": null, "detail": null},
+    "review": {"risk": null, "comment_id": null},
+    "timestamps": {"queued_at": "2026-08-15T18:34:56.123456789Z", "started_at": null, "completed_at": null}
+  },
+  "agent_run": {
+    "id": 9,
+    "deployment_id": "deploy-1",
+    "job_id": 7,
+    "stage": "implement",
+    "attempt": 1,
+    "agent": "autopilot",
+    "runtime": null,
+    "model": null,
+    "session_id": null,
+    "activity": {"step_count": 3, "current_tool": null, "tool_input": null, "last_activity_at": "2026-08-15T18:34:56.123456789Z"},
+    "final_usage": {"turns": 0, "cost_usd": 0, "final_text": null},
+    "limits": {"max_turns": null, "max_budget_usd": null},
+    "outcome": {"status": "running", "stop_reason": null, "failure_detail": null},
+    "timestamps": {"started_at": "2026-08-15T18:34:56.123456789Z", "completed_at": null}
+  },
+  "deliverable": {
+    "id": 11,
+    "deployment_id": "deploy-1",
+    "job_id": 7,
+    "run_id": null,
+    "kind": "report",
+    "label": null,
+    "status": null,
+    "external_reference": null,
+    "url": null,
+    "path": null,
+    "path_available": false,
+    "metadata": {"format": "markdown"},
+    "created_at": "2026-08-15T18:34:56.123456789Z"
+  },
+  "log": {
+    "id": "job-7-run-9",
+    "deployment_id": "deploy-1",
+    "job_id": 7,
+    "run_id": 9,
+    "stage": "implement",
+    "attempt": 1,
+    "available": true
+  },
+  "event": {
+    "id": 42,
+    "timestamp": "2026-08-15T18:34:56.123456789Z",
+    "deployment_id": "deploy-1",
+    "job_id": 7,
+    "run_id": null,
+    "type": "started",
+    "severity": "info",
+    "summary": "agent started",
+    "data": {"agent": "autopilot"}
+  }
+}

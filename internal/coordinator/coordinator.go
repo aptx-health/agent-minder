@@ -17,6 +17,7 @@ import (
 	"github.com/aptx-health/agent-minder/internal/runtime"
 	"github.com/aptx-health/agent-minder/internal/scheduler"
 	"github.com/aptx-health/agent-minder/internal/supervisor"
+	"github.com/google/uuid"
 )
 
 // AutomationKind classifies an active subscription in a startup snapshot.
@@ -37,9 +38,20 @@ type Automation struct {
 	Expression string
 	Labels     []string
 	Agent      string
-	Runtime    string
-	NextRunAt  time.Time
-	HasNextRun bool
+	// Runtime, Model, MaxTurns, and MaxBudget are the configured automation
+	// overrides. Keep Runtime's legacy meaning so foreground output does not
+	// start printing deployment defaults as explicit overrides.
+	Runtime   string
+	Model     string
+	MaxTurns  int
+	MaxBudget float64
+	// Effective values include deployment fallbacks and are used by v1 DTOs.
+	EffectiveRuntime   string
+	EffectiveModel     string
+	EffectiveMaxTurns  int
+	EffectiveMaxBudget float64
+	NextRunAt          time.Time
+	HasNextRun         bool
 
 	// Enabled reflects the automation's current activation state. Cron
 	// automations are only ever loaded when enabled (GetEnabledSchedules
@@ -84,6 +96,9 @@ type Options struct {
 type Coordinator struct {
 	store  *db.Store
 	deploy *db.Deployment
+	// incarnation identifies live, process-lifetime state. It is stable for
+	// this Coordinator and intentionally changes after reconstruction.
+	incarnation string
 
 	sup    *supervisor.Supervisor
 	sched  *scheduler.Scheduler // nil when no jobs.yaml is present
@@ -101,8 +116,9 @@ type Coordinator struct {
 // controls stdout. A returned error is fatal to the deployment.
 func New(opts Options) (*Coordinator, error) {
 	c := &Coordinator{
-		store:  opts.Store,
-		deploy: opts.Deploy,
+		store:       opts.Store,
+		deploy:      opts.Deploy,
+		incarnation: uuid.NewString(),
 	}
 
 	c.sup = supervisor.New(opts.Store, opts.Deploy, opts.Deploy.RepoDir, opts.Deploy.Owner, opts.Deploy.Repo, opts.GHToken)
@@ -173,6 +189,9 @@ func LoadConfigRevision(repoDir string) (ConfigRevision, *scheduler.Config, erro
 // ConfigRevision returns the identity of the jobs.yaml this Coordinator
 // loaded: path, content hash, load time, and any validation error.
 func (c *Coordinator) ConfigRevision() ConfigRevision { return c.configRev }
+
+// WorkerIncarnation identifies live state owned by this Coordinator instance.
+func (c *Coordinator) WorkerIncarnation() string { return c.incarnation }
 
 // Scheduler returns the loaded scheduler, or nil when no jobs.yaml is present.
 func (c *Coordinator) Scheduler() *scheduler.Scheduler { return c.sched }
@@ -264,21 +283,31 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 	automations := make([]Automation, 0, len(routes)+1)
 	if deploy.WatchFilter.Valid && deploy.WatchFilter.String != "" {
 		automations = append(automations, Automation{
-			Kind:       AutomationWatch,
-			Expression: deploy.WatchFilter.String,
-			Agent:      "autopilot",
-			Enabled:    true,
+			Kind:               AutomationWatch,
+			Expression:         deploy.WatchFilter.String,
+			Agent:              "autopilot",
+			EffectiveRuntime:   deploy.Runtime,
+			EffectiveMaxTurns:  deploy.MaxTurns,
+			EffectiveMaxBudget: deploy.MaxBudgetUSD,
+			Enabled:            true,
 		})
 	}
 	for _, route := range routes {
 		a := Automation{
-			Kind:       AutomationTrigger,
-			Name:       route.Name,
-			Expression: route.FilterString(),
-			Labels:     append([]string(nil), route.Labels...),
-			Agent:      route.Agent,
-			Runtime:    route.Runtime,
-			Enabled:    true,
+			Kind:               AutomationTrigger,
+			Name:               route.Name,
+			Expression:         route.FilterString(),
+			Labels:             append([]string(nil), route.Labels...),
+			Agent:              route.Agent,
+			Runtime:            route.Runtime,
+			Model:              route.Model,
+			MaxTurns:           route.MaxTurns,
+			MaxBudget:          route.Budget,
+			EffectiveRuntime:   effectiveString(route.Runtime, deploy.Runtime),
+			EffectiveModel:     route.Model,
+			EffectiveMaxTurns:  effectiveInt(route.MaxTurns, deploy.MaxTurns),
+			EffectiveMaxBudget: effectiveFloat(route.Budget, deploy.MaxBudgetUSD),
+			Enabled:            true,
 		}
 		applyLastActivation(&a, store, deployID, "trigger", route.Name)
 		automations = append(automations, a)
@@ -290,19 +319,112 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 			continue
 		}
 		a := Automation{
-			Kind:       AutomationCron,
-			Name:       schedule.Name,
-			Expression: schedule.CronExpr.String,
-			Agent:      schedule.Agent,
-			Runtime:    schedule.Runtime.String,
-			NextRunAt:  schedule.NextRunAt.Time,
-			HasNextRun: schedule.NextRunAt.Valid,
-			Enabled:    true,
+			Kind:               AutomationCron,
+			Name:               schedule.Name,
+			Expression:         schedule.CronExpr.String,
+			Agent:              schedule.Agent,
+			Runtime:            schedule.Runtime.String,
+			Model:              schedule.Model.String,
+			MaxTurns:           int(schedule.MaxTurns.Int64),
+			MaxBudget:          schedule.Budget.Float64,
+			EffectiveRuntime:   effectiveString(schedule.Runtime.String, deploy.Runtime),
+			EffectiveModel:     schedule.Model.String,
+			EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
+			EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
+			NextRunAt:          schedule.NextRunAt.Time,
+			HasNextRun:         schedule.NextRunAt.Valid,
+			Enabled:            true,
 		}
 		applyLastActivation(&a, store, deployID, "cron", schedule.Name)
 		automations = append(automations, a)
 	}
 	return automations
+}
+
+// computeAutomationsFromSnapshot is the transaction-safe counterpart to
+// ComputeAutomations. It performs no database reads: schedules, provenance
+// jobs, and the deployment were all obtained by Store.SnapshotControl.
+func computeAutomationsFromSnapshot(deploy *db.Deployment, routes []supervisor.TriggerRoute, schedules []*db.JobSchedule, jobs []*db.Job) []Automation {
+	automations := make([]Automation, 0, len(routes)+len(schedules)+1)
+	if deploy.WatchFilter.Valid && deploy.WatchFilter.String != "" {
+		automations = append(automations, Automation{
+			Kind: AutomationWatch, Expression: deploy.WatchFilter.String,
+			Agent: "autopilot", EffectiveRuntime: deploy.Runtime, EffectiveMaxTurns: deploy.MaxTurns,
+			EffectiveMaxBudget: deploy.MaxBudgetUSD, Enabled: true,
+		})
+	}
+	for _, route := range routes {
+		a := Automation{
+			Kind: AutomationTrigger, Name: route.Name, Expression: route.FilterString(),
+			Labels: append([]string(nil), route.Labels...), Agent: route.Agent,
+			Runtime: route.Runtime, Model: route.Model, MaxTurns: route.MaxTurns, MaxBudget: route.Budget,
+			EffectiveRuntime: effectiveString(route.Runtime, deploy.Runtime), EffectiveModel: route.Model,
+			EffectiveMaxTurns:  effectiveInt(route.MaxTurns, deploy.MaxTurns),
+			EffectiveMaxBudget: effectiveFloat(route.Budget, deploy.MaxBudgetUSD), Enabled: true,
+		}
+		applyLastActivationFromJobs(&a, jobs, "trigger", route.Name)
+		automations = append(automations, a)
+	}
+	for _, schedule := range schedules {
+		if !schedule.Enabled || !schedule.CronExpr.Valid {
+			continue
+		}
+		a := Automation{
+			Kind: AutomationCron, Name: schedule.Name, Expression: schedule.CronExpr.String,
+			Agent: schedule.Agent, Runtime: schedule.Runtime.String, Model: schedule.Model.String,
+			MaxTurns: int(schedule.MaxTurns.Int64), MaxBudget: schedule.Budget.Float64,
+			EffectiveRuntime: effectiveString(schedule.Runtime.String, deploy.Runtime), EffectiveModel: schedule.Model.String,
+			EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
+			EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
+			NextRunAt:          schedule.NextRunAt.Time, HasNextRun: schedule.NextRunAt.Valid, Enabled: true,
+		}
+		applyLastActivationFromJobs(&a, jobs, "cron", schedule.Name)
+		automations = append(automations, a)
+	}
+	return automations
+}
+
+func effectiveString(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func effectiveInt(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func effectiveFloat(value, fallback float64) float64 {
+	if value > 0 {
+		return value
+	}
+	return fallback
+}
+
+func applyLastActivationFromJobs(a *Automation, jobs []*db.Job, sourceType, sourceName string) {
+	var latest *db.Job
+	for _, job := range jobs {
+		if !job.SourceType.Valid || job.SourceType.String != sourceType ||
+			!job.SourceName.Valid || job.SourceName.String != sourceName {
+			continue
+		}
+		if latest == nil || job.QueuedAt.Time.After(latest.QueuedAt.Time) ||
+			(job.QueuedAt.Time.Equal(latest.QueuedAt.Time) && job.ID > latest.ID) {
+			latest = job
+		}
+	}
+	if latest == nil {
+		return
+	}
+	a.LastActivationJobID = latest.ID
+	a.HasLastActivation = true
+	if latest.QueuedAt.Valid {
+		a.LastActivationAt = latest.QueuedAt.Time
+	}
 }
 
 // applyLastActivation looks up the most recent job created by this automation
