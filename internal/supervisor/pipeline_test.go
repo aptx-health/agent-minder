@@ -1662,6 +1662,126 @@ func TestPipeline_ReconcilesRuntimeReportedModelMismatch(t *testing.T) {
 	}
 }
 
+func TestScriptJobCompletesWithCapturedOutputAndRunRecord(t *testing.T) {
+	h := newHarness(t)
+	if err := os.WriteFile(filepath.Join(h.deploy.RepoDir, "input.txt"), []byte("from repo"), 0o600); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Kind = db.JobKindScript
+		j.Agent = db.JobKindScript
+		j.Name = "lint-20260809-1200"
+		j.IssueNumber = 0
+		j.ScriptCommand = sql.NullString{String: "cat input.txt && printf '\\n%s\\n' \"$FOO\"", Valid: true}
+		j.ScriptEnv = sql.NullString{String: `{"FOO":"bar"}`, Valid: true}
+	})
+	sc := h.newSlotContext(job)
+
+	if err := runScriptJob(context.Background(), sc); err != nil {
+		t.Fatalf("runScriptJob: %v", err)
+	}
+
+	got, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != db.StatusDone {
+		t.Fatalf("status = %q, want done", got.Status)
+	}
+	if got.CostUSD != 0 {
+		t.Fatalf("cost_usd = %v, want zero", got.CostUSD)
+	}
+	if !got.AgentLog.Valid || got.AgentLog.String == "" {
+		t.Fatalf("agent_log = %v, want captured log path", got.AgentLog)
+	}
+	logData, err := os.ReadFile(got.AgentLog.String)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "from repo") || !strings.Contains(string(logData), "bar") {
+		t.Fatalf("log missing stdout/env output:\n%s", string(logData))
+	}
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1", len(runs))
+	}
+	if runs[0].Status != db.RunStatusSuccess || runs[0].Agent != db.JobKindScript {
+		t.Fatalf("run = %+v, want successful script run", runs[0])
+	}
+	if runs[0].CostUSD != 0 {
+		t.Fatalf("run cost = %v, want zero", runs[0].CostUSD)
+	}
+}
+
+func TestScriptJobFailureRecordsExitCode(t *testing.T) {
+	h := newHarness(t)
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Kind = db.JobKindScript
+		j.Agent = db.JobKindScript
+		j.Name = "fail-20260809-1200"
+		j.IssueNumber = 0
+		j.ScriptCommand = sql.NullString{String: "printf boom >&2; exit 7", Valid: true}
+	})
+	sc := h.newSlotContext(job)
+
+	if err := runScriptJob(context.Background(), sc); err == nil {
+		t.Fatal("expected script failure")
+	}
+
+	got, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != db.StatusFailed {
+		t.Fatalf("status = %q, want failed", got.Status)
+	}
+	if !got.FailureDetail.Valid || !strings.Contains(got.FailureDetail.String, "code 7") {
+		t.Fatalf("failure_detail = %v, want exit code", got.FailureDetail)
+	}
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != db.RunStatusFailed || !strings.Contains(runs[0].FailureDetail.String, "code 7") {
+		t.Fatalf("runs = %+v, want failed run with exit code", runs)
+	}
+}
+
+func TestScriptJobTimeoutKillsAndRecordsFailure(t *testing.T) {
+	h := newHarness(t)
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Kind = db.JobKindScript
+		j.Agent = db.JobKindScript
+		j.Name = "timeout-20260809-1200"
+		j.IssueNumber = 0
+		j.ScriptCommand = sql.NullString{String: "while true; do :; done", Valid: true}
+		j.ScriptTimeout = sql.NullString{String: "20ms", Valid: true}
+	})
+	sc := h.newSlotContext(job)
+
+	if err := runScriptJob(context.Background(), sc); err == nil {
+		t.Fatal("expected timeout")
+	}
+
+	got, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != db.StatusFailed {
+		t.Fatalf("status = %q, want failed", got.Status)
+	}
+	if !got.FailureReason.Valid || got.FailureReason.String != "timeout" {
+		t.Fatalf("failure_reason = %v, want timeout", got.FailureReason)
+	}
+	if !got.FailureDetail.Valid || !strings.Contains(got.FailureDetail.String, "timed out") {
+		t.Fatalf("failure_detail = %v, want timeout detail", got.FailureDetail)
+	}
+}
+
 // --- Utilities ---
 
 func truncate(s string, n int) string {

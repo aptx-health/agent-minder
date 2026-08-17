@@ -1128,6 +1128,16 @@ func formatJobStartedSummary(rt runtimepkg.AgentRuntime, deploy *db.Deployment, 
 	if title == "" {
 		title = job.Name
 	}
+	if job.EffectiveKind() == db.JobKindScript {
+		command := ""
+		if job.ScriptCommand.Valid {
+			command = truncateFailureDetail(job.ScriptCommand.String, 80)
+		}
+		if command == "" {
+			return fmt.Sprintf("Script started on %s: %s", jobLabel(job), title)
+		}
+		return fmt.Sprintf("Script started on %s (command: %s): %s", jobLabel(job), command, title)
+	}
 	runtimeName := job.EffectiveRuntime(deploy)
 	if rt != nil {
 		runtimeName = rt.Name()

@@ -37,12 +37,20 @@ type JobDef struct {
 	At       string `yaml:"at"`       // one-shot: RFC3339 timestamp, e.g. "2026-08-09T15:00:00Z"
 	In       string `yaml:"in"`       // one-shot: duration from load time, e.g. "30s", "5m", "2h", "1d"
 
+	Kind string `yaml:"kind"` // "agent" (default) or "script"
+
 	Agent       string  `yaml:"agent"`       // agent def name (required)
 	Runtime     string  `yaml:"runtime"`     // optional doer runtime override
 	Model       string  `yaml:"model"`       // optional runtime-native model override
 	Description string  `yaml:"description"` // human-readable description
 	Budget      float64 `yaml:"budget"`      // per-run budget override (0 = use deployment default)
 	MaxTurns    int     `yaml:"max_turns"`   // per-run turn limit override (0 = use default)
+
+	Command    string            `yaml:"command"`     // shell command for kind: script
+	Timeout    string            `yaml:"timeout"`     // optional Go duration string
+	Env        map[string]string `yaml:"env"`         // optional script environment additions
+	WorkDir    string            `yaml:"workdir"`     // optional script working directory
+	WorkingDir string            `yaml:"working_dir"` // optional script working directory alias
 
 	// resolvedAt holds the absolute fire time for a one-shot (At or In) job,
 	// set once during validation. In particular, an `in:` duration is resolved
@@ -52,6 +60,11 @@ type JobDef struct {
 	// its persisted job_schedules row shows a prior run.
 	resolvedAt time.Time
 }
+
+const (
+	JobKindAgent  = "agent"
+	JobKindScript = "script"
+)
 
 // IsScheduled returns true if this job is cron-scheduled.
 func (j *JobDef) IsScheduled() bool {
@@ -110,6 +123,22 @@ func (j *JobDef) ParsedSchedule() (*CronExpr, error) {
 	return ParseCron(j.Schedule)
 }
 
+// EffectiveKind returns the normalized execution kind.
+func (j *JobDef) EffectiveKind() string {
+	if j.Kind == "" {
+		return JobKindAgent
+	}
+	return j.Kind
+}
+
+// ScriptWorkDir returns the configured script working directory, if any.
+func (j *JobDef) ScriptWorkDir() string {
+	if j.WorkDir != "" {
+		return j.WorkDir
+	}
+	return j.WorkingDir
+}
+
 // ConfigPath returns the path to jobs.yaml for a given repo dir.
 func ConfigPath(repoDir string) string {
 	return filepath.Join(repoDir, ".agent-minder", "jobs.yaml")
@@ -153,6 +182,26 @@ func ParseConfig(data []byte) (*Config, error) {
 }
 
 func validateJobDef(name string, job *JobDef) error {
+	job.Kind = strings.ToLower(strings.TrimSpace(job.Kind))
+	if job.Kind == "" {
+		job.Kind = JobKindAgent
+	}
+	if job.Kind != JobKindAgent && job.Kind != JobKindScript {
+		return fmt.Errorf("job %q: unsupported kind %q (expected agent or script)", name, job.Kind)
+	}
+
+	if err := validateScheduleOrTrigger(name, job); err != nil {
+		return err
+	}
+
+	if job.Kind == JobKindScript {
+		return validateScriptJobDef(name, job)
+	}
+
+	return validateAgentJobDef(name, job)
+}
+
+func validateAgentJobDef(name string, job *JobDef) error {
 	if job.Agent == "" {
 		return fmt.Errorf("job %q: agent is required", name)
 	}
@@ -166,6 +215,53 @@ func validateJobDef(name string, job *JobDef) error {
 		return fmt.Errorf("job %q: %w", name, err)
 	}
 
+	if job.Budget < 0 {
+		return fmt.Errorf("job %q: budget cannot be negative", name)
+	}
+
+	if job.MaxTurns < 0 {
+		return fmt.Errorf("job %q: max_turns cannot be negative", name)
+	}
+
+	return nil
+}
+
+func validateScriptJobDef(name string, job *JobDef) error {
+	var mixed []string
+	if job.Agent != "" {
+		mixed = append(mixed, "agent")
+	}
+	if job.Runtime != "" {
+		mixed = append(mixed, "runtime")
+	}
+	if job.Model != "" {
+		mixed = append(mixed, "model")
+	}
+	if job.Budget != 0 {
+		mixed = append(mixed, "budget")
+	}
+	if job.MaxTurns != 0 {
+		mixed = append(mixed, "max_turns")
+	}
+	if len(mixed) > 0 {
+		return fmt.Errorf("job %q: kind script cannot be combined with agent execution fields: %s", name, strings.Join(mixed, ", "))
+	}
+	if strings.TrimSpace(job.Command) == "" {
+		return fmt.Errorf("job %q: command is required for kind script", name)
+	}
+	job.Command = strings.TrimSpace(job.Command)
+	if job.Timeout != "" {
+		if _, err := time.ParseDuration(job.Timeout); err != nil {
+			return fmt.Errorf("job %q: invalid timeout %q: %w", name, job.Timeout, err)
+		}
+	}
+	if job.WorkDir != "" && job.WorkingDir != "" && job.WorkDir != job.WorkingDir {
+		return fmt.Errorf("job %q: workdir and working_dir cannot disagree", name)
+	}
+	return nil
+}
+
+func validateScheduleOrTrigger(name string, job *JobDef) error {
 	kindsSet := 0
 	if job.Schedule != "" {
 		kindsSet++
@@ -223,14 +319,6 @@ func validateJobDef(name string, job *JobDef) error {
 			return fmt.Errorf("job %q: in %q must be a positive duration", name, job.In)
 		}
 		job.resolvedAt = time.Now().UTC().Add(d)
-	}
-
-	if job.Budget < 0 {
-		return fmt.Errorf("job %q: budget cannot be negative", name)
-	}
-
-	if job.MaxTurns < 0 {
-		return fmt.Errorf("job %q: max_turns cannot be negative", name)
 	}
 
 	return nil

@@ -85,14 +85,17 @@ func (s *Store) UpdateDeploymentCarriedCost(id string, cost float64) error {
 
 // jobInsertColumns lists the columns shared by CreateJob and BulkCreateJobs,
 // so a new job field only has to be added to one INSERT statement shape.
-const jobInsertColumns = `deployment_id, agent, name, runtime, model, max_turns, max_budget_usd,
+const jobInsertColumns = `deployment_id, kind, agent, name, runtime, model,
+	script_command, script_timeout, script_env, script_work_dir, max_turns, max_budget_usd,
 	issue_number, issue_title, issue_body, owner, repo, status, dependencies, stages_json,
 	source_type, source_name, source_ref`
 
 // jobInsertArgs returns the bind args matching jobInsertColumns, in order.
 func jobInsertArgs(j *Job) []interface{} {
+	kind := j.EffectiveKind()
 	return []interface{}{
-		j.DeploymentID, j.Agent, j.Name, j.Runtime, j.Model, j.MaxTurns, j.MaxBudgetOv,
+		j.DeploymentID, kind, j.Agent, j.Name, j.Runtime, j.Model,
+		j.ScriptCommand, j.ScriptTimeout, j.ScriptEnv, j.ScriptWorkDir, j.MaxTurns, j.MaxBudgetOv,
 		j.IssueNumber, j.IssueTitle, j.IssueBody, j.Owner, j.Repo, j.Status, j.Dependencies, j.StagesJSON,
 		j.SourceType, j.SourceName, j.SourceRef,
 	}
@@ -111,7 +114,7 @@ func CreateJobTx(tx *sqlx.Tx, j *Job) error {
 
 func createJob(e sqlx.Execer, j *Job) error {
 	res, err := e.Exec(fmt.Sprintf(`INSERT INTO jobs (%s)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobInsertColumns),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobInsertColumns),
 		jobInsertArgs(j)...)
 	if err != nil {
 		return err
@@ -127,7 +130,7 @@ func createJob(e sqlx.Execer, j *Job) error {
 func (s *Store) BulkCreateJobs(jobs []*Job) error {
 	for _, j := range jobs {
 		_, err := s.db.Exec(fmt.Sprintf(`INSERT OR IGNORE INTO jobs (%s)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobInsertColumns),
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobInsertColumns),
 			jobInsertArgs(j)...)
 		if err != nil {
 			return err
@@ -321,6 +324,12 @@ func (s *Store) UpdateJobPR(id int64, prNumber int) error {
 // UpdateJobCost updates the cost for a job.
 func (s *Store) UpdateJobCost(id int64, cost float64) error {
 	_, err := s.db.Exec("UPDATE jobs SET cost_usd = ? WHERE id = ?", cost, id)
+	return err
+}
+
+// UpdateJobLog records the captured output path for a job.
+func (s *Store) UpdateJobLog(id int64, logPath string) error {
+	_, err := s.db.Exec("UPDATE jobs SET agent_log = ? WHERE id = ?", logPath, id)
 	return err
 }
 
@@ -859,23 +868,36 @@ func (s *Store) GetOnboarding(repoDir string) (*RepoOnboarding, error) {
 // preserves last_run_at and created_at, so re-syncing a config never discards
 // last-run history.
 func (s *Store) UpsertSchedule(js *JobSchedule) error {
+	kind := js.Kind
+	if kind == "" {
+		kind = JobKindAgent
+	}
 	_, err := s.db.Exec(`INSERT INTO job_schedules
-		(name, deployment_id, cron_expr, trigger_expr, at_time, agent, runtime, model, description, budget, max_turns, enabled, next_run_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(name, deployment_id, cron_expr, trigger_expr, at_time, kind, agent, runtime, model,
+		 script_command, script_timeout, script_env, script_work_dir,
+		 description, budget, max_turns, enabled, next_run_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(deployment_id, name) DO UPDATE SET
 			cron_expr = excluded.cron_expr,
 			trigger_expr = excluded.trigger_expr,
 			at_time = excluded.at_time,
+			kind = excluded.kind,
 			agent = excluded.agent,
 			runtime = excluded.runtime,
 			model = excluded.model,
+			script_command = excluded.script_command,
+			script_timeout = excluded.script_timeout,
+			script_env = excluded.script_env,
+			script_work_dir = excluded.script_work_dir,
 			description = excluded.description,
 			budget = excluded.budget,
 			max_turns = excluded.max_turns,
 			enabled = excluded.enabled,
 			next_run_at = excluded.next_run_at`,
 		js.Name, js.DeploymentID, js.CronExpr, js.TriggerExpr, js.AtTime,
-		js.Agent, js.Runtime, js.Model, js.Description, js.Budget, js.MaxTurns, js.Enabled, js.NextRunAt)
+		kind, js.Agent, js.Runtime, js.Model,
+		js.ScriptCommand, js.ScriptTimeout, js.ScriptEnv, js.ScriptWorkDir,
+		js.Description, js.Budget, js.MaxTurns, js.Enabled, js.NextRunAt)
 	return err
 }
 

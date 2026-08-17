@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -61,15 +62,26 @@ func (s *Scheduler) SyncSchedules() error {
 			nextRun := cron.NextAfter(now)
 
 			js := &db.JobSchedule{
-				Name:         name,
-				DeploymentID: s.deployID,
-				CronExpr:     sql.NullString{String: def.Schedule, Valid: true},
-				Agent:        def.Agent,
-				Runtime:      sql.NullString{String: def.Runtime, Valid: def.Runtime != ""},
-				Model:        sql.NullString{String: def.Model, Valid: def.Model != ""},
-				Description:  sql.NullString{String: def.Description, Valid: def.Description != ""},
-				Enabled:      true,
-				NextRunAt:    sql.NullTime{Time: nextRun, Valid: !nextRun.IsZero()},
+				Name:          name,
+				DeploymentID:  s.deployID,
+				CronExpr:      sql.NullString{String: def.Schedule, Valid: true},
+				Kind:          def.EffectiveKind(),
+				Agent:         executionAgent(def),
+				Runtime:       sql.NullString{String: def.Runtime, Valid: def.Runtime != ""},
+				Model:         sql.NullString{String: def.Model, Valid: def.Model != ""},
+				ScriptCommand: sql.NullString{String: def.Command, Valid: def.Command != ""},
+				ScriptTimeout: sql.NullString{String: def.Timeout, Valid: def.Timeout != ""},
+				ScriptWorkDir: sql.NullString{String: def.ScriptWorkDir(), Valid: def.ScriptWorkDir() != ""},
+				Description:   sql.NullString{String: def.Description, Valid: def.Description != ""},
+				Enabled:       true,
+				NextRunAt:     sql.NullTime{Time: nextRun, Valid: !nextRun.IsZero()},
+			}
+			if len(def.Env) > 0 {
+				envJSON, err := json.Marshal(def.Env)
+				if err != nil {
+					return fmt.Errorf("encode env for schedule %q: %w", name, err)
+				}
+				js.ScriptEnv = sql.NullString{String: string(envJSON), Valid: true}
 			}
 			if def.Budget > 0 {
 				js.Budget = sql.NullFloat64{Float64: def.Budget, Valid: true}
@@ -87,14 +99,25 @@ func (s *Scheduler) SyncSchedules() error {
 			}
 
 			js := &db.JobSchedule{
-				Name:         name,
-				DeploymentID: s.deployID,
-				AtTime:       sql.NullTime{Time: def.ResolvedAt(), Valid: true},
-				Agent:        def.Agent,
-				Runtime:      sql.NullString{String: def.Runtime, Valid: def.Runtime != ""},
-				Model:        sql.NullString{String: def.Model, Valid: def.Model != ""},
-				Description:  sql.NullString{String: def.Description, Valid: def.Description != ""},
-				Enabled:      true,
+				Name:          name,
+				DeploymentID:  s.deployID,
+				AtTime:        sql.NullTime{Time: def.ResolvedAt(), Valid: true},
+				Kind:          def.EffectiveKind(),
+				Agent:         executionAgent(def),
+				Runtime:       sql.NullString{String: def.Runtime, Valid: def.Runtime != ""},
+				Model:         sql.NullString{String: def.Model, Valid: def.Model != ""},
+				ScriptCommand: sql.NullString{String: def.Command, Valid: def.Command != ""},
+				ScriptTimeout: sql.NullString{String: def.Timeout, Valid: def.Timeout != ""},
+				ScriptWorkDir: sql.NullString{String: def.ScriptWorkDir(), Valid: def.ScriptWorkDir() != ""},
+				Description:   sql.NullString{String: def.Description, Valid: def.Description != ""},
+				Enabled:       true,
+			}
+			if len(def.Env) > 0 {
+				envJSON, err := json.Marshal(def.Env)
+				if err != nil {
+					return fmt.Errorf("encode env for schedule %q: %w", name, err)
+				}
+				js.ScriptEnv = sql.NullString{String: string(envJSON), Valid: true}
 			}
 			if def.Budget > 0 {
 				js.Budget = sql.NullFloat64{Float64: def.Budget, Valid: true}
@@ -210,18 +233,23 @@ func (s *Scheduler) fireSchedule(sched *db.JobSchedule) {
 	}
 
 	job := &db.Job{
-		DeploymentID: s.deployID,
-		Agent:        sched.Agent,
-		Name:         jobName,
-		Runtime:      sched.Runtime,
-		Model:        sched.Model,
-		IssueTitle:   sql.NullString{String: title, Valid: true},
-		Owner:        s.owner,
-		Repo:         s.repo,
-		Status:       db.StatusQueued,
-		SourceType:   sql.NullString{String: "cron", Valid: true},
-		SourceName:   sql.NullString{String: sched.Name, Valid: true},
-		SourceRef:    sql.NullString{String: now.Format(time.RFC3339), Valid: true},
+		DeploymentID:  s.deployID,
+		Kind:          scheduleKind(sched),
+		Agent:         sched.Agent,
+		Name:          jobName,
+		Runtime:       sched.Runtime,
+		Model:         sched.Model,
+		ScriptCommand: sched.ScriptCommand,
+		ScriptTimeout: sched.ScriptTimeout,
+		ScriptEnv:     sched.ScriptEnv,
+		ScriptWorkDir: sched.ScriptWorkDir,
+		IssueTitle:    sql.NullString{String: title, Valid: true},
+		Owner:         s.owner,
+		Repo:          s.repo,
+		Status:        db.StatusQueued,
+		SourceType:    sql.NullString{String: "cron", Valid: true},
+		SourceName:    sql.NullString{String: sched.Name, Valid: true},
+		SourceRef:     sql.NullString{String: now.Format(time.RFC3339), Valid: true},
 	}
 
 	if sched.Budget.Valid {
@@ -260,18 +288,23 @@ func (s *Scheduler) fireOneShot(sched *db.JobSchedule) {
 	}
 
 	job := &db.Job{
-		DeploymentID: s.deployID,
-		Agent:        sched.Agent,
-		Name:         jobName,
-		Runtime:      sched.Runtime,
-		Model:        sched.Model,
-		IssueTitle:   sql.NullString{String: title, Valid: true},
-		Owner:        s.owner,
-		Repo:         s.repo,
-		Status:       db.StatusQueued,
-		SourceType:   sql.NullString{String: "at", Valid: true},
-		SourceName:   sql.NullString{String: sched.Name, Valid: true},
-		SourceRef:    sql.NullString{String: now.Format(time.RFC3339), Valid: true},
+		DeploymentID:  s.deployID,
+		Kind:          scheduleKind(sched),
+		Agent:         sched.Agent,
+		Name:          jobName,
+		Runtime:       sched.Runtime,
+		Model:         sched.Model,
+		ScriptCommand: sched.ScriptCommand,
+		ScriptTimeout: sched.ScriptTimeout,
+		ScriptEnv:     sched.ScriptEnv,
+		ScriptWorkDir: sched.ScriptWorkDir,
+		IssueTitle:    sql.NullString{String: title, Valid: true},
+		Owner:         s.owner,
+		Repo:          s.repo,
+		Status:        db.StatusQueued,
+		SourceType:    sql.NullString{String: "at", Valid: true},
+		SourceName:    sql.NullString{String: sched.Name, Valid: true},
+		SourceRef:     sql.NullString{String: now.Format(time.RFC3339), Valid: true},
 	}
 
 	if sched.Budget.Valid {
@@ -323,17 +356,22 @@ func (s *Scheduler) RunOnce(name string) (int64, error) {
 	}
 
 	job := &db.Job{
-		DeploymentID: s.deployID,
-		Agent:        sched.Agent,
-		Name:         jobName,
-		Runtime:      sched.Runtime,
-		Model:        sched.Model,
-		Owner:        s.owner,
-		Repo:         s.repo,
-		Status:       db.StatusQueued,
-		SourceType:   sql.NullString{String: sourceType, Valid: true},
-		SourceName:   sql.NullString{String: sched.Name, Valid: true},
-		SourceRef:    sql.NullString{String: now.Format(time.RFC3339), Valid: true},
+		DeploymentID:  s.deployID,
+		Kind:          scheduleKind(sched),
+		Agent:         sched.Agent,
+		Name:          jobName,
+		Runtime:       sched.Runtime,
+		Model:         sched.Model,
+		ScriptCommand: sched.ScriptCommand,
+		ScriptTimeout: sched.ScriptTimeout,
+		ScriptEnv:     sched.ScriptEnv,
+		ScriptWorkDir: sched.ScriptWorkDir,
+		Owner:         s.owner,
+		Repo:          s.repo,
+		Status:        db.StatusQueued,
+		SourceType:    sql.NullString{String: sourceType, Valid: true},
+		SourceName:    sql.NullString{String: sched.Name, Valid: true},
+		SourceRef:     sql.NullString{String: now.Format(time.RFC3339), Valid: true},
 	}
 
 	if sched.Budget.Valid {
@@ -363,4 +401,18 @@ func (s *Scheduler) RunOnce(name string) (int64, error) {
 	}
 
 	return job.ID, nil
+}
+
+func scheduleKind(sched *db.JobSchedule) string {
+	if sched != nil && sched.Kind != "" {
+		return sched.Kind
+	}
+	return db.JobKindAgent
+}
+
+func executionAgent(def JobDef) string {
+	if def.EffectiveKind() == JobKindScript {
+		return db.JobKindScript
+	}
+	return def.Agent
 }

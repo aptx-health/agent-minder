@@ -65,10 +65,15 @@ type Job struct {
 	DeploymentID string `db:"deployment_id"`
 
 	// What to run.
-	Agent   string         `db:"agent"`   // e.g., "autopilot", "reviewer", "dependency-updater"
-	Name    string         `db:"name"`    // e.g., "issue-42", "weekly-deps-2026-04-01"
-	Runtime sql.NullString `db:"runtime"` // optional per-job runtime override
-	Model   sql.NullString `db:"model"`   // optional per-job model override
+	Kind          string         `db:"kind"`            // "agent" or "script"
+	Agent         string         `db:"agent"`           // e.g., "autopilot", "reviewer", "dependency-updater"
+	Name          string         `db:"name"`            // e.g., "issue-42", "weekly-deps-2026-04-01"
+	Runtime       sql.NullString `db:"runtime"`         // optional per-job runtime override
+	Model         sql.NullString `db:"model"`           // optional per-job model override
+	ScriptCommand sql.NullString `db:"script_command"`  // shell command for kind=script jobs
+	ScriptTimeout sql.NullString `db:"script_timeout"`  // optional Go duration string
+	ScriptEnv     sql.NullString `db:"script_env"`      // optional JSON object of env overrides
+	ScriptWorkDir sql.NullString `db:"script_work_dir"` // optional path relative to repo or absolute
 
 	// Context (nullable for proactive agents).
 	IssueNumber int            `db:"issue_number"`
@@ -160,6 +165,19 @@ func (j *Job) EffectiveModel() string {
 
 // Job status constants.
 const (
+	JobKindAgent  = "agent"
+	JobKindScript = "script"
+)
+
+// EffectiveKind returns the job execution kind, defaulting old rows to agent.
+func (j *Job) EffectiveKind() string {
+	if j.Kind != "" {
+		return j.Kind
+	}
+	return JobKindAgent
+}
+
+const (
 	StatusQueued    = "queued"
 	StatusBlocked   = "blocked"
 	StatusRunning   = "running"
@@ -215,21 +233,26 @@ func (l *Lesson) EffectivenessRatio() float64 {
 
 // JobSchedule tracks a scheduled or triggered job definition.
 type JobSchedule struct {
-	Name         string          `db:"name"`
-	DeploymentID string          `db:"deployment_id"`
-	CronExpr     sql.NullString  `db:"cron_expr"`
-	TriggerExpr  sql.NullString  `db:"trigger_expr"`
-	AtTime       sql.NullTime    `db:"at_time"`
-	Agent        string          `db:"agent"`
-	Runtime      sql.NullString  `db:"runtime"`
-	Model        sql.NullString  `db:"model"`
-	Description  sql.NullString  `db:"description"`
-	Budget       sql.NullFloat64 `db:"budget"`
-	MaxTurns     sql.NullInt64   `db:"max_turns"`
-	Enabled      bool            `db:"enabled"`
-	LastRunAt    sql.NullTime    `db:"last_run_at"`
-	NextRunAt    sql.NullTime    `db:"next_run_at"`
-	CreatedAt    time.Time       `db:"created_at"`
+	Name          string          `db:"name"`
+	DeploymentID  string          `db:"deployment_id"`
+	CronExpr      sql.NullString  `db:"cron_expr"`
+	TriggerExpr   sql.NullString  `db:"trigger_expr"`
+	AtTime        sql.NullTime    `db:"at_time"`
+	Kind          string          `db:"kind"`
+	Agent         string          `db:"agent"`
+	Runtime       sql.NullString  `db:"runtime"`
+	Model         sql.NullString  `db:"model"`
+	ScriptCommand sql.NullString  `db:"script_command"`
+	ScriptTimeout sql.NullString  `db:"script_timeout"`
+	ScriptEnv     sql.NullString  `db:"script_env"`
+	ScriptWorkDir sql.NullString  `db:"script_work_dir"`
+	Description   sql.NullString  `db:"description"`
+	Budget        sql.NullFloat64 `db:"budget"`
+	MaxTurns      sql.NullInt64   `db:"max_turns"`
+	Enabled       bool            `db:"enabled"`
+	LastRunAt     sql.NullTime    `db:"last_run_at"`
+	NextRunAt     sql.NullTime    `db:"next_run_at"`
+	CreatedAt     time.Time       `db:"created_at"`
 }
 
 // IsOneShot returns true if this row is a one-shot (at:/in:) schedule rather

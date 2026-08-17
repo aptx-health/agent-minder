@@ -27,11 +27,16 @@ type TriggerRoute struct {
 	Name      string   // automation name (jobs.yaml key), recorded as job provenance
 	Labels    []string // GitHub labels to match (AND logic)
 	Milestone string   // GitHub milestone to match (mutually exclusive with Labels)
+	Kind      string   // "agent" or "script"
 	Agent     string   // agent type to use
 	Runtime   string   // optional job-level runtime override
 	Model     string   // optional job-level model override
 	Budget    float64  // optional job-level max budget (USD) override
 	MaxTurns  int      // optional job-level max turns override
+	Command   string   // shell command for kind=script
+	Timeout   string   // optional script timeout
+	EnvJSON   string   // optional script env JSON
+	WorkDir   string   // optional script working directory
 }
 
 // FilterString returns the watch-filter form of this route ("milestone:<name>"
@@ -119,11 +124,11 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 		totalPolled += len(issues)
 		for _, issue := range issues {
 			route := s.resolveRouteForIssue(issue.Labels)
-			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
+			if knownJobs[issueAgent{issue.Number, route.dedupeAgent()}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
 			if n := s.createJobForIssue(ctx, ghClient, issue, route, "watch"); n > 0 {
-				knownJobs[issueAgent{issue.Number, route.Agent}] = true
+				knownJobs[issueAgent{issue.Number, route.dedupeAgent()}] = true
 				discovered += n
 			}
 		}
@@ -141,14 +146,14 @@ func (s *Supervisor) watchPoll(ctx context.Context) int {
 			// Skip if a more-specific label route should handle this issue.
 			// Milestone routes match on the milestone directly, so label-based
 			// specificity resolution does not apply to them.
-			if len(route.Labels) > 0 && s.resolveRouteForIssue(issue.Labels).Agent != route.Agent {
+			if len(route.Labels) > 0 && s.resolveRouteForIssue(issue.Labels).dedupeAgent() != route.dedupeAgent() {
 				continue
 			}
-			if knownJobs[issueAgent{issue.Number, route.Agent}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
+			if knownJobs[issueAgent{issue.Number, route.dedupeAgent()}] || issue.State != "open" || hasLabel(issue.Labels, skipLabel) {
 				continue
 			}
 			if n := s.createJobForIssue(ctx, ghClient, issue, route, "trigger"); n > 0 {
-				knownJobs[issueAgent{issue.Number, route.Agent}] = true
+				knownJobs[issueAgent{issue.Number, route.dedupeAgent()}] = true
 				discovered += n
 			}
 		}
@@ -254,7 +259,7 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 	if content != nil {
 		body = content.Body
 	}
-	agent := route.Agent
+	agent := route.dedupeAgent()
 	if agent == "" {
 		agent = "autopilot"
 	}
@@ -269,22 +274,27 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 	}
 
 	j := &db.Job{
-		DeploymentID: s.deploy.ID,
-		Agent:        agent,
-		Name:         fmt.Sprintf("%s-issue-%d", agent, issue.Number),
-		Runtime:      sql.NullString{String: route.Runtime, Valid: route.Runtime != ""},
-		Model:        sql.NullString{String: route.Model, Valid: route.Model != ""},
-		MaxTurns:     sql.NullInt64{Int64: int64(route.MaxTurns), Valid: route.MaxTurns > 0},
-		MaxBudgetOv:  sql.NullFloat64{Float64: route.Budget, Valid: route.Budget > 0},
-		IssueNumber:  issue.Number,
-		IssueTitle:   sql.NullString{String: issue.Title, Valid: true},
-		IssueBody:    sql.NullString{String: body, Valid: body != ""},
-		Owner:        s.owner,
-		Repo:         s.repo,
-		Status:       db.StatusQueued,
-		SourceType:   sql.NullString{String: sourceType, Valid: sourceType != ""},
-		SourceName:   sql.NullString{String: sourceName, Valid: sourceName != ""},
-		SourceRef:    sql.NullString{String: sourceRef, Valid: sourceRef != ""},
+		DeploymentID:  s.deploy.ID,
+		Kind:          route.kind(),
+		Agent:         agent,
+		Name:          fmt.Sprintf("%s-issue-%d", agent, issue.Number),
+		Runtime:       sql.NullString{String: route.Runtime, Valid: route.Runtime != ""},
+		Model:         sql.NullString{String: route.Model, Valid: route.Model != ""},
+		ScriptCommand: sql.NullString{String: route.Command, Valid: route.Command != ""},
+		ScriptTimeout: sql.NullString{String: route.Timeout, Valid: route.Timeout != ""},
+		ScriptEnv:     sql.NullString{String: route.EnvJSON, Valid: route.EnvJSON != ""},
+		ScriptWorkDir: sql.NullString{String: route.WorkDir, Valid: route.WorkDir != ""},
+		MaxTurns:      sql.NullInt64{Int64: int64(route.MaxTurns), Valid: route.MaxTurns > 0},
+		MaxBudgetOv:   sql.NullFloat64{Float64: route.Budget, Valid: route.Budget > 0},
+		IssueNumber:   issue.Number,
+		IssueTitle:    sql.NullString{String: issue.Title, Valid: true},
+		IssueBody:     sql.NullString{String: body, Valid: body != ""},
+		Owner:         s.owner,
+		Repo:          s.repo,
+		Status:        db.StatusQueued,
+		SourceType:    sql.NullString{String: sourceType, Valid: sourceType != ""},
+		SourceName:    sql.NullString{String: sourceName, Valid: sourceName != ""},
+		SourceRef:     sql.NullString{String: sourceRef, Valid: sourceRef != ""},
 	}
 
 	// Discovery of new work is durable (Expedition IV §5): the job row and its
@@ -309,6 +319,20 @@ func (s *Supervisor) createJobForIssue(ctx context.Context, ghClient *ghpkg.Clie
 	envelope.Time = record.Time
 	s.publishEnvelope(envelope)
 	return 1
+}
+
+func (r TriggerRoute) kind() string {
+	if r.Kind != "" {
+		return r.Kind
+	}
+	return db.JobKindAgent
+}
+
+func (r TriggerRoute) dedupeAgent() string {
+	if r.kind() == db.JobKindScript {
+		return db.JobKindScript
+	}
+	return r.Agent
 }
 
 // isValidFilterValue checks that a filter value contains only safe characters:

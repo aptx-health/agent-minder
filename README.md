@@ -105,7 +105,17 @@ jobs:
     model: opus
     description: "Research and discovery"
     budget: 5.0
+
+  lint-sweep:
+    kind: script
+    schedule: "0 7 * * *"
+    command: "go test ./..."
+    timeout: 10m
+    env:
+      GOFLAGS: "-count=1"
 ```
+
+`kind: script` jobs run in the deployed repo by default, capture stdout/stderr to the job log, record zero LLM cost, and may set `working_dir:`/`workdir:` for a repo-relative or absolute working directory. Script commands are operator-authored repo config and run through `sh -c`; do not put untrusted input in `command:`.
 
 The trigger map prints at startup so you can see exactly what's wired up:
 
@@ -114,6 +124,7 @@ The trigger map prints at startup so you can see exactly what's wired up:
 ```bash
 minder jobs list                   # show schedules
 minder jobs run weekly-deps        # manual trigger
+minder jobs history weekly-deps    # show prior automation runs
 ```
 
 ### Runtime selection
@@ -329,7 +340,7 @@ A macOS menu bar widget that shows agent status at a glance. Supports all job st
 | `minder tui` | Launch interactive TUI dashboard |
 | `minder auth login\|status\|logout` | Manage GitHub token in OS keychain |
 | `minder lesson add\|list\|edit\|remove\|pin\|groom` | Manage the learning system |
-| `minder jobs list\|run` | View and trigger scheduled jobs |
+| `minder jobs list\|run\|history` | View, trigger, and inspect scheduled job runs |
 | `minder agents list\|show\|add` | List, inspect, or create agent definitions |
 | `minder checkout [issue]` | Check out an agent's worktree for review (interactive picker, `--remote`) |
 | `minder logs [issue]` | View agent log output (interactive picker, `--follow`, `--remote`, `--raw`) |
