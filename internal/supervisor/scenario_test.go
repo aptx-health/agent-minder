@@ -97,8 +97,7 @@ func runScenario(t *testing.T, sc scenarioCase) {
 		h.stageLog = append(h.stageLog, stageCall{Agent: inv.AgentName, Inv: inv})
 		h.mu.Unlock()
 		// Write a synthetic stream-json result event to the log so
-		// parseCostFromLog and rt.ParseResult (used by finalizeBail) see
-		// consistent data.
+		// rt.ParseResult (used by finalizeBail) sees consistent data.
 		if logFile != nil {
 			_, _ = logFile.Write([]byte(resultJSON + "\n"))
 		}
@@ -265,7 +264,7 @@ func intToStr(n int) string {
 
 func floatToStr(f float64) string {
 	// Scenarios use small fractional values like 0.12 — render with a fixed
-	// precision sufficient for parseCostFromLog and ClassifyOutcome.
+	// precision sufficient for the result-line JSON and ClassifyOutcome.
 	// We use a minimal formatter to avoid extra deps.
 	whole := int(f)
 	frac := int((f - float64(whole)) * 10000)

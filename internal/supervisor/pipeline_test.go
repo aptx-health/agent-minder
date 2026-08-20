@@ -1538,11 +1538,17 @@ func TestPipeline_NoCaptureWithoutFlag(t *testing.T) {
 // final turns, cost, and session, plus a separate row for the review stage.
 func TestPipeline_WritesAgentRuns(t *testing.T) {
 	h := newHarness(t, func(d *db.Deployment) { d.ReviewEnabled = true })
+	h.sup.SetRuntime(&fakeRuntime{metadata: runtimepkg.RunMetadata{
+		RuntimeName:    "fake",
+		Model:          "resolved-model",
+		RuntimeVersion: "fake version 1.2.3",
+	}})
 
 	h.hooks.DetectPRFn = func(ctx context.Context) int { return 100 }
 	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
 		return 0, &runtimepkg.Result{
 			SessionID:    "sess-" + inv.AgentName,
+			Model:        "resolved-model",
 			NumTurns:     9,
 			TotalCostUSD: 0.21,
 			FinalText:    "done",
@@ -1556,6 +1562,7 @@ func TestPipeline_WritesAgentRuns(t *testing.T) {
 	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
 		j.IssueNumber = 77
 		j.Name = "issue-77"
+		j.Model = sql.NullString{String: "requested-model", Valid: true}
 	})
 	contract := &AgentContract{
 		Name:   "autopilot",
@@ -1589,8 +1596,14 @@ func TestPipeline_WritesAgentRuns(t *testing.T) {
 	if code.SessionID.String != "sess-autopilot" {
 		t.Errorf("code run session = %q, want sess-autopilot", code.SessionID.String)
 	}
-	if !code.Runtime.Valid || code.Runtime.String == "" {
-		t.Errorf("code run runtime not recorded: %+v", code.Runtime)
+	if code.Runtime.String != "fake" {
+		t.Errorf("code run runtime = %q, want fake", code.Runtime.String)
+	}
+	if code.Model.String != "resolved-model" {
+		t.Errorf("code run model = %q, want resolved-model", code.Model.String)
+	}
+	if code.RuntimeVersion.String != "fake version 1.2.3" {
+		t.Errorf("code run runtime_version = %q, want fake version 1.2.3", code.RuntimeVersion.String)
 	}
 	if !code.CompletedAt.Valid {
 		t.Error("code run completed_at should be set")
@@ -1602,6 +1615,170 @@ func TestPipeline_WritesAgentRuns(t *testing.T) {
 	}
 	if review.Status != db.RunStatusSuccess {
 		t.Errorf("review run status = %q, want success", review.Status)
+	}
+}
+
+func TestPipeline_ReconcilesRuntimeReportedModelMismatch(t *testing.T) {
+	h := newHarness(t, func(d *db.Deployment) { d.ReviewEnabled = false })
+	h.sup.SetRuntime(&fakeRuntime{metadata: runtimepkg.RunMetadata{
+		RuntimeName: "fake",
+		Model:       "requested-model",
+	}})
+	h.hooks.RunStageFn = func(ctx context.Context, inv runtimepkg.Invocation, logFile *os.File) (int, *runtimepkg.Result, bool, error) {
+		return 0, &runtimepkg.Result{
+			SessionID: "sess-autopilot",
+			Model:     "reported-model",
+			FinalText: "done",
+		}, false, nil
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.IssueNumber = 88
+		j.Name = "issue-88"
+		j.Model = sql.NullString{String: "requested-model", Valid: true}
+	})
+	contract := &AgentContract{
+		Name:   "autopilot",
+		Output: "issue",
+		Stages: []StageContract{{Name: "run", Agent: "autopilot"}},
+	}
+
+	if err := h.run(context.Background(), job, contract); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !hasEvent(h.events(), string(EventWarning), `recorded "requested-model" but runtime reported "reported-model"`) {
+		t.Fatalf("missing runtime model mismatch warning")
+	}
+
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("got %d agent runs, want 1", len(runs))
+	}
+	if runs[0].Model.String != "reported-model" {
+		t.Errorf("reconciled model = %q, want reported-model", runs[0].Model.String)
+	}
+}
+
+func TestScriptJobCompletesWithCapturedOutputAndRunRecord(t *testing.T) {
+	h := newHarness(t)
+	if err := os.WriteFile(filepath.Join(h.deploy.RepoDir, "input.txt"), []byte("from repo"), 0o600); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Kind = db.JobKindScript
+		j.Agent = db.JobKindScript
+		j.Name = "lint-20260809-1200"
+		j.IssueNumber = 0
+		j.ScriptCommand = sql.NullString{String: "cat input.txt && printf '\\n%s\\n' \"$FOO\"", Valid: true}
+		j.ScriptEnv = sql.NullString{String: `{"FOO":"bar"}`, Valid: true}
+	})
+	sc := h.newSlotContext(job)
+
+	if err := runScriptJob(context.Background(), sc); err != nil {
+		t.Fatalf("runScriptJob: %v", err)
+	}
+
+	got, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != db.StatusDone {
+		t.Fatalf("status = %q, want done", got.Status)
+	}
+	if got.CostUSD != 0 {
+		t.Fatalf("cost_usd = %v, want zero", got.CostUSD)
+	}
+	if !got.AgentLog.Valid || got.AgentLog.String == "" {
+		t.Fatalf("agent_log = %v, want captured log path", got.AgentLog)
+	}
+	logData, err := os.ReadFile(got.AgentLog.String)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "from repo") || !strings.Contains(string(logData), "bar") {
+		t.Fatalf("log missing stdout/env output:\n%s", string(logData))
+	}
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("got %d runs, want 1", len(runs))
+	}
+	if runs[0].Status != db.RunStatusSuccess || runs[0].Agent != db.JobKindScript {
+		t.Fatalf("run = %+v, want successful script run", runs[0])
+	}
+	if runs[0].CostUSD != 0 {
+		t.Fatalf("run cost = %v, want zero", runs[0].CostUSD)
+	}
+}
+
+func TestScriptJobFailureRecordsExitCode(t *testing.T) {
+	h := newHarness(t)
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Kind = db.JobKindScript
+		j.Agent = db.JobKindScript
+		j.Name = "fail-20260809-1200"
+		j.IssueNumber = 0
+		j.ScriptCommand = sql.NullString{String: "printf boom >&2; exit 7", Valid: true}
+	})
+	sc := h.newSlotContext(job)
+
+	if err := runScriptJob(context.Background(), sc); err == nil {
+		t.Fatal("expected script failure")
+	}
+
+	got, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != db.StatusFailed {
+		t.Fatalf("status = %q, want failed", got.Status)
+	}
+	if !got.FailureDetail.Valid || !strings.Contains(got.FailureDetail.String, "code 7") {
+		t.Fatalf("failure_detail = %v, want exit code", got.FailureDetail)
+	}
+	runs, err := h.store.GetAgentRuns(job.ID)
+	if err != nil {
+		t.Fatalf("GetAgentRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != db.RunStatusFailed || !strings.Contains(runs[0].FailureDetail.String, "code 7") {
+		t.Fatalf("runs = %+v, want failed run with exit code", runs)
+	}
+}
+
+func TestScriptJobTimeoutKillsAndRecordsFailure(t *testing.T) {
+	h := newHarness(t)
+	job := testJob(t, h.store, h.deploy, func(j *db.Job) {
+		j.Kind = db.JobKindScript
+		j.Agent = db.JobKindScript
+		j.Name = "timeout-20260809-1200"
+		j.IssueNumber = 0
+		j.ScriptCommand = sql.NullString{String: "while true; do :; done", Valid: true}
+		j.ScriptTimeout = sql.NullString{String: "20ms", Valid: true}
+	})
+	sc := h.newSlotContext(job)
+
+	if err := runScriptJob(context.Background(), sc); err == nil {
+		t.Fatal("expected timeout")
+	}
+
+	got, err := h.store.GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != db.StatusFailed {
+		t.Fatalf("status = %q, want failed", got.Status)
+	}
+	if !got.FailureReason.Valid || got.FailureReason.String != "timeout" {
+		t.Fatalf("failure_reason = %v, want timeout", got.FailureReason)
+	}
+	if !got.FailureDetail.Valid || !strings.Contains(got.FailureDetail.String, "timed out") {
+		t.Fatalf("failure_detail = %v, want timeout detail", got.FailureDetail)
 	}
 }
 

@@ -787,7 +787,10 @@ func (s *Supervisor) launchJob(ctx context.Context, job *db.Job) {
 // same job is never launched twice. Safe with s.mu held: the run row does not
 // exist yet, so run attribution is passed explicitly rather than looked up.
 func (s *Supervisor) markJobLaunched(job *db.Job) {
-	rt, _ := s.runtimeForJobLocked(job)
+	var rt runtimepkg.AgentRuntime
+	if job.EffectiveKind() != db.JobKindScript {
+		rt, _ = s.runtimeForJobLocked(job)
+	}
 	summary := formatJobStartedSummary(rt, s.deploy, job)
 	s.emitDurableEventRun(EventStarted, summary, job.ID, 0,
 		func(tx *sqlx.Tx) error { return db.UpdateJobRunningTx(tx, job.ID) })
@@ -824,6 +827,13 @@ func (s *Supervisor) runJobManager(ctx context.Context, job *db.Job) {
 
 	// Create SlotContext.
 	sc := s.newSlotContext(job.ID, job)
+
+	if job.EffectiveKind() == db.JobKindScript {
+		if err := runScriptJob(ctx, sc); err != nil {
+			debugLog("script job error", "job", job.ID, "name", job.Name, "error", err.Error())
+		}
+		return
+	}
 
 	// Resolve contract and check dedup.
 	contract, err := ResolveContract(s.repoDir, job.Agent)
@@ -888,29 +898,6 @@ func (s *Supervisor) UpdateLiveStatus(jobID int64, status LiveStatus) {
 }
 
 // --- Utility functions used by SlotContext and JobManager ---
-
-// parseCostFromLog extracts cost from the agent log (stream-json format).
-func parseCostFromLog(logPath string) float64 {
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return 0
-	}
-	lines := strings.Split(string(data), "\n")
-	var cost float64
-	for _, line := range lines {
-		if idx := strings.Index(line, `"total_cost_usd"`); idx >= 0 {
-			rest := line[idx+len(`"total_cost_usd"`):]
-			rest = strings.TrimLeft(rest, `: `)
-			end := strings.IndexAny(rest, ",}")
-			if end > 0 {
-				if v, err := strconv.ParseFloat(strings.TrimSpace(rest[:end]), 64); err == nil && v > cost {
-					cost = v
-				}
-			}
-		}
-	}
-	return cost
-}
 
 // detectPRFromLog scans the log for PR creation output.
 func detectPRFromLog(logPath, owner, repo string) int {

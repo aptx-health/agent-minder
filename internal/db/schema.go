@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 13
+const schemaVersion = 16
 
 // SchemaVersion returns the schema version this build migrates to. Exported so
 // documentation drift tests can assert against it.
@@ -51,10 +51,15 @@ CREATE TABLE IF NOT EXISTS jobs (
 	deployment_id TEXT NOT NULL REFERENCES deployments(id),
 
 	-- What to run
+	kind TEXT NOT NULL DEFAULT 'agent',
 	agent TEXT NOT NULL DEFAULT 'autopilot',
 	name TEXT NOT NULL,
 	runtime TEXT,
 	model TEXT,
+	script_command TEXT,
+	script_timeout TEXT,
+	script_env TEXT,
+	script_work_dir TEXT,
 
 	-- Context (nullable for proactive agents)
 	issue_number INTEGER,
@@ -152,9 +157,15 @@ CREATE TABLE IF NOT EXISTS job_schedules (
 	deployment_id TEXT NOT NULL,
 	cron_expr TEXT,
 	trigger_expr TEXT,
+	at_time DATETIME,
+	kind TEXT NOT NULL DEFAULT 'agent',
 	agent TEXT NOT NULL,
 	runtime TEXT,
 	model TEXT,
+	script_command TEXT,
+	script_timeout TEXT,
+	script_env TEXT,
+	script_work_dir TEXT,
 	description TEXT,
 	budget REAL,
 	max_turns INTEGER,
@@ -177,6 +188,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 	agent TEXT NOT NULL,
 	runtime TEXT,
 	model TEXT,
+	runtime_version TEXT,
 	session_id TEXT,
 
 	-- Outcome.
@@ -247,6 +259,33 @@ const migrateV11toV12 = `
 ALTER TABLE deployments ADD COLUMN activation_policy TEXT NOT NULL DEFAULT 'automated';
 UPDATE schema_version SET version = 12;
 `
+
+// migrateV14toV15 adds one-shot (at:/in:) schedule support: job_schedules
+// rows can now carry a resolved at_time instead of a cron_expr. Additive —
+// existing cron and trigger rows are untouched. Guards on job_schedules'
+// existence and the at_time column's absence, in Go rather than a plain SQL
+// constant, because minimal pre-v15 fixtures used elsewhere in the migration
+// test suite don't seed every table, and a bare ALTER TABLE would fail
+// against them.
+func migrateV14toV15(db *sqlx.DB) error {
+	var hasTable bool
+	if err := db.Get(&hasTable, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'job_schedules'`); err != nil {
+		return err
+	}
+	if hasTable {
+		var hasColumn bool
+		if err := db.Get(&hasColumn, `SELECT COUNT(*) > 0 FROM pragma_table_info('job_schedules') WHERE name = 'at_time'`); err != nil {
+			return err
+		}
+		if !hasColumn {
+			if _, err := db.Exec(`ALTER TABLE job_schedules ADD COLUMN at_time DATETIME`); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := db.Exec(`UPDATE schema_version SET version = 15`)
+	return err
+}
 
 // migrateV1toV2 migrates a v1 database (tasks table) to v2 (jobs table).
 const migrateV1toV2 = `
@@ -491,6 +530,84 @@ CREATE TABLE IF NOT EXISTS event_log_meta (
 UPDATE schema_version SET version = 13;
 `
 
+// migrateV13toV14 records the runtime CLI version resolved at run start.
+// Nullable and additive because older runs have no version probe.
+const migrateV13toV14 = `
+ALTER TABLE agent_runs ADD COLUMN runtime_version TEXT;
+UPDATE schema_version SET version = 14;
+`
+
+// migrateV15toV16 records script execution config for scheduled/triggered jobs.
+// Additive: existing agent jobs and schedules default to kind='agent', and
+// script-only fields remain NULL until a jobs.yaml script automation creates
+// or fires a row.
+const migrateV15toV16 = `
+CREATE TABLE IF NOT EXISTS jobs (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	deployment_id TEXT NOT NULL REFERENCES deployments(id),
+	agent TEXT NOT NULL DEFAULT 'autopilot',
+	name TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	issue_number INTEGER,
+	issue_title TEXT,
+	issue_body TEXT,
+	owner TEXT NOT NULL,
+	repo TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'queued',
+	current_stage TEXT,
+	stages_json TEXT,
+	result_json TEXT,
+	worktree_path TEXT,
+	branch TEXT,
+	pr_number INTEGER,
+	cost_usd REAL DEFAULT 0.0,
+	agent_log TEXT,
+	failure_reason TEXT,
+	failure_detail TEXT,
+	review_risk TEXT,
+	review_comment_id INTEGER,
+	dependencies TEXT,
+	max_turns INTEGER,
+	max_budget_usd REAL,
+	source_type TEXT,
+	source_name TEXT,
+	source_ref TEXT,
+	queued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	started_at DATETIME,
+	completed_at DATETIME,
+	UNIQUE(deployment_id, name)
+);
+CREATE TABLE IF NOT EXISTS job_schedules (
+	name TEXT NOT NULL,
+	deployment_id TEXT NOT NULL,
+	cron_expr TEXT,
+	trigger_expr TEXT,
+	agent TEXT NOT NULL,
+	runtime TEXT,
+	model TEXT,
+	description TEXT,
+	budget REAL,
+	max_turns INTEGER,
+	enabled INTEGER DEFAULT 1,
+	last_run_at DATETIME,
+	next_run_at DATETIME,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (deployment_id, name)
+);
+ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent';
+ALTER TABLE jobs ADD COLUMN script_command TEXT;
+ALTER TABLE jobs ADD COLUMN script_timeout TEXT;
+ALTER TABLE jobs ADD COLUMN script_env TEXT;
+ALTER TABLE jobs ADD COLUMN script_work_dir TEXT;
+ALTER TABLE job_schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent';
+ALTER TABLE job_schedules ADD COLUMN script_command TEXT;
+ALTER TABLE job_schedules ADD COLUMN script_timeout TEXT;
+ALTER TABLE job_schedules ADD COLUMN script_env TEXT;
+ALTER TABLE job_schedules ADD COLUMN script_work_dir TEXT;
+UPDATE schema_version SET version = 16;
+`
+
 // DefaultDBPath returns the default database path for v2.
 func DefaultDBPath() string {
 	home, err := expandHome("~/.agent-minder")
@@ -596,6 +713,24 @@ func Open(dsn string) (*sqlx.DB, error) {
 			if _, err := db.Exec(migrateV12toV13); err != nil {
 				_ = db.Close()
 				return nil, fmt.Errorf("migrating v12→v13: %w", err)
+			}
+		}
+		if version < 14 {
+			if _, err := db.Exec(migrateV13toV14); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v13→v14: %w", err)
+			}
+		}
+		if version < 15 {
+			if err := migrateV14toV15(db); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v14→v15: %w", err)
+			}
+		}
+		if version < 16 {
+			if _, err := db.Exec(migrateV15toV16); err != nil {
+				_ = db.Close()
+				return nil, fmt.Errorf("migrating v15→v16: %w", err)
 			}
 		}
 	} else if !hasVersion {

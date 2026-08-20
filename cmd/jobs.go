@@ -39,12 +39,23 @@ Examples:
 	RunE: runJobsRun,
 }
 
+var jobsHistoryCmd = &cobra.Command{
+	Use:   "history [name]",
+	Short: "Show scheduled job run history",
+	Long: `Show prior jobs created by jobs.yaml automations.
+
+When name is provided, only runs for that automation are shown.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runJobsHistory,
+}
+
 var flagJobsRepo string
 
 func init() {
 	rootCmd.AddCommand(jobsCmd)
 	jobsCmd.AddCommand(jobsListCmd)
 	jobsCmd.AddCommand(jobsRunCmd)
+	jobsCmd.AddCommand(jobsHistoryCmd)
 
 	jobsCmd.PersistentFlags().StringVar(&flagJobsRepo, "repo", ".", "Repository directory")
 }
@@ -84,12 +95,20 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 	for name, def := range cfg.Jobs {
 		kind := "cron"
 		expr := def.Schedule
-		if def.IsTrigger() {
+		switch {
+		case def.IsTrigger():
 			kind = "trigger"
 			expr = def.Trigger
+		case def.IsOneShot():
+			kind = "one-shot"
+			expr = def.ResolvedAt().Local().Format("2006-01-02 15:04")
 		}
 
-		fmt.Printf("  %-20s %-8s %-25s agent=%s", name, kind, expr, def.Agent)
+		if def.EffectiveKind() == scheduler.JobKindScript {
+			fmt.Printf("  %-20s %-8s %-25s script=%s", name, kind, expr, truncateStr(def.Command, 40))
+		} else {
+			fmt.Printf("  %-20s %-8s %-25s agent=%s", name, kind, expr, def.Agent)
+		}
 		if def.Runtime != "" {
 			fmt.Printf("  runtime=%s", def.Runtime)
 		}
@@ -102,13 +121,22 @@ func runJobsList(cmd *cobra.Command, args []string) error {
 
 		// Show DB state if available.
 		if state, ok := schedState[name]; ok {
-			if state.LastRunAt.Valid {
-				fmt.Printf("  last=%s", state.LastRunAt.Time.Format("2006-01-02 15:04"))
-			}
-			if state.NextRunAt.Valid {
-				next := state.NextRunAt.Time
-				if next.After(time.Now()) {
-					fmt.Printf("  next=%s", next.Format("2006-01-02 15:04"))
+			switch {
+			case def.IsOneShot():
+				if state.Fired() {
+					fmt.Printf("  fired=%s", state.LastRunAt.Time.Local().Format("2006-01-02 15:04"))
+				} else {
+					fmt.Printf("  pending")
+				}
+			default:
+				if state.LastRunAt.Valid {
+					fmt.Printf("  last=%s", state.LastRunAt.Time.Format("2006-01-02 15:04"))
+				}
+				if state.NextRunAt.Valid {
+					next := state.NextRunAt.Time
+					if next.After(time.Now()) {
+						fmt.Printf("  next=%s", next.Format("2006-01-02 15:04"))
+					}
 				}
 			}
 		}
@@ -153,7 +181,15 @@ func runJobsRun(cmd *cobra.Command, args []string) error {
 			if def.IsTrigger() {
 				continue
 			}
-			label := fmt.Sprintf("%-20s  %-25s  agent=%s", n, def.Schedule, def.Agent)
+			expr := def.Schedule
+			if def.IsOneShot() {
+				expr = def.ResolvedAt().Local().Format("2006-01-02 15:04")
+			}
+			target := "agent=" + def.Agent
+			if def.EffectiveKind() == scheduler.JobKindScript {
+				target = "script=" + truncateStr(def.Command, 30)
+			}
+			label := fmt.Sprintf("%-20s  %-25s  %s", n, expr, target)
 			if def.Description != "" {
 				label += "  " + truncateStr(def.Description, 40)
 			}
@@ -218,5 +254,68 @@ func runJobsRun(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Triggered job %q (job ID %d)\n", name, jobID)
 	fmt.Println("The daemon will pick it up if running, or use 'minder deploy --foreground' to process it.")
 
+	return nil
+}
+
+func runJobsHistory(cmd *cobra.Command, args []string) error {
+	repoDir, err := resolveRepoDir(flagJobsRepo)
+	if err != nil {
+		return err
+	}
+	owner, repo, err := resolveOwnerRepo(repoDir)
+	if err != nil {
+		return err
+	}
+
+	conn, err := db.Open(db.DefaultDBPath())
+	if err != nil {
+		return err
+	}
+	store := db.NewStore(conn)
+	defer func() { _ = store.Close() }()
+
+	jobs, err := store.GetJobsByRepo(owner, repo)
+	if err != nil {
+		return err
+	}
+
+	name := ""
+	if len(args) > 0 {
+		name = args[0]
+	}
+
+	fmt.Printf("Job history for %s/%s", owner, repo)
+	if name != "" {
+		fmt.Printf(" (%s)", name)
+	}
+	fmt.Println(":")
+	fmt.Println()
+
+	count := 0
+	for _, job := range jobs {
+		if !job.SourceName.Valid || job.SourceName.String == "" {
+			continue
+		}
+		if name != "" && job.SourceName.String != name {
+			continue
+		}
+		if job.SourceType.String != "cron" && job.SourceType.String != "trigger" {
+			continue
+		}
+		count++
+		when := "-"
+		if job.QueuedAt.Valid {
+			when = job.QueuedAt.Time.Format("2006-01-02 15:04")
+		}
+		logPath := "-"
+		if job.AgentLog.Valid && job.AgentLog.String != "" {
+			logPath = job.AgentLog.String
+		}
+		fmt.Printf("  %-5d %-19s %-10s %-20s %-8s log=%s\n",
+			job.ID, when, job.Status, job.SourceName.String, job.EffectiveKind(), logPath)
+	}
+	if count == 0 {
+		fmt.Println("  No automation runs found.")
+	}
 	return nil
 }

@@ -75,6 +75,17 @@ func init() {
 // Name returns the runtime identifier.
 func (o *OpencodeRuntime) Name() string { return Name }
 
+// ResolveRunMetadata reports the normalized fresh-run model and best-effort
+// opencode CLI version before process launch.
+func (o *OpencodeRuntime) ResolveRunMetadata(ctx context.Context, inv runtime.Invocation) (runtime.RunMetadata, error) {
+	version, err := runtime.CommandVersion(ctx, o.binPath(), "--version")
+	return runtime.RunMetadata{
+		RuntimeName:    o.Name(),
+		Model:          runtime.NormalizeModelName(inv.Model),
+		RuntimeVersion: version,
+	}, err
+}
+
 // PrepareAgentDef writes the agent definition body to
 // `<workspace>/.opencode/agent/<name>.md`. Idempotent: overwrites if the file
 // already exists so updates to the embedded contract are picked up.

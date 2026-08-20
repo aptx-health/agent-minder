@@ -9,6 +9,7 @@ package coordinator
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +30,7 @@ const (
 	AutomationWatch   AutomationKind = "watch"
 	AutomationTrigger AutomationKind = "trigger"
 	AutomationCron    AutomationKind = "cron"
+	AutomationOneShot AutomationKind = "one-shot"
 )
 
 // Automation is the computed, printable view of an active automation. Keeping
@@ -40,6 +42,9 @@ type Automation struct {
 	Expression string
 	Labels     []string
 	Agent      string
+	// ExecutionKind distinguishes agent automations from script automations
+	// (db.JobKindAgent / db.JobKindScript).
+	ExecutionKind string
 	// Runtime, Model, MaxTurns, and MaxBudget are the configured automation
 	// overrides. Keep Runtime's legacy meaning so foreground output does not
 	// start printing deployment defaults as explicit overrides.
@@ -273,26 +278,43 @@ func TriggerRoutesFromConfig(cfg *scheduler.Config) []supervisor.TriggerRoute {
 	}
 
 	for name, def := range cfg.Jobs {
+		envJSON := ""
+		if len(def.Env) > 0 {
+			data, err := json.Marshal(def.Env)
+			if err == nil {
+				envJSON = string(data)
+			}
+		}
 		switch {
 		case len(def.TriggerLabels()) > 0:
 			routes = append(routes, supervisor.TriggerRoute{
 				Name:     name,
 				Labels:   def.TriggerLabels(),
-				Agent:    def.Agent,
+				Kind:     def.EffectiveKind(),
+				Agent:    routeAgent(def),
 				Runtime:  def.Runtime,
 				Model:    def.Model,
 				Budget:   def.Budget,
 				MaxTurns: def.MaxTurns,
+				Command:  def.Command,
+				Timeout:  def.Timeout,
+				EnvJSON:  envJSON,
+				WorkDir:  def.ScriptWorkDir(),
 			})
 		case def.TriggerMilestone() != "":
 			routes = append(routes, supervisor.TriggerRoute{
 				Name:      name,
 				Milestone: def.TriggerMilestone(),
-				Agent:     def.Agent,
+				Kind:      def.EffectiveKind(),
+				Agent:     routeAgent(def),
 				Runtime:   def.Runtime,
 				Model:     def.Model,
 				Budget:    def.Budget,
 				MaxTurns:  def.MaxTurns,
+				Command:   def.Command,
+				Timeout:   def.Timeout,
+				EnvJSON:   envJSON,
+				WorkDir:   def.ScriptWorkDir(),
 			})
 		}
 	}
@@ -339,6 +361,7 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 			Expression:         route.FilterString(),
 			Labels:             append([]string(nil), route.Labels...),
 			Agent:              route.Agent,
+			ExecutionKind:      route.Kind,
 			Runtime:            route.Runtime,
 			Model:              route.Model,
 			MaxTurns:           route.MaxTurns,
@@ -355,28 +378,50 @@ func ComputeAutomations(deploy *db.Deployment, routes []supervisor.TriggerRoute,
 
 	schedules, _ := store.GetEnabledSchedules(deployID)
 	for _, schedule := range schedules {
-		if !schedule.CronExpr.Valid {
-			continue
+		switch {
+		case schedule.CronExpr.Valid:
+			a := Automation{
+				Kind:               AutomationCron,
+				Name:               schedule.Name,
+				Expression:         schedule.CronExpr.String,
+				Agent:              schedule.Agent,
+				ExecutionKind:      schedule.Kind,
+				Runtime:            schedule.Runtime.String,
+				Model:              schedule.Model.String,
+				MaxTurns:           int(schedule.MaxTurns.Int64),
+				MaxBudget:          schedule.Budget.Float64,
+				EffectiveRuntime:   effectiveString(schedule.Runtime.String, deploy.Runtime),
+				EffectiveModel:     schedule.Model.String,
+				EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
+				EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
+				NextRunAt:          schedule.NextRunAt.Time,
+				HasNextRun:         schedule.NextRunAt.Valid,
+				Enabled:            true,
+			}
+			applyLastActivation(&a, store, deployID, "cron", schedule.Name)
+			automations = append(automations, a)
+		case schedule.IsOneShot():
+			a := Automation{
+				Kind:               AutomationOneShot,
+				Name:               schedule.Name,
+				Expression:         schedule.AtTime.Time.Format(time.RFC3339),
+				Agent:              schedule.Agent,
+				ExecutionKind:      schedule.Kind,
+				Runtime:            schedule.Runtime.String,
+				Model:              schedule.Model.String,
+				MaxTurns:           int(schedule.MaxTurns.Int64),
+				MaxBudget:          schedule.Budget.Float64,
+				EffectiveRuntime:   effectiveString(schedule.Runtime.String, deploy.Runtime),
+				EffectiveModel:     schedule.Model.String,
+				EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
+				EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
+				NextRunAt:          schedule.AtTime.Time,
+				HasNextRun:         true,
+				Enabled:            true,
+			}
+			applyLastActivation(&a, store, deployID, "at", schedule.Name)
+			automations = append(automations, a)
 		}
-		a := Automation{
-			Kind:               AutomationCron,
-			Name:               schedule.Name,
-			Expression:         schedule.CronExpr.String,
-			Agent:              schedule.Agent,
-			Runtime:            schedule.Runtime.String,
-			Model:              schedule.Model.String,
-			MaxTurns:           int(schedule.MaxTurns.Int64),
-			MaxBudget:          schedule.Budget.Float64,
-			EffectiveRuntime:   effectiveString(schedule.Runtime.String, deploy.Runtime),
-			EffectiveModel:     schedule.Model.String,
-			EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
-			EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
-			NextRunAt:          schedule.NextRunAt.Time,
-			HasNextRun:         schedule.NextRunAt.Valid,
-			Enabled:            true,
-		}
-		applyLastActivation(&a, store, deployID, "cron", schedule.Name)
-		automations = append(automations, a)
 	}
 	return automations
 }
@@ -406,20 +451,35 @@ func computeAutomationsFromSnapshot(deploy *db.Deployment, routes []supervisor.T
 		automations = append(automations, a)
 	}
 	for _, schedule := range schedules {
-		if !schedule.Enabled || !schedule.CronExpr.Valid {
+		if !schedule.Enabled {
 			continue
 		}
-		a := Automation{
-			Kind: AutomationCron, Name: schedule.Name, Expression: schedule.CronExpr.String,
-			Agent: schedule.Agent, Runtime: schedule.Runtime.String, Model: schedule.Model.String,
-			MaxTurns: int(schedule.MaxTurns.Int64), MaxBudget: schedule.Budget.Float64,
-			EffectiveRuntime: effectiveString(schedule.Runtime.String, deploy.Runtime), EffectiveModel: schedule.Model.String,
-			EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
-			EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
-			NextRunAt:          schedule.NextRunAt.Time, HasNextRun: schedule.NextRunAt.Valid, Enabled: true,
+		switch {
+		case schedule.CronExpr.Valid:
+			a := Automation{
+				Kind: AutomationCron, Name: schedule.Name, Expression: schedule.CronExpr.String,
+				Agent: schedule.Agent, Runtime: schedule.Runtime.String, Model: schedule.Model.String,
+				MaxTurns: int(schedule.MaxTurns.Int64), MaxBudget: schedule.Budget.Float64,
+				EffectiveRuntime: effectiveString(schedule.Runtime.String, deploy.Runtime), EffectiveModel: schedule.Model.String,
+				EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
+				EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
+				NextRunAt:          schedule.NextRunAt.Time, HasNextRun: schedule.NextRunAt.Valid, Enabled: true,
+			}
+			applyLastActivationFromJobs(&a, jobs, "cron", schedule.Name)
+			automations = append(automations, a)
+		case schedule.IsOneShot():
+			a := Automation{
+				Kind: AutomationOneShot, Name: schedule.Name, Expression: schedule.AtTime.Time.Format(time.RFC3339),
+				Agent: schedule.Agent, Runtime: schedule.Runtime.String, Model: schedule.Model.String,
+				MaxTurns: int(schedule.MaxTurns.Int64), MaxBudget: schedule.Budget.Float64,
+				EffectiveRuntime: effectiveString(schedule.Runtime.String, deploy.Runtime), EffectiveModel: schedule.Model.String,
+				EffectiveMaxTurns:  effectiveInt(int(schedule.MaxTurns.Int64), deploy.MaxTurns),
+				EffectiveMaxBudget: effectiveFloat(schedule.Budget.Float64, deploy.MaxBudgetUSD),
+				NextRunAt:          schedule.AtTime.Time, HasNextRun: true, Enabled: true,
+			}
+			applyLastActivationFromJobs(&a, jobs, "at", schedule.Name)
+			automations = append(automations, a)
 		}
-		applyLastActivationFromJobs(&a, jobs, "cron", schedule.Name)
-		automations = append(automations, a)
 	}
 	return automations
 }
@@ -485,4 +545,11 @@ func applyLastActivation(a *Automation, store *db.Store, deployID, sourceType, s
 	if job.QueuedAt.Valid {
 		a.LastActivationAt = job.QueuedAt.Time
 	}
+}
+
+func routeAgent(def scheduler.JobDef) string {
+	if def.EffectiveKind() == scheduler.JobKindScript {
+		return db.JobKindScript
+	}
+	return def.Agent
 }

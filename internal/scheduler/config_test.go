@@ -1,9 +1,12 @@
 package scheduler
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/aptx-health/agent-minder/internal/runtime/claudecode"
 	_ "github.com/aptx-health/agent-minder/internal/runtime/codex"
@@ -190,6 +193,66 @@ jobs:
 		}
 	})
 
+	t.Run("script job", func(t *testing.T) {
+		cfg, err := ParseConfig([]byte(`
+jobs:
+  lint:
+    kind: script
+    schedule: "0 * * * *"
+    command: "go test ./..."
+    timeout: 5m
+    env:
+      GOFLAGS: "-count=1"
+    working_dir: tools
+`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		j := cfg.Jobs["lint"]
+		if j.EffectiveKind() != JobKindScript {
+			t.Errorf("kind = %q, want script", j.EffectiveKind())
+		}
+		if j.Command != "go test ./..." {
+			t.Errorf("command = %q", j.Command)
+		}
+		if j.Env["GOFLAGS"] != "-count=1" {
+			t.Errorf("env GOFLAGS = %q", j.Env["GOFLAGS"])
+		}
+		if j.ScriptWorkDir() != "tools" {
+			t.Errorf("workdir = %q, want tools", j.ScriptWorkDir())
+		}
+	})
+
+	t.Run("script rejects agent fields", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  lint:
+    kind: script
+    schedule: "0 * * * *"
+    command: "go test ./..."
+    agent: autopilot
+    runtime: codex
+`))
+		if err == nil {
+			t.Fatal("expected error for mixed script/agent fields")
+		}
+		if got := err.Error(); !strings.Contains(got, "kind script cannot be combined") || !strings.Contains(got, "agent") {
+			t.Fatalf("error = %q, want clear mixed-fields message", got)
+		}
+	})
+
+	t.Run("script requires command", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  lint:
+    kind: script
+    schedule: "0 * * * *"
+`))
+		if err == nil || !strings.Contains(err.Error(), "command is required") {
+			t.Fatalf("error = %v, want command required", err)
+		}
+	})
+
 	t.Run("bad runtime", func(t *testing.T) {
 		_, err := ParseConfig([]byte(`
 jobs:
@@ -215,6 +278,152 @@ jobs:
 			t.Error("expected error for malformed model")
 		}
 	})
+}
+
+func TestParseConfigOneShot(t *testing.T) {
+	t.Run("in duration variants", func(t *testing.T) {
+		for _, in := range []string{"30s", "5m", "2h", "1d", "1h30m"} {
+			t.Run(in, func(t *testing.T) {
+				cfg, err := ParseConfig([]byte(fmt.Sprintf(`
+jobs:
+  test:
+    agent: autopilot
+    in: %q
+`, in)))
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				j := cfg.Jobs["test"]
+				if !j.IsOneShot() {
+					t.Fatal("expected one-shot")
+				}
+				if j.IsScheduled() || j.IsTrigger() {
+					t.Error("should not be scheduled or trigger")
+				}
+				if !j.ResolvedAt().After(time.Now().UTC()) {
+					t.Errorf("resolvedAt %v is not in the future", j.ResolvedAt())
+				}
+			})
+		}
+	})
+
+	t.Run("at future timestamp", func(t *testing.T) {
+		future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+		cfg, err := ParseConfig([]byte(fmt.Sprintf(`
+jobs:
+  test:
+    agent: autopilot
+    at: %q
+`, future)))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		j := cfg.Jobs["test"]
+		if !j.IsOneShot() {
+			t.Fatal("expected one-shot")
+		}
+		if !j.ResolvedAt().Equal(mustParseRFC3339(t, future)) {
+			t.Errorf("resolvedAt = %v, want %v", j.ResolvedAt(), future)
+		}
+	})
+
+	t.Run("at in the past is a validation error", func(t *testing.T) {
+		past := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+		_, err := ParseConfig([]byte(fmt.Sprintf(`
+jobs:
+  test:
+    agent: autopilot
+    at: %q
+`, past)))
+		if err == nil {
+			t.Fatal("expected error for at in the past")
+		}
+	})
+
+	t.Run("at bad format", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    at: "not-a-timestamp"
+`))
+		if err == nil {
+			t.Fatal("expected error for malformed at timestamp")
+		}
+	})
+
+	t.Run("in bad duration", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    in: "banana"
+`))
+		if err == nil {
+			t.Fatal("expected error for malformed in duration")
+		}
+	})
+
+	t.Run("in non-positive duration", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    in: "0s"
+`))
+		if err == nil {
+			t.Fatal("expected error for non-positive in duration")
+		}
+	})
+
+	t.Run("at and in together", func(t *testing.T) {
+		future := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+		_, err := ParseConfig([]byte(fmt.Sprintf(`
+jobs:
+  test:
+    agent: autopilot
+    at: %q
+    in: "5m"
+`, future)))
+		if err == nil {
+			t.Fatal("expected error for both at and in")
+		}
+	})
+
+	t.Run("in and schedule together", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    schedule: "0 * * * *"
+    in: "5m"
+`))
+		if err == nil {
+			t.Fatal("expected error for both schedule and in")
+		}
+	})
+
+	t.Run("in and trigger together", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+jobs:
+  test:
+    agent: autopilot
+    trigger: "label:bug"
+    in: "5m"
+`))
+		if err == nil {
+			t.Fatal("expected error for both trigger and in")
+		}
+	})
+}
+
+func mustParseRFC3339(t *testing.T, s string) time.Time {
+	t.Helper()
+	tm, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatalf("parse %q: %v", s, err)
+	}
+	return tm.UTC()
 }
 
 func TestLoadConfig(t *testing.T) {

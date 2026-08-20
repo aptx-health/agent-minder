@@ -89,6 +89,20 @@ func TestBuildArgs(t *testing.T) {
 	}
 }
 
+func TestModelOverrideReachesCLIInvocation(t *testing.T) {
+	args := buildArgs(runtime.Invocation{
+		AgentName: "autopilot",
+		Model:     " claude-sonnet-4-20250514 ",
+		Prompt:    "do the thing",
+	})
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--model" && args[i+1] == "claude-sonnet-4-20250514" {
+			return
+		}
+	}
+	t.Fatalf("model override did not reach Claude CLI args: %v", args)
+}
+
 func TestBuildArgs_OmitsZeroLimits(t *testing.T) {
 	args := buildArgs(runtime.Invocation{AgentName: "x", Prompt: "p"})
 	joined := strings.Join(args, " ")
@@ -167,7 +181,7 @@ func TestParseResult(t *testing.T) {
 	lines := []string{
 		`{"type":"system","subtype":"init"}`,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}`,
-		`{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.42,"session_id":"abc-123","result":"all done"}`,
+		`{"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.42,"session_id":"abc-123","model":"claude-sonnet-4-20250514","result":"all done","stop_reason":"end_turn"}`,
 	}
 	if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -193,8 +207,19 @@ func TestParseResult(t *testing.T) {
 	if got.FinalText != "all done" {
 		t.Errorf("FinalText = %q", got.FinalText)
 	}
+	if got.Model != "claude-sonnet-4-20250514" {
+		t.Errorf("Model = %q, want claude-sonnet-4-20250514", got.Model)
+	}
 	if len(got.Native) == 0 {
 		t.Error("Native raw is empty")
+	}
+	// StopReason must carry the plain token, not the raw JSON-quoted bytes
+	// (Expedition V leak L5: Result.StopReason == "\"end_turn\"" before the fix).
+	if got.StopReason != "end_turn" {
+		t.Errorf("StopReason = %q, want %q (no literal quotes)", got.StopReason, "end_turn")
+	}
+	if strings.Contains(got.StopReason, `"`) {
+		t.Errorf("StopReason %q contains literal quotes", got.StopReason)
 	}
 }
 

@@ -37,6 +37,13 @@ func HeartbeatPath(deployID string) string {
 	return filepath.Join(DeployDir(), deployID+".heartbeat")
 }
 
+// SocketPath returns the Unix domain socket path for a deployment's worker
+// API. Keyed by deploy ID alongside the PID and heartbeat files so M2-02
+// local discovery can compose them without a registry daemon.
+func SocketPath(deployID string) string {
+	return filepath.Join(DeployDir(), deployID+".sock")
+}
+
 // LogPath returns the daemon log path for a deployment.
 func LogPath(deployID string) string {
 	return filepath.Join(BaseDir(), "agents", deployID+".log")
