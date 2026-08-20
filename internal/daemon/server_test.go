@@ -118,7 +118,7 @@ func TestLegacyRoutes_Shapes(t *testing.T) {
     "max_turns": 50,
     "max_budget": 5,
     "runtime": "claude-code",
-    "model": "sonnet",
+    "analyzer_model": "sonnet",
     "skip_label": "no-agent",
     "auto_merge": false,
     "base_branch": "main"
