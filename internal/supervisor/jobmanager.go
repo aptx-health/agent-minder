@@ -51,6 +51,7 @@ type stageResult struct {
 	detail     string            // failure detail for failed stages
 	prDetected int               // PR number if one was opened during this stage
 	assessment *ReviewAssessment // review assessment if this was a review stage
+	costUSD    float64           // runtime-reported cost for this stage attempt (Result.TotalCostUSD)
 }
 
 // TestHooks allows tests to override SlotContext methods that call external
@@ -503,11 +504,6 @@ func (sc *SlotContext) TriggerLabels() []string {
 	return nil
 }
 
-// ParseCost extracts cost from the agent log.
-func (sc *SlotContext) ParseCost() float64 {
-	return parseCostFromLog(sc.LogPath)
-}
-
 // newSlotContext creates a SlotContext for a running job.
 func (s *Supervisor) newSlotContext(jobID int64, job *db.Job) *SlotContext {
 	home, _ := os.UserHomeDir()
@@ -792,6 +788,20 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 	var lastReviewRisk string
 	retryCount := map[string]int{} // stage name → retries so far
 
+	// jobCostSoFar tracks the highest per-stage cost this job has reported.
+	// recordStageCost mirrors the old log-scrape's semantics (which took the
+	// max total_cost_usd seen anywhere in the accumulated log) but sources the
+	// number from the runtime's own Result.TotalCostUSD instead — the same
+	// exact value for claude-code, and now a real, non-zero value for codex
+	// and opencode too (Exp V item 11, closes leaks L1/L2).
+	var jobCostSoFar float64
+	recordStageCost := func(cost float64) {
+		if cost > jobCostSoFar {
+			jobCostSoFar = cost
+			_ = sc.Store.UpdateJobCost(job.ID, jobCostSoFar)
+		}
+	}
+
 	for i := 0; i < len(stages); i++ {
 		stage := stages[i]
 		stageName := stage.Name
@@ -845,10 +855,8 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 			return nil
 		}
 
-		// Extract cost after each stage.
-		if cost := sc.ParseCost(); cost > 0 {
-			_ = sc.Store.UpdateJobCost(job.ID, cost)
-		}
+		// Record cost after each stage, from the runtime's own reported total.
+		recordStageCost(result.costUSD)
 
 		// Usage limit recovery: wait and resume the session.
 		if result.usageLimit {
@@ -871,6 +879,12 @@ func (m *DefaultJobManager) Run(ctx context.Context) error {
 				if err == runtimepkg.ErrNotSupported {
 					result = m.executeCodeStage(ctx, stage, agentName, logFile, "")
 					continue
+				}
+				if resumeResult != nil {
+					// The resumed attempt is its own runtime invocation with its
+					// own reported cost — record it the same way as any other
+					// stage attempt instead of waiting on a later log rescan.
+					recordStageCost(resumeResult.TotalCostUSD)
 				}
 
 				// Re-check: did the resumed session also hit a limit?
@@ -1001,7 +1015,15 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 	// final stageResult (named return) and the runtime result on the way out.
 	runID := m.beginAgentRun(ctx, stage.Name, agentName, inv, rt)
 	var runResult *runtimepkg.Result
-	defer func() { m.finishAgentRun(runID, runResult, res) }()
+	defer func() {
+		// Record the runtime's own reported cost on the way out, regardless of
+		// which return site fired — this is what Run() uses to update
+		// jobs.cost_usd (Exp V item 11: runtime-native cost, not log scrape).
+		if runResult != nil {
+			res.costUSD = runResult.TotalCostUSD
+		}
+		m.finishAgentRun(runID, runResult, res)
+	}()
 
 	exitCode, runResultRet, sink, runErr := sc.runStageThroughRuntime(ctx, inv, logFile)
 	runResult = runResultRet
@@ -1301,7 +1323,12 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 
 	runID := m.beginAgentRun(ctx, stage.Name, agentName, inv, rt)
 	var runResult *runtimepkg.Result
-	defer func() { m.finishAgentRun(runID, runResult, res) }()
+	defer func() {
+		if runResult != nil {
+			res.costUSD = runResult.TotalCostUSD
+		}
+		m.finishAgentRun(runID, runResult, res)
+	}()
 
 	_, runResult, _, _ = sc.runStageThroughRuntime(ctx, inv, logFile)
 
