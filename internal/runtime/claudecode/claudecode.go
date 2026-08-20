@@ -225,7 +225,7 @@ func (c *ClaudeRuntime) ParseResult(logPath string) (*runtime.Result, error) {
 		TotalCostUSD:      evt.TotalCost,
 		FinalText:         evt.Result,
 		IsError:           evt.IsError,
-		StopReason:        string(evt.StopReason),
+		StopReason:        evt.StopReason,
 		PermissionDenials: denials,
 		Native:            raw,
 	}, nil

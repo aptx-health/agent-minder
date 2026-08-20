@@ -18,7 +18,7 @@ type claudeResultEvent struct {
 	IsError           bool              `json:"is_error"`
 	NumTurns          int               `json:"num_turns"`
 	TotalCost         float64           `json:"total_cost_usd"`
-	StopReason        json.RawMessage   `json:"stop_reason"`
+	StopReason        string            `json:"stop_reason"`
 	Result            string            `json:"result"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	SessionID         string            `json:"session_id"`

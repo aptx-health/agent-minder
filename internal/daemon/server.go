@@ -314,14 +314,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		TotalSpent:   spent,
 		TotalBudget:  deploy.TotalBudgetUSD,
 		Config: DeployConfig{
-			MaxAgents:  deploy.MaxAgents,
-			MaxTurns:   deploy.MaxTurns,
-			MaxBudget:  deploy.MaxBudgetUSD,
-			Runtime:    deploy.Runtime,
-			Model:      deploy.AnalyzerModel,
-			SkipLabel:  deploy.SkipLabel,
-			AutoMerge:  deploy.AutoMerge,
-			BaseBranch: deploy.BaseBranch,
+			MaxAgents:     deploy.MaxAgents,
+			MaxTurns:      deploy.MaxTurns,
+			MaxBudget:     deploy.MaxBudgetUSD,
+			Runtime:       deploy.Runtime,
+			AnalyzerModel: deploy.AnalyzerModel,
+			SkipLabel:     deploy.SkipLabel,
+			AutoMerge:     deploy.AutoMerge,
+			BaseBranch:    deploy.BaseBranch,
 		},
 	})
 }
@@ -498,14 +498,19 @@ type StatusResponse struct {
 }
 
 type DeployConfig struct {
-	MaxAgents  int     `json:"max_agents"`
-	MaxTurns   int     `json:"max_turns"`
-	MaxBudget  float64 `json:"max_budget"`
-	Runtime    string  `json:"runtime"`
-	Model      string  `json:"model"`
-	SkipLabel  string  `json:"skip_label"`
-	AutoMerge  bool    `json:"auto_merge"`
-	BaseBranch string  `json:"base_branch"`
+	MaxAgents int     `json:"max_agents"`
+	MaxTurns  int     `json:"max_turns"`
+	MaxBudget float64 `json:"max_budget"`
+	Runtime   string  `json:"runtime"`
+	// AnalyzerModel is the model used for dependency-graph resolution, review
+	// assessment, and other analysis calls (internal/claudecli). It is NOT the
+	// model doer agents run with — see docs/research/fable-expedition/05-runtime-conformance-and-resolution.md
+	// §4.3 / §7 leak L3. Doers currently have no deployment-level model
+	// override (jobs.model / agent frontmatter only).
+	AnalyzerModel string `json:"analyzer_model"`
+	SkipLabel     string `json:"skip_label"`
+	AutoMerge     bool   `json:"auto_merge"`
+	BaseBranch    string `json:"base_branch"`
 }
 
 // JobResponse is the JSON shape for job endpoints.
