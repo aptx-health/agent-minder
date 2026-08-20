@@ -179,6 +179,17 @@ func (s *Store) GetLastJobBySource(deploymentID, sourceType, sourceName string) 
 	return &j, nil
 }
 
+// GetJobHistory returns past activations of a scheduled/triggered automation
+// (source_type 'cron' or 'trigger', source_name = name) within a deployment,
+// newest first, capped at limit.
+func (s *Store) GetJobHistory(deploymentID, sourceName string, limit int) ([]*Job, error) {
+	var jobs []*Job
+	err := s.db.Select(&jobs, `SELECT * FROM jobs
+		WHERE deployment_id = ? AND source_type IN ('cron', 'trigger') AND source_name = ?
+		ORDER BY id DESC LIMIT ?`, deploymentID, sourceName, limit)
+	return jobs, err
+}
+
 // GetJobsByRepo returns all jobs for a given owner/repo across all deployments,
 // most recent first.
 func (s *Store) GetJobsByRepo(owner, repo string) ([]*Job, error) {

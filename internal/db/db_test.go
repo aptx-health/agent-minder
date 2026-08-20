@@ -1173,6 +1173,106 @@ func TestRenameRepo(t *testing.T) {
 	}
 }
 
+func TestGetJobHistory(t *testing.T) {
+	s := testStore(t)
+
+	d1 := &Deployment{
+		ID: "deploy-a", RepoDir: "/tmp/a", Owner: "o", Repo: "a",
+		Mode: "issues", MaxAgents: 3, MaxTurns: 50, MaxBudgetUSD: 5,
+		AnalyzerModel: "sonnet", SkipLabel: "no-agent", TotalBudgetUSD: 25,
+		BaseBranch: "main", ReviewEnabled: true,
+	}
+	d2 := &Deployment{
+		ID: "deploy-b", RepoDir: "/tmp/b", Owner: "o", Repo: "b",
+		Mode: "issues", MaxAgents: 3, MaxTurns: 50, MaxBudgetUSD: 5,
+		AnalyzerModel: "sonnet", SkipLabel: "no-agent", TotalBudgetUSD: 25,
+		BaseBranch: "main", ReviewEnabled: true,
+	}
+	if err := s.CreateDeployment(d1); err != nil {
+		t.Fatalf("CreateDeployment d1: %v", err)
+	}
+	if err := s.CreateDeployment(d2); err != nil {
+		t.Fatalf("CreateDeployment d2: %v", err)
+	}
+
+	mk := func(deployID, name, sourceType, sourceName string) *Job {
+		return &Job{
+			DeploymentID: deployID,
+			Agent:        "maintainer",
+			Name:         name,
+			Owner:        "o",
+			Repo:         deployID,
+			Status:       StatusDone,
+			SourceType:   sql.NullString{String: sourceType, Valid: true},
+			SourceName:   sql.NullString{String: sourceName, Valid: true},
+		}
+	}
+
+	jobs := []*Job{
+		mk("deploy-a", "nightly-scan-1", "cron", "nightly-scan"),
+		mk("deploy-a", "nightly-scan-2", "cron", "nightly-scan"),
+		mk("deploy-a", "ready-issues-1", "trigger", "ready-issues"),
+		// Different deployment, same automation name — must not leak in.
+		mk("deploy-b", "nightly-scan-1", "cron", "nightly-scan"),
+		// Non-automation job (no provenance) — must not appear in history.
+		{DeploymentID: "deploy-a", Agent: "autopilot", Name: "issue-1", Owner: "o", Repo: "deploy-a", Status: StatusDone},
+	}
+	for _, j := range jobs {
+		if err := s.CreateJob(j); err != nil {
+			t.Fatalf("CreateJob(%s): %v", j.Name, err)
+		}
+	}
+
+	cronHistory, err := s.GetJobHistory("deploy-a", "nightly-scan", 10)
+	if err != nil {
+		t.Fatalf("GetJobHistory(cron): %v", err)
+	}
+	if len(cronHistory) != 2 {
+		t.Fatalf("got %d cron history rows, want 2", len(cronHistory))
+	}
+	// Newest first.
+	if cronHistory[0].Name != "nightly-scan-2" || cronHistory[1].Name != "nightly-scan-1" {
+		t.Errorf("cron history order = [%s, %s], want [nightly-scan-2, nightly-scan-1]",
+			cronHistory[0].Name, cronHistory[1].Name)
+	}
+
+	triggerHistory, err := s.GetJobHistory("deploy-a", "ready-issues", 10)
+	if err != nil {
+		t.Fatalf("GetJobHistory(trigger): %v", err)
+	}
+	if len(triggerHistory) != 1 || triggerHistory[0].Name != "ready-issues-1" {
+		t.Fatalf("got %v, want single ready-issues-1 row", triggerHistory)
+	}
+
+	// Deployment scoping: deploy-b's nightly-scan must not appear when
+	// querying deploy-a, and vice versa.
+	otherDeployHistory, err := s.GetJobHistory("deploy-b", "nightly-scan", 10)
+	if err != nil {
+		t.Fatalf("GetJobHistory(deploy-b): %v", err)
+	}
+	if len(otherDeployHistory) != 1 || otherDeployHistory[0].DeploymentID != "deploy-b" {
+		t.Fatalf("got %v, want single deploy-b row", otherDeployHistory)
+	}
+
+	// Limit is respected.
+	limited, err := s.GetJobHistory("deploy-a", "nightly-scan", 1)
+	if err != nil {
+		t.Fatalf("GetJobHistory(limit=1): %v", err)
+	}
+	if len(limited) != 1 {
+		t.Fatalf("got %d rows with limit=1, want 1", len(limited))
+	}
+
+	// Unknown automation name yields no rows, not an error.
+	none, err := s.GetJobHistory("deploy-a", "does-not-exist", 10)
+	if err != nil {
+		t.Fatalf("GetJobHistory(unknown): %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("got %d rows for unknown automation, want 0", len(none))
+	}
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
