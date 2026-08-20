@@ -78,10 +78,48 @@ func (s *liveStatusSink) OnUsageLimit() {
 	}
 }
 
+// modelRank is one precedence layer in resolveModel's walk. It returns the
+// model it supplies, or "" to defer to the next, less specific rank.
+type modelRank func() string
+
+// resolveModel picks the effective model for one stage, most specific first,
+// per Exp V §5:
+//
+//  1. the stage's own `model:` (StageContract)
+//  2. the `model:` frontmatter of the agent THIS STAGE runs (not necessarily
+//     the job's primary agent — a review stage may run a different agent)
+//  3. the job's model override (jobs.yaml / watch route / EffectiveModel)
+//  4. empty — the runtime picks its own default; never substitute a
+//     hardcoded model here.
+//
+// Deployment (`doer_model`), repo, and user config layers are Exp V §5 ranks
+// 4-6. They need new columns/config keys that are out of scope for #528;
+// they slot in as additional entries in the ranks slice below without
+// touching callers.
+func resolveModel(sc *SlotContext, stage StageContract, agentName string) string {
+	ranks := []modelRank{
+		func() string { return stage.Model },
+		func() string {
+			agentContract, err := ResolveContract(sc.RepoDir, agentName)
+			if err != nil {
+				return ""
+			}
+			return agentContract.Model
+		},
+		func() string { return sc.Job.EffectiveModel() },
+	}
+	for _, rank := range ranks {
+		if m := rank(); m != "" {
+			return m
+		}
+	}
+	return ""
+}
+
 // runtimeInvocationFor builds a runtime.Invocation for a stage from existing
 // SlotContext / job / deploy data. It mirrors buildAgentArgs so the runtime
 // receives equivalent limits, tools, prompts, and env.
-func runtimeInvocationFor(sc *SlotContext, agentName, prompt, systemPrompt string) runtimepkg.Invocation {
+func runtimeInvocationFor(sc *SlotContext, stage StageContract, agentName, prompt, systemPrompt string) runtimepkg.Invocation {
 	job := sc.Job
 	maxTurns := job.EffectiveMaxTurns(sc.Deploy)
 	maxBudget := job.EffectiveMaxBudget(sc.Deploy)
@@ -103,10 +141,7 @@ func runtimeInvocationFor(sc *SlotContext, agentName, prompt, systemPrompt strin
 	if sc.GHToken != "" {
 		env["GITHUB_TOKEN"] = sc.GHToken
 	}
-	model := ""
-	if agentName == job.Agent {
-		model = job.EffectiveModel()
-	}
+	model := resolveModel(sc, stage, agentName)
 
 	return runtimepkg.Invocation{
 		Workspace:    runtimepkg.Workspace{Dir: wsDir},

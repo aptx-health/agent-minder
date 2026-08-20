@@ -23,6 +23,7 @@ type AgentContract struct {
 	BranchPrefix string   `yaml:"branch_prefix"` // worktree branch naming (default: "agent/issue")
 	Dedup        []string `yaml:"dedup"`         // dedup strategies
 	Timeout      string   `yaml:"timeout"`       // overall job timeout (e.g., "2h", "30m")
+	Model        string   `yaml:"model"`         // preferred model for this agent (empty: runtime default)
 
 	// Context providers — what context to assemble for this agent's prompt.
 	// Available: issue, repo_info, recent_commits:<days>, file_list, lessons, sibling_jobs, dep_graph
@@ -44,6 +45,7 @@ type StageContract struct {
 	OnFailure       string `yaml:"on_failure"`       // "bail", "skip", "retry" (default: "bail")
 	Retries         int    `yaml:"retries"`          // number of retries if on_failure=retry
 	CapturesLessons bool   `yaml:"captures_lessons"` // extract and save lessons from this stage's output
+	Model           string `yaml:"model"`            // preferred model for this stage (empty: fall through to agent/job)
 }
 
 // DefaultContract returns the default contract for agents that don't specify one.

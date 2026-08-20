@@ -1009,7 +1009,7 @@ func (m *DefaultJobManager) executeCodeStage(ctx context.Context, stage StageCon
 		return stageResult{success: false, bailed: true}
 	}
 
-	inv := runtimeInvocationFor(sc, agentName, prompt, lessonsPrompt)
+	inv := runtimeInvocationFor(sc, stage, agentName, prompt, lessonsPrompt)
 
 	// Record a durable run row for this stage attempt. finishAgentRun reads the
 	// final stageResult (named return) and the runtime result on the way out.
@@ -1319,7 +1319,7 @@ func (m *DefaultJobManager) executeReviewStage(ctx context.Context, stage StageC
 		sc.EmitEvent(EventError, fmt.Sprintf("No runtime configured for review of %s", sc.JobLabel()))
 		return stageResult{success: false}
 	}
-	inv := runtimeInvocationFor(sc, agentName, prompt, "")
+	inv := runtimeInvocationFor(sc, stage, agentName, prompt, "")
 
 	runID := m.beginAgentRun(ctx, stage.Name, agentName, inv, rt)
 	var runResult *runtimepkg.Result
