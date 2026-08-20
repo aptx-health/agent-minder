@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aptx-health/agent-minder/internal/db"
 	runtimepkg "github.com/aptx-health/agent-minder/internal/runtime"
 	_ "github.com/aptx-health/agent-minder/internal/runtime/codex"
 	opencodert "github.com/aptx-health/agent-minder/internal/runtime/opencode"
@@ -242,6 +243,136 @@ func TestExecuteCodeStage_RuntimeLiveStatus(t *testing.T) {
 	// CurrentTool/ToolInput were cleared by the final OnToolEnd event.
 	if found.CurrentTool != "" {
 		t.Errorf("expected CurrentTool cleared after OnToolEnd, got %q", found.CurrentTool)
+	}
+}
+
+// newModelResolutionSlot builds a SlotContext + fakeRuntime + open log file
+// wired up the same way TestExecuteCodeStage_RuntimeLiveStatus does, so the
+// model-precedence tests below only need to vary the agent contract and job.
+func newModelResolutionSlot(t *testing.T, store *db.Store, deploy *db.Deployment, job *db.Job) (*SlotContext, *fakeRuntime) {
+	t.Helper()
+
+	sup := NewTestSupervisor(store, deploy, deploy.RepoDir)
+	rt := &fakeRuntime{}
+	sup.SetRuntime(rt)
+	sup.RegisterTestJob(job)
+
+	sc := sup.newSlotContext(job.ID, job)
+	sc.LogPath = filepath.Join(t.TempDir(), "agent.log")
+	sc.Hooks = &TestHooks{
+		SetupWorktreeFn:  func() error { return nil },
+		EnsureAgentDefFn: func(_ AgentName) (AgentDefSource, error) { return AgentDefBuiltIn, nil },
+		DetectPRFn:       func(_ context.Context) int { return 0 },
+	}
+	return sc, rt
+}
+
+// writeAgentDef installs a repo-level agent definition (`.claude/agents/<name>.md`)
+// with the given frontmatter model, so ResolveContract picks it up as rank 2
+// of resolveModel (Exp V §5).
+func writeAgentDef(t *testing.T, repoDir, name, model string) {
+	t.Helper()
+	agentsDir := filepath.Join(repoDir, ".claude", "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\nmodel: " + model + "\n---\nagent body"
+	if err := os.WriteFile(filepath.Join(agentsDir, name+".md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestResolveModel_AgentFrontmatter asserts that a `model:` set in an agent
+// definition's YAML frontmatter (rank 2 of Exp V §5) reaches the constructed
+// runtime.Invocation when nothing more specific (stage, job) overrides it.
+// This is the regression test for #528 cause A: AgentContract previously had
+// no Model field, so frontmatter model: was silently discarded.
+func TestResolveModel_AgentFrontmatter(t *testing.T) {
+	store := testStore(t)
+	deploy := testDeployment(t, store)
+	job := testJob(t, store, deploy)
+
+	writeAgentDef(t, deploy.RepoDir, "autopilot", "haiku")
+
+	sc, rt := newModelResolutionSlot(t, store, deploy, job)
+	logFile, err := os.Create(sc.LogPath)
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+	defer func() { _ = logFile.Close() }()
+
+	mgr := NewDefaultJobManager(sc, &AgentContract{Name: "autopilot", Output: "pr"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = mgr.executeCodeStage(ctx, StageContract{Name: "implement"}, "autopilot", logFile, "")
+
+	if rt.lastInv.Model != "haiku" {
+		t.Errorf("invocation model = %q, want %q (from agent frontmatter)", rt.lastInv.Model, "haiku")
+	}
+}
+
+// TestResolveModel_StageAgentDiffersFromJobAgent is the core #528 regression
+// test for cause B: the model was previously applied only when the stage's
+// agent equaled the job's primary agent (`agentName == job.Agent`), so every
+// non-primary stage silently ran on the CLI default. Here the stage runs
+// "bug-fixer" while the job's primary agent is "autopilot"; the job-level
+// model override must still reach the invocation.
+func TestResolveModel_StageAgentDiffersFromJobAgent(t *testing.T) {
+	store := testStore(t)
+	deploy := testDeployment(t, store)
+	job := testJob(t, store, deploy, func(j *db.Job) {
+		j.Agent = "autopilot"
+		j.Model = sql.NullString{String: "sonnet", Valid: true}
+	})
+
+	// "bug-fixer" has no repo-level contract, so ResolveContract falls back to
+	// DefaultContract, whose Model is empty — the job override (rank 3) must
+	// win since the stage agent differs from job.Agent.
+	sc, rt := newModelResolutionSlot(t, store, deploy, job)
+	logFile, err := os.Create(sc.LogPath)
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+	defer func() { _ = logFile.Close() }()
+
+	mgr := NewDefaultJobManager(sc, &AgentContract{Name: "autopilot", Output: "pr"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = mgr.executeCodeStage(ctx, StageContract{Name: "fix", Agent: "bug-fixer"}, "bug-fixer", logFile, "")
+
+	if rt.lastInv.AgentName != "bug-fixer" {
+		t.Fatalf("expected stage to run bug-fixer, got %q", rt.lastInv.AgentName)
+	}
+	if rt.lastInv.Model != "sonnet" {
+		t.Errorf("invocation model = %q, want %q (job override, stage agent != job agent)", rt.lastInv.Model, "sonnet")
+	}
+}
+
+// TestResolveModel_EmptyWhenUnconfigured asserts that when no stage, agent,
+// or job model is configured, the invocation model is empty so the runtime
+// falls through to its own default — never a hardcoded Minder default.
+func TestResolveModel_EmptyWhenUnconfigured(t *testing.T) {
+	store := testStore(t)
+	deploy := testDeployment(t, store)
+	job := testJob(t, store, deploy)
+
+	sc, rt := newModelResolutionSlot(t, store, deploy, job)
+	logFile, err := os.Create(sc.LogPath)
+	if err != nil {
+		t.Fatalf("create log: %v", err)
+	}
+	defer func() { _ = logFile.Close() }()
+
+	mgr := NewDefaultJobManager(sc, &AgentContract{Name: "autopilot", Output: "pr"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = mgr.executeCodeStage(ctx, StageContract{Name: "implement"}, "autopilot", logFile, "")
+
+	if rt.lastInv.Model != "" {
+		t.Errorf("invocation model = %q, want empty (runtime default)", rt.lastInv.Model)
 	}
 }
 
