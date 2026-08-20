@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -253,6 +254,86 @@ func TestRenderReviewContext(t *testing.T) {
 	}
 	if !contains(result, "go test ./...") {
 		t.Error("missing test command")
+	}
+}
+
+func TestRenderUserInstructions_PresentAppearsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".agent-minder"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".agent-minder", "AGENTS.md"), []byte("Never bump major versions.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store, deploy, job := testContextSetup(t)
+	sc := &SlotContext{
+		Store: store, Deploy: deploy, Job: job,
+		Owner: "acme", Repo: "widgets", BaseBranch: "main",
+	}
+	job.PRNumber = sql.NullInt64{Int64: 99, Valid: true}
+
+	cases := map[string]string{
+		"reactive": AssembleContext(context.Background(), sc, []string{"repo_info"}),
+		"review":   renderReviewContext(context.Background(), sc),
+	}
+
+	for name, result := range cases {
+		if !contains(result, "## User instructions") {
+			t.Errorf("%s prompt missing user instructions header", name)
+		}
+		if !contains(result, "Never bump major versions.") {
+			t.Errorf("%s prompt missing user instructions content", name)
+		}
+		// Content should appear exactly once.
+		count := 0
+		for i := 0; i+len("Never bump major versions.") <= len(result); i++ {
+			if result[i:i+len("Never bump major versions.")] == "Never bump major versions." {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("%s prompt: expected user instructions content once, got %d", name, count)
+		}
+	}
+}
+
+func TestRenderUserInstructions_AbsentFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	store, deploy, job := testContextSetup(t)
+	sc := &SlotContext{
+		Store: store, Deploy: deploy, Job: job,
+		Owner: "acme", Repo: "widgets", BaseBranch: "main",
+	}
+
+	result := AssembleContext(context.Background(), sc, []string{"repo_info"})
+	if contains(result, "## User instructions") {
+		t.Error("absent file should not contribute a user instructions section")
+	}
+}
+
+func TestRenderUserInstructions_EmptyFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".agent-minder"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".agent-minder", "AGENTS.md"), []byte("   \n\t\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store, deploy, job := testContextSetup(t)
+	sc := &SlotContext{
+		Store: store, Deploy: deploy, Job: job,
+		Owner: "acme", Repo: "widgets", BaseBranch: "main",
+	}
+
+	result := AssembleContext(context.Background(), sc, []string{"repo_info"})
+	if contains(result, "## User instructions") {
+		t.Error("empty file should not contribute a user instructions section")
 	}
 }
 

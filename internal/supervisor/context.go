@@ -3,7 +3,9 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -30,6 +32,7 @@ func AssembleContext(ctx context.Context, sc *SlotContext, providers []string) s
 	}
 
 	b.WriteString(renderHouseStyle())
+	b.WriteString(renderUserInstructions())
 
 	return b.String()
 }
@@ -74,6 +77,40 @@ tracks, and never to verify or double-check your own work.
 // renderHouseStyle returns the shared working agreement section.
 func renderHouseStyle() string {
 	return houseStyle
+}
+
+// userInstructionsPath returns the path to the user-level instruction file.
+// Consistent with how the rest of the codebase resolves ~/.agent-minder
+// (e.g. daemon.BaseDir, db.DefaultDBPath): no dedicated env override exists
+// for the base directory today, so this falls back to os.UserHomeDir().
+func userInstructionsPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".agent-minder", "AGENTS.md")
+}
+
+// renderUserInstructions returns the contents of the user-level instruction
+// file (~/.agent-minder/AGENTS.md), if present. This is standing guidance
+// that applies across every repo and runtime — the layer above house style,
+// below repo-level agent contracts. An absent or empty file contributes
+// nothing; a read error is treated the same way rather than failing the
+// prompt assembly.
+func renderUserInstructions() string {
+	path := userInstructionsPath()
+	if path == "" {
+		return ""
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	trimmed := strings.TrimSpace(string(content))
+	if trimmed == "" {
+		return ""
+	}
+	return "\n## User instructions\n\n" + trimmed + "\n"
 }
 
 func renderProvider(ctx context.Context, sc *SlotContext, provider string) string {
@@ -348,6 +385,7 @@ func renderReviewContext(ctx context.Context, sc *SlotContext) string {
 	b.WriteString("\n")
 
 	b.WriteString(renderHouseStyle())
+	b.WriteString(renderUserInstructions())
 
 	return b.String()
 }
