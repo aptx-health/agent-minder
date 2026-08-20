@@ -899,29 +899,6 @@ func (s *Supervisor) UpdateLiveStatus(jobID int64, status LiveStatus) {
 
 // --- Utility functions used by SlotContext and JobManager ---
 
-// parseCostFromLog extracts cost from the agent log (stream-json format).
-func parseCostFromLog(logPath string) float64 {
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return 0
-	}
-	lines := strings.Split(string(data), "\n")
-	var cost float64
-	for _, line := range lines {
-		if idx := strings.Index(line, `"total_cost_usd"`); idx >= 0 {
-			rest := line[idx+len(`"total_cost_usd"`):]
-			rest = strings.TrimLeft(rest, `: `)
-			end := strings.IndexAny(rest, ",}")
-			if end > 0 {
-				if v, err := strconv.ParseFloat(strings.TrimSpace(rest[:end]), 64); err == nil && v > cost {
-					cost = v
-				}
-			}
-		}
-	}
-	return cost
-}
-
 // detectPRFromLog scans the log for PR creation output.
 func detectPRFromLog(logPath, owner, repo string) int {
 	data, err := os.ReadFile(logPath)
