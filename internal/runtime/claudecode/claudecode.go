@@ -56,6 +56,29 @@ func (c *ClaudeRuntime) ResolveRunMetadata(ctx context.Context, inv runtime.Invo
 	}, err
 }
 
+// Capabilities reports the local Claude Code CLI and the model aliases Minder
+// accepts before launch.
+func (c *ClaudeRuntime) Capabilities(ctx context.Context) (runtime.RuntimeCapabilities, error) {
+	caps := runtime.ProbeCLIVersion(ctx, Name, c.binPath(), "--version")
+	caps.Models = []string{
+		"claude-haiku-4-5",
+		"claude-sonnet-4-5",
+		"claude-opus-4-1",
+	}
+	caps.Aliases = map[string]string{
+		"haiku":  "claude-haiku-4-5",
+		"sonnet": "claude-sonnet-4-5",
+		"opus":   "claude-opus-4-1",
+	}
+	caps.ModelPrefixes = []string{"claude-"}
+	caps.Features = runtime.RuntimeFeatures{
+		StructuredOutput: true,
+		BudgetFlag:       true,
+		SessionResume:    true,
+	}
+	return caps, nil
+}
+
 // binPath returns the configured binary path or the default.
 func (c *ClaudeRuntime) binPath() string {
 	if c.Bin != "" {

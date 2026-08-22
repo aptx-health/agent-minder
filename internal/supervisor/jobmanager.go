@@ -1614,14 +1614,15 @@ func SlotContextForTest(store *db.Store, deploy *db.Deployment, job *db.Job) *Sl
 // It sets up the event channel, running map, and a no-op GH client factory.
 func NewTestSupervisor(store *db.Store, deploy *db.Deployment, repoDir string) *Supervisor {
 	return &Supervisor{
-		store:     store,
-		deploy:    deploy,
-		repoDir:   repoDir,
-		owner:     deploy.Owner,
-		repo:      deploy.Repo,
-		running:   make(map[int64]*runState),
-		maxAgents: deploy.MaxAgents,
-		events:    eventbus.New[Envelope](256),
+		store:        store,
+		deploy:       deploy,
+		repoDir:      repoDir,
+		owner:        deploy.Owner,
+		repo:         deploy.Repo,
+		running:      make(map[int64]*runState),
+		preflighting: make(map[int64]bool),
+		maxAgents:    deploy.MaxAgents,
+		events:       eventbus.New[Envelope](256),
 		ghClientFactory: func(token string) *ghpkg.Client {
 			return ghpkg.NewClient("") // no-op client (no token = all calls fail gracefully)
 		},

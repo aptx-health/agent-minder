@@ -42,6 +42,13 @@ type fakeAgentRuntime struct{}
 
 func (fakeAgentRuntime) Name() string { return "fake" }
 
+// Capabilities reports the fake runtime as always available with no model
+// restrictions, so the E2E pipeline's preflight check (#634) never blocks the
+// simulated job.
+func (fakeAgentRuntime) Capabilities(context.Context) (runtimepkg.RuntimeCapabilities, error) {
+	return runtimepkg.RuntimeCapabilities{RuntimeName: "fake", Available: true}, nil
+}
+
 func (fakeAgentRuntime) PrepareAgentDef(context.Context, runtimepkg.Workspace, runtimepkg.AgentDefinition) error {
 	return nil
 }

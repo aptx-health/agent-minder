@@ -367,6 +367,11 @@ func updateJobBlockedFailure(e sqlx.Execer, id int64, reason, detail string) err
 	return err
 }
 
+// UpdateJobBlockedTx records a pre-run block with failure context.
+func UpdateJobBlockedTx(tx *sqlx.Tx, id int64, reason, detail string) error {
+	return updateJobBlockedFailure(tx, id, reason, detail)
+}
+
 // UpdateJobDeps updates the dependencies JSON for a job.
 func (s *Store) UpdateJobDeps(id int64, deps []int) error {
 	data, _ := json.Marshal(deps)

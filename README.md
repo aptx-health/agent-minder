@@ -142,6 +142,9 @@ runtime: codex
 4. User default in `~/.agent-minder/config.yaml`.
 5. Built-in default: `claude-code`.
 
+Run `minder doctor --repo .` to print the local runtime capability matrix and
+validate any `.agent-minder/jobs.yaml` runtime/model entries before deploying.
+
 ### opencode runtime
 
 opencode (`--runtime opencode`) is model-agnostic: it drives any provider through

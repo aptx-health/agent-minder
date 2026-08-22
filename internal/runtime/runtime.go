@@ -46,6 +46,11 @@ type AgentRuntime interface {
 	// (e.g., "claude-code", "codex").
 	Name() string
 
+	// Capabilities reports local runtime availability, model support, and
+	// feature flags. Callers should normally use CachedCapabilities so slow CLI
+	// probes run at most once per process.
+	Capabilities(ctx context.Context) (RuntimeCapabilities, error)
+
 	// PrepareAgentDef materializes an agent definition into the workspace in
 	// whatever form this runtime expects (e.g., .claude/agents/<name>.md for
 	// Claude Code). Idempotent. Called once per agent before Run.
