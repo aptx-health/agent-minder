@@ -44,7 +44,13 @@ CREATE TABLE runs (
   input_timeout DATETIME,
   within_charter TEXT,                    -- true | false | unknown — deterministic render field
                                           -- for the current park; 'unknown' must NOT read as
-                                          -- approval (ADR 0014 open q, resolved by TUI need)
+                                          -- approval (ADR 0014/0021 authority verdict)
+  -- phase + review intent (ADR 0020) — GENERAL fields, not charter-specific
+  phase         TEXT,                     -- general run phase; `expected_red` is one value
+  review_intent TEXT,                     -- none | agent | human — explicit, NOT inferred from branch
+  -- ratified-contract protection (ADR 0018) — GENERAL ratified-artifact capability
+  checkpoint_ref TEXT,                    -- immutable git object (commit/tree SHA) at a ratification gate
+  manifest_json TEXT,                     -- protected-artifact identities + digests (drift-checked)
   -- liveness / scheduling
   owner         TEXT,                     -- daemon instance id while running
   heartbeat_at  DATETIME,
@@ -67,6 +73,12 @@ CREATE TABLE run_steps (
   step_name    TEXT NOT NULL,             -- identity within the run
   attempt      INTEGER NOT NULL DEFAULT 1,
   kind         TEXT NOT NULL,             -- agent | script
+  -- station execution + claim (ADR 0021) — who actually did the work
+  execution    TEXT,                      -- resolved holder kind: agent | human (frozen at claim; config declares eligibility)
+  claimed_by   TEXT,                      -- claim identity; makes builder≠verifier enforceable deterministically
+  artifact_json TEXT,                     -- the step's produced artifact/output (done.artifact, .steps.<name> in templating,
+                                          -- AND the home for workflow-specific payloads: charter draft, verifier verdict,
+                                          -- charter_version, scenarios — kept OUT of columns to honor ADR 0017)
   -- agent provenance + basis honesty (Expedition V, [[fable-expedition-crosswalk]])
   agent        TEXT, runtime TEXT, runtime_version TEXT,
   model_requested TEXT,                   -- what config asked for
@@ -141,6 +153,14 @@ This is what makes **skip-missed** and **one-shot-no-refire** survive a Ctrl-C/r
 only scheduler state that must persist (harvest agent-minder's `job_schedules` last-run/enabled
 semantics, minus the definition columns, which now live in config).
 
+## The state is SQLite + Git; GitHub is a projection
+
+The authoritative state of any run is **this database plus Git commit hashes** — `checkpoint_ref`
+and the branch/commit refs recorded per step are Git objects, not GitHub artifacts. GitHub
+issues/PRs/CI are an **optional projection** of this state ([[0002-local-sqlite-source-of-truth]],
+[[0020-expected-red-and-topology-agnostic-review]], [[0021-step-execution-and-done]]); kill
+GitHub and the truth survives. Git is a dependency; GitHub is not.
+
 ## Not in the database
 
 - **Job/step definitions** — config YAML.
@@ -148,6 +168,11 @@ semantics, minus the definition columns, which now live in config).
   secret *names* a step references, never values.
 - **Authority audit history** — the event log (`run.answered`, `authority.escalated/granted`
   carry who/mode/within-charter). The run row holds only the *current* park payload.
+- **Charter-specific data** — `charter_version`, verifier verdicts, ratified scenarios, and the
+  like are **not columns** (that would privilege charter, ADR 0017). They ride in
+  `run_steps.artifact_json` as produced-artifact payloads. The engine columns above
+  (`phase`, `review_intent`, `checkpoint_ref`, `manifest_json`, `execution`, `claimed_by`) are
+  all **general** capabilities the charter workflow is merely the first consumer of.
 
 ## Migrations
 

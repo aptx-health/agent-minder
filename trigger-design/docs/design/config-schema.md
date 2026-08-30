@@ -192,9 +192,25 @@ such record, so "why did this run behave that way" was unanswerable after an edi
 via `GET /version`/status and stamp it on runs, so a run is traceable to the exact config that
 produced it.
 
+## Per-step `execution` and `done` (ADR 0021)
+
+A step also declares **who does it** and **what "done" means** (accepted 2026-08-30):
+- `execution: agent | human | [agent, human]` — eligibility; the menu form is an open station
+  claimed per-run (default `agent`). See [[0021-step-execution-and-done]].
+- `done: { artifact: <schema>, checks: [scripts], approve: human | agent }` — the deterministic
+  advance conditions (conductor-owned) plus an optional ratification gate (workflow-owned).
+- A **gate** is a step with only `done.approve`.
+
+## Multi-base GitHub trigger selectors (ADR 0020)
+
+The `github` trigger must support **multiple base selectors** (not one base per repo), so review
+intent isn't coupled to a single branch. Exact syntax deferred.
+
 ## Open items
 
 - Webhook trigger transport and auth — see R2 / R6.
+- `execution`/`done` field grammar and whether `done.checks` grows a small expression language.
+- Multi-base selector syntax.
 - Exact permissions schema — see R5.
 - Whether `with`/templating context includes prior-step outputs by default or opt-in —
   decide in [[0010-go-template-variables]].

@@ -1,13 +1,13 @@
 ---
 title: "ADR 0018 — Ratified-contract protection: immutable checkpoint + digest manifest + drift signal"
-status: deferred
+status: accepted
 date: 2026-08-30
-tags: [architecture, charter, governance, conformance, workflow, checkpoint, deferred]
+tags: [architecture, charter, governance, conformance, workflow, checkpoint]
 superseded_by:
 ---
 
-<!-- deferred: records the decision direction; mechanism detail lives in [[charter-workflow]].
-     Awaiting Dustin's ratification — flip to accepted on sign-off. -->
+<!-- Ratified 2026-08-30. Mechanism detail lives in [[charter-workflow]]; general schema
+     fields (checkpoint_ref, manifest_json) in [[db-schema]]. -->
 
 ## Context
 

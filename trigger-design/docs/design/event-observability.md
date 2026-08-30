@@ -53,6 +53,8 @@ Keyed to the run state machine ([[run-lifecycle-and-slots]]) and the trigger/dae
 | Step | `step.started`, `step.succeeded`, `step.failed`, `step.retrying` |
 | Parking | `run.blocked`, `run.awaiting_input`, `run.answered`, `run.released` |
 | Authority | `authority.escalated` (beyond-charter → human), `authority.granted` |
+| Contract | `contract.checkpoint_registered`, `ratified_contract_changed` (drift → escalate, ADR 0018) |
+| Station | `station.claimed`, `station.returned` (ADR 0021 claim/return) |
 
 `severity` drives attention: `error` for failures/blocked, `warn` for retries/escalations,
 `info` for normal progress. The TUI and sinks filter on it.

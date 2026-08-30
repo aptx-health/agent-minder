@@ -1,13 +1,12 @@
 ---
 title: "ADR 0019 — Human attention budget: three conformance layers, gates present scenarios not bindings"
-status: deferred
+status: accepted
 date: 2026-08-30
-tags: [architecture, charter, attention, conformance, gates, human-in-the-loop, deferred]
+tags: [architecture, charter, attention, conformance, gates, human-in-the-loop]
 superseded_by:
 ---
 
-<!-- deferred: records the decision direction; presentation detail lives in
-     [[charter-gate-presentation]]. Awaiting Dustin's ratification. -->
+<!-- Ratified 2026-08-30. Presentation detail lives in [[charter-gate-presentation]]. -->
 
 ## Context
 

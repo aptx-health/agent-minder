@@ -1,13 +1,13 @@
 ---
 title: "ADR 0020 — Expected-RED is an explicit run phase; review intent is decoupled from branch topology"
-status: deferred
+status: accepted
 date: 2026-08-30
-tags: [architecture, charter, workflow, state, topology, review, deferred]
+tags: [architecture, charter, workflow, state, topology, review]
 superseded_by:
 ---
 
-<!-- deferred: records the decision direction. Awaiting Dustin's ratification.
-     Mirrors pr-triage ADR 0010 (topology-agnostic workflow state) for Trigger's model. -->
+<!-- Ratified 2026-08-30. Mirrors pr-triage ADR 0010 (topology-agnostic workflow state).
+     General schema fields (phase incl. expected_red, review_intent) in [[db-schema]]. -->
 
 ## Context
 
