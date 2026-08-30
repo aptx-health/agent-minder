@@ -74,3 +74,5 @@ charter workflow ([[open-questions]] D5).
   own machinery, that is a new ADR.
 - The charter workflow needs its own design doc (deferred until the codex exercise learnings
   land); this ADR fixes only *where it lives* and *that it is a workflow*.
+- The engine must not be designed *around* the charter — it is one workflow pattern, not the
+  organizing principle ([[0017-engine-is-workflow-general]]).
