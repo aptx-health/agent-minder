@@ -65,7 +65,10 @@ Leaning: graduate to its own repo once the skeleton exists. Decide before first 
 ### D2 — Autopilot fan-out timing
 Is the charter-aware autopilot fan-out (spawn N agents on issues, make behavioral tests
 green) in v1, or a fast-follow after daemon + cron + triggers + one-offs work? Leaning:
-fast-follow — prove the scheduler/trigger core first.
+fast-follow — prove the scheduler/trigger core first. *(2026-08-30 refinement:* the fan-out
+*entry seam is the operator's call, entered conversationally through their orchestrator —*
+*signaled by the completed workflow's handoff packet ([[0023-handoff-packet-and-pickup-verb]]),*
+*not by an engine completion signal.*)*
 
 ### D3 — Lessons system
 Keep dropped (BYOA-deprioritized) or plan a slot for it later? Leaning: dropped for v1,

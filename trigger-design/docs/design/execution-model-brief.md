@@ -94,6 +94,23 @@ Annotated from [[charter-workflow]] with the two attributes:
   period → eligible agent reclaims) ships is an open question
   ([[0021-step-execution-and-done]]).
 
+## Completion is a packet, not a signal
+
+A finished workflow produces a **handoff packet** — a projection of the run's durable state
+(artifacts, refs, worktree, verdicts, diff-vs-main) plus an optional prose summary — and
+two verbs: **`pickup`** (operator's "recently completed" TUI tab → modal → restore/jump to
+the worktree, or a paste-ready orientation snippet for their own orchestrator session) and
+**`handoff`** (export the packet as a committed repo file + `repo/commit/path` address, so
+another human on another machine — no Trigger, no local knowledge — fetches, reads, and
+fires their *own* interactive agent to get up to speed and start work). The seam is the
+operator deciding, never a machine signal; the direction of 0022's signal is superseded by
+[[0023-handoff-packet-and-pickup-verb]]. v1 packaging is **mechanical naming** (workflow
+name + state + datetime); LLM prose is a deprioritized dogfood.
+
+The orchestrated fan-out (workflow 2) is entered *conversationally*: the operator's
+orchestrator session reviews the packet summary and simply begins — writing sub-tasks or
+farming to sub-agents — with no Trigger workflow kickoff at all.
+
 ## Design-rule recap (the 0017 filter, applied)
 
 - Anything that only serves charters → belongs in the charter workflow's step list.

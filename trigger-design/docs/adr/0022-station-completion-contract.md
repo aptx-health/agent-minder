@@ -1,13 +1,18 @@
 ---
 title: "ADR 0022 — Station completion contract: a workflow may declare a machine-checkable 'done and fan-out may begin' contract"
-status: deferred
+status: superseded
 date: 2026-08-30
 tags: [architecture, workflow, completion, contract, fan-out, orchestrator, deferred, stations]
-superseded_by:
+superseded_by: "0023-handoff-packet-and-pickup-verb"
 ---
 
 <!-- deferred: recorded at close of the 2026-08-30 station design conversation. Direction
-     decided; mechanism deferred — the hole intentionally remains open for future noodling. -->
+     decided; mechanism deferred — the hole intentionally remains open for future noodling.
+
+     SUPERSEDED 2026-08-30 by [[0023-handoff-packet-and-pickup-verb]]: the machine-to-machine
+     completion *signal* direction is dead. The seam is the operator ("me deciding") and the
+     answer is a packet + a pickup/handoff verb, not an engine event. Kept as history; the
+     grammar/signal shape discussion below is now moot. -->
 
 ## Context
 
