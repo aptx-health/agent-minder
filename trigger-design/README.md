@@ -1,0 +1,56 @@
+# Trigger — design
+
+Design workspace for **Trigger**: a minimal, declarative agent scheduler daemon.
+This is a **new tool**, not agent-minder v2. It is built from the lessons learned
+in agent-minder and pr-triage, and it is deliberately smaller.
+
+**Status:** design / pre-implementation. Nothing here is code yet. The charter and
+ADRs are the plan and the first dogfood of the pr-triage front-of-loop methodology
+(charter → ADRs → behavioral contract → red-first tests → implement).
+
+## What Trigger is (one line)
+
+A single local daemon that runs declarative cron jobs and triggered one-offs against
+swappable agent runtimes, driven by a thin TUI now and a GUI later, with local state
+as the single source of truth.
+
+## What Trigger is not
+
+- Not agent-minder. No autopilot review, no auto-merge, no dependency graphs.
+- Not GitHub-centric. GitHub is one trigger source among many.
+- Not a heavy platform (contrast OpenHands). One daemon, one job.
+
+## Index
+
+- [charter.md](charter.md) — the scope contract for v1. Read this first.
+- ADRs — [docs/adr/](docs/adr/):
+  - [0001](docs/adr/0001-purpose-and-scope.md) — Purpose and minimal scope
+  - [0002](docs/adr/0002-local-sqlite-source-of-truth.md) — Local SQLite is the source of truth
+  - [0003](docs/adr/0003-acp-runtime-seam.md) — ACP-first runtime seam
+  - [0004](docs/adr/0004-daemon-interface-split.md) — Daemon / interface split
+  - [0005](docs/adr/0005-trigger-source-agnostic.md) — Trigger-source-agnostic (GitHub is one adapter)
+  - [0006](docs/adr/0006-secrets-and-agent-permissions.md) — Secrets and agent permissions (macOS Keychain)
+  - [0007](docs/adr/0007-agent-controllable-mcp-server.md) — Agent-controllable: machine-first API and MCP server
+  - [0008](docs/adr/0008-workflows-deterministic-steps.md) — Workflows: deterministic, declarative ordered steps
+- [docs/guidance/harvest-map.md](docs/guidance/harvest-map.md) — What to lift from agent-minder and pr-triage
+- [docs/research/open-questions.md](docs/research/open-questions.md) — Decisions still open; research tasks for side agents
+
+## Doc discipline (from pr-triage)
+
+Every doc carries front matter with `title`, `status`, `date`, and `tags`. ADR status is
+exactly one of `deferred | accepted | superseded`:
+
+- `accepted` — the decision is in force.
+- `deferred` — the decision is deliberately postponed; the ADR records the question, not
+  the mechanism.
+- `superseded` — replaced by a newer ADR; keeps a `superseded_by:` pointer and stays in
+  the tree as history.
+
+A decision that is not yet ratified is not an ADR yet — it lives in the charter or in
+discussion until ratified, then enters as `accepted` (or `deferred`).
+
+**Immutability:** never edit the *decision* of an accepted ADR. To change it, write a new
+ADR on top and mark the old one `superseded`. The only permitted edit to a past ADR is the
+supersession bookkeeping (flip `status`, fill `superseded_by`).
+
+One fact per reference doc. Link related docs with wiki-style `[[name]]`.
