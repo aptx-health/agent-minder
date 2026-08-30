@@ -34,12 +34,21 @@ as the single source of truth.
   - [0008](docs/adr/0008-workflows-deterministic-steps.md) — Workflows: deterministic, declarative ordered steps
   - [0009](docs/adr/0009-cross-tool-boundary-shared-conventions.md) — Cross-tool boundary: shared conventions over shared code
   - [0010](docs/adr/0010-go-template-variables.md) — Go-template variable interpolation
+  - [0011](docs/adr/0011-internal-pubsub-two-buses.md) — Internal pub/sub: a work bus and an event bus, both store-first
+  - [0012](docs/adr/0012-failure-handling-blocked-and-release.md) — Failure handling: bounded retry, then park as blocked for reasoning
+  - [0013](docs/adr/0013-ask-and-resume-instead-of-bail.md) — Ask-and-resume: agents pause for clarification or scope instead of bailing
+  - [0014](docs/adr/0014-answer-authority.md) — Answer authority: human or charter-bounded orchestrator
 - Design specs — [docs/design/](docs/design/):
   - [config-schema.md](docs/design/config-schema.md) — The declarative job/step config (GitHub-Actions-like)
+  - [trigger-abstraction.md](docs/design/trigger-abstraction.md) — How a trigger fires a workflow (Fire event, pull vs push, dedup, lifecycle)
+  - [run-lifecycle-and-slots.md](docs/design/run-lifecycle-and-slots.md) — Run state machine, atomic claim, slot model, crash reconcile, blocked/release
 - Guidance — [docs/guidance/](docs/guidance/):
+  - [glossary.md](docs/guidance/glossary.md) — Terminology (supervisor vs orchestrator, fire, buses, parking family)
   - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
   - [harvest-map.md](docs/guidance/harvest-map.md) — What to lift from agent-minder and pr-triage
-- [docs/research/open-questions.md](docs/research/open-questions.md) — Decisions still open; research tasks for side agents
+- Research — [docs/research/](docs/research/):
+  - [open-questions.md](docs/research/open-questions.md) — Decisions still open; research tasks for side agents
+  - [ask-and-resume-prior-art.md](docs/research/ask-and-resume-prior-art.md) — Prior art behind ADR 0013 (MCP elicitation, LangGraph, Temporal, ACP…)
 
 ## Doc discipline (from pr-triage)
 

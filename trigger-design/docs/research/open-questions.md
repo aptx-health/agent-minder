@@ -22,7 +22,7 @@ API? Does Claude Code speak ACP, and how? Deliverable: a short report with links
 
 ### R2 — External-trigger transport
 For "spun up from an external trigger," compare: a localhost HTTP webhook endpoint on the
-daemon vs. a small message-bus consumer (e.g. the existing agent-msg bus) vs. a watched
+daemon vs. a small external message-bus consumer vs. a watched
 file/directory. Criteria: simplicity, auth, restart-safety, fit with the daemon/API split
 ([[0004-daemon-interface-split]]). Deliverable: a recommendation with trade-offs.
 
