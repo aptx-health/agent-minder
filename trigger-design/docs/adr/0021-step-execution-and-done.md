@@ -1,15 +1,14 @@
 ---
 title: "ADR 0021 — Steps carry execution and done attributes; gates fold into done.approve"
-status: deferred
+status: accepted
 date: 2026-08-30
 tags: [architecture, workflow, steps, execution, definition-of-done, gates, authority, stations]
 superseded_by:
 ---
 
-<!-- deferred: ratified in conversation 2026-08-30; flip to accepted on Dustin's sign-off.
-     Supersedes [[0014-answer-authority]]: job-level authority mode becomes the per-job
-     default; per-step `done.approve` may narrow it. New: `execution` axis (who does the
-     work) alongside the existing authority axis (who approves). -->
+<!-- Ratified 2026-08-30 (design-partner session). Supersedes [[0014-answer-authority]]:
+     job-level authority mode becomes the per-job default; per-step `done.approve` may narrow
+     it. New: `execution` axis (who does the work) alongside the authority axis (who approves). -->
 
 ## Context
 

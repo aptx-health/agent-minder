@@ -44,7 +44,7 @@ as the single source of truth.
   - [0018](docs/adr/0018-ratified-contract-protection.md) — Ratified-contract protection: checkpoint + digest manifest + drift signal *(deferred — awaiting ratification)*
   - [0019](docs/adr/0019-human-attention-budget-conformance-layers.md) — Human attention budget: three conformance layers; gates present scenarios not bindings *(deferred)*
   - [0020](docs/adr/0020-expected-red-and-topology-agnostic-review.md) — Expected-RED is an explicit phase; review intent decoupled from branch topology *(deferred)*
-  - [0021](docs/adr/0021-step-execution-and-done.md) — Steps carry execution + done; gates fold into done.approve; stations are parked runs *(supersedes 0014)*
+  - [0021](docs/adr/0021-step-execution-and-done.md) — Steps carry execution + done; gates fold into done.approve; stations are parked runs *(accepted; supersedes 0014)*
   - [0022](docs/adr/0022-station-completion-contract.md) — Station completion contract: a workflow may declare a machine-checkable "done, fan-out may begin" signal *(deferred — open gap)*
 - Design specs — [docs/design/](docs/design/):
   - [config-schema.md](docs/design/config-schema.md) — The declarative job/step config (GitHub-Actions-like)
