@@ -37,10 +37,15 @@ as the single source of truth.
   - [0011](docs/adr/0011-internal-pubsub-two-buses.md) — Internal pub/sub: a work bus and an event bus, both store-first
   - [0012](docs/adr/0012-failure-handling-blocked-and-release.md) — Failure handling: bounded retry, then park as blocked for reasoning
   - [0013](docs/adr/0013-ask-and-resume-instead-of-bail.md) — Ask-and-resume: agents pause for clarification or scope instead of bailing
-  - [0014](docs/adr/0014-answer-authority.md) — Answer authority: human or charter-bounded orchestrator
+  - [0014](docs/adr/0014-answer-authority.md) — Answer authority: human or charter-bounded orchestrator *(superseded by 0021)*
   - [0015](docs/adr/0015-principal-by-transport.md) — Principal-by-transport authority binding
   - [0016](docs/adr/0016-trigger-owns-proactive-loop.md) — Trigger owns the proactive loop; the charter is a Trigger workflow
   - [0017](docs/adr/0017-engine-is-workflow-general.md) — The engine is workflow-general; the charter is not privileged
+  - [0018](docs/adr/0018-ratified-contract-protection.md) — Ratified-contract protection: checkpoint + digest manifest + drift signal *(deferred — awaiting ratification)*
+  - [0019](docs/adr/0019-human-attention-budget-conformance-layers.md) — Human attention budget: three conformance layers; gates present scenarios not bindings *(deferred)*
+  - [0020](docs/adr/0020-expected-red-and-topology-agnostic-review.md) — Expected-RED is an explicit phase; review intent decoupled from branch topology *(deferred)*
+  - [0021](docs/adr/0021-step-execution-and-done.md) — Steps carry execution + done; gates fold into done.approve; stations are parked runs *(supersedes 0014)*
+  - [0022](docs/adr/0022-station-completion-contract.md) — Station completion contract: a workflow may declare a machine-checkable "done, fan-out may begin" signal *(deferred — open gap)*
 - Design specs — [docs/design/](docs/design/):
   - [config-schema.md](docs/design/config-schema.md) — The declarative job/step config (GitHub-Actions-like)
   - [trigger-abstraction.md](docs/design/trigger-abstraction.md) — How a trigger fires a workflow (Fire event, pull vs push, dedup, lifecycle)
@@ -51,10 +56,13 @@ as the single source of truth.
   - [tui.md](docs/design/tui.md) — TUI design brief: attention-first, parked-runs headline, keep checkout + log stream
   - [tui-mockup-brief.md](docs/design/tui-mockup-brief.md) — Pasteable prompt to commission TUI mockups from a design agent
   - [tui-mockups.md](docs/design/tui-mockups.md) — TUI mockups + interaction design (recommended direction, answer flows, keymap); rendered preview in [tui-mockup.html](docs/design/tui-mockup.html)
+  - [charter-workflow.md](docs/design/charter-workflow.md) — The front-of-loop as a Trigger workflow: ordered steps, two ratification gates, three agent defs, grounded in the dogfood (the design doc ADR 0016 deferred)
+  - [execution-model-brief.md](docs/design/execution-model-brief.md) — Execution and handoff model: stations, execution/done attributes, the two layers of "done" (ADR 0021/0022)
 - Guidance — [docs/guidance/](docs/guidance/):
   - [glossary.md](docs/guidance/glossary.md) — Terminology (supervisor vs orchestrator, fire, buses, parking family)
   - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
   - [harvest-map.md](docs/guidance/harvest-map.md) — What to lift from agent-minder and pr-triage
+  - [charter-gate-presentation.md](docs/guidance/charter-gate-presentation.md) — Delivering test evidence to a human at a gate: scenario-first, progressive disclosure, companion-terminal, ≤5 decisions
 - Harvest notes — [docs/harvest/](docs/harvest/): per-package deep dives (side-agent produced)
   - [sqliteutil-wal-recovery.md](docs/harvest/sqliteutil-wal-recovery.md) — WAL recovery + the epoch/cursor truncation contract
   - [event-log-store-first.md](docs/harvest/event-log-store-first.md) — Durable event log invariants (commit-is-publish, cursor, epoch)
@@ -63,6 +71,7 @@ as the single source of truth.
   - [agentutil-log-parsing.md](docs/harvest/agentutil-log-parsing.md) — Agent log / result parsing + failure taxonomy
   - [git-worktree-helpers.md](docs/harvest/git-worktree-helpers.md) — Worktree add/list/include helpers
   - [checkout-and-auth.md](docs/harvest/checkout-and-auth.md) — Worktree checkout + OS-keyring auth
+  - [front-of-loop-dogfood-crosswalk.md](docs/harvest/front-of-loop-dogfood-crosswalk.md) — The pr-triage codex-runtime run-through as the charter-workflow input spec: findings → decisions (drives ADRs 0018–0020)
 - Research — [docs/research/](docs/research/):
   - [open-questions.md](docs/research/open-questions.md) — Decisions still open; research tasks for side agents
   - [ask-and-resume-prior-art.md](docs/research/ask-and-resume-prior-art.md) — Prior art behind ADR 0013 (MCP elicitation, LangGraph, Temporal, ACP…)

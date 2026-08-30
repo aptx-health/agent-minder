@@ -62,7 +62,8 @@ apart at a glance.
 - **awaiting_input → running/queued:** an answer arrives (human CLI/TUI or agent via MCP
   elicitation); it is schema-validated, injected as data, and the runtime session resumes in
   place. A scope grant updates the permission record first.
-- **awaiting_input → blocked:** the input timeout expired with no answer (configurable default).
+- **awaiting_input → blocked:** the input timeout expired with no answer — but the timeout
+  **defaults to long or none** (see below); a short timeout is an explicit opt-in.
 
 Step-internal progress (which step, resume point) lives on the run per
 [[0008-workflows-deterministic-steps]] — crash-resume picks up the interrupted step; the
@@ -107,6 +108,19 @@ One writer, one claim — no double-pick. The `WorkQueue` interface exposes this
 - **On daemon start**, reconcile: any `running` row with a stale heartbeat and no live owner is
   treated as an infra failure → requeue (attempts++) or resume the interrupted step. This is
   the crash-resume path; it never routes through `on_failure` (that is for logic failures).
+
+## Parked runs do not hold a slot; waits are long by default
+
+A `blocked` or `awaiting_input` run is **not** `running`, so it does **not** count against the
+global or per-job slot cap. A run may sit parked for **days** without starving concurrency —
+the operator may fire an agent and not check it for a couple of days.
+
+Therefore the parking **input timeout defaults to long or none** (wait indefinitely). ADR
+0013's "bound every wait" is a *may*, not a *must*: a short timeout is an explicit opt-in for
+the rare gate that must expire (e.g. a time-sensitive external decision). The TUI countdown and
+the soonest-to-expire sort still apply *when* a timeout is set; with none set, a parked run
+simply waits until answered/released. (The `awaiting_input` mockup's illustrative "57m" is not
+the default.)
 
 ## Blocked: inspect and release
 
