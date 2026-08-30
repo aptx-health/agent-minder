@@ -75,11 +75,27 @@ revisit on evidence.
 **Resolved:** Trigger owns it — charter authoring is a first-class Trigger workflow
 (fast-follow after v1 core). pr-triage narrows to the reactive gate.
 
-### D5 — Charter workflow design input
-The first-class charter workflow will be grounded in a **real run-through**: the codex-runtime
-implementation being done in pr-triage is a manual test of the charter process. Save its
-learnings + design docs; they become the input spec for the charter workflow's own design doc
-(deferred until those learnings land). See [[0016-trigger-owns-proactive-loop]].
+### D5 — Charter workflow design input  *(learnings landed → drafted)*
+The first-class charter workflow was grounded in a **real run-through**: the codex-runtime
+implementation in pr-triage (issue #129) was a manual test of the charter process. Those
+learnings landed and are captured in [[front-of-loop-dogfood-crosswalk]]; they became the
+input spec for the charter workflow's design, now drafted in [[charter-workflow]] with three
+supporting ADRs — [[0018-ratified-contract-protection]],
+[[0019-human-attention-budget-conformance-layers]],
+[[0020-expected-red-and-topology-agnostic-review]] (all `deferred`, awaiting Dustin's
+ratification). See [[0016-trigger-owns-proactive-loop]].
+
+### D6 — Execution-mode split per step (interactive vs. autonomous) *(resolved → [[0021-step-execution-and-done]])*
+**Resolved (2026-08-30):** steps carry an `execution` attribute (who does the work) and a
+`done` attribute (what must be true to advance). `execution: agent | human | [agent, human]`
+with the actual holder frozen per-run at claim time (resolve-once); `done` splits into
+deterministic conductor checks (artifact schema + script checks) and judgment owned by the
+workflow (`approve: human | agent`, the gate). Authority modes (ADR 0014) become the
+per-job default that per-step `done.approve` may narrow — **superseding 0014** on placement.
+The *leaning* is now an *eligibility*: ground + charter + author-red + implement accept
+either `[agent, human]`; verify steps default `agent` (verdict artifact, no human ok); the
+two gates are `approve: human`. The actual ratio of interactive vs. autonomous per step
+stays emergent — observe real runs and let it settle.
 
 ## Answered
 

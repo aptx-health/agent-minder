@@ -1,9 +1,9 @@
 ---
 title: "ADR 0014 — Answer authority: human or charter-bounded orchestrator"
-status: accepted
+status: superseded
 date: 2026-08-29
 tags: [architecture, authority, autonomy, human-in-the-loop, charter, mcp]
-superseded_by:
+superseded_by: "0021-step-execution-and-done"
 ---
 
 ## Context
