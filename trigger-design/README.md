@@ -32,7 +32,13 @@ as the single source of truth.
   - [0006](docs/adr/0006-secrets-and-agent-permissions.md) — Secrets and agent permissions (macOS Keychain)
   - [0007](docs/adr/0007-agent-controllable-mcp-server.md) — Agent-controllable: machine-first API and MCP server
   - [0008](docs/adr/0008-workflows-deterministic-steps.md) — Workflows: deterministic, declarative ordered steps
-- [docs/guidance/harvest-map.md](docs/guidance/harvest-map.md) — What to lift from agent-minder and pr-triage
+  - [0009](docs/adr/0009-cross-tool-boundary-shared-conventions.md) — Cross-tool boundary: shared conventions over shared code
+  - [0010](docs/adr/0010-go-template-variables.md) — Go-template variable interpolation
+- Design specs — [docs/design/](docs/design/):
+  - [config-schema.md](docs/design/config-schema.md) — The declarative job/step config (GitHub-Actions-like)
+- Guidance — [docs/guidance/](docs/guidance/):
+  - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
+  - [harvest-map.md](docs/guidance/harvest-map.md) — What to lift from agent-minder and pr-triage
 - [docs/research/open-questions.md](docs/research/open-questions.md) — Decisions still open; research tasks for side agents
 
 ## Doc discipline (from pr-triage)

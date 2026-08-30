@@ -26,15 +26,11 @@ daemon vs. a small message-bus consumer (e.g. the existing agent-msg bus) vs. a 
 file/directory. Criteria: simplicity, auth, restart-safety, fit with the daemon/API split
 ([[0004-daemon-interface-split]]). Deliverable: a recommendation with trade-offs.
 
-### R3 — Declarative config schema
-Survey how comparable tools express declarative scheduled + triggered jobs (agent-minder
-`jobs.yaml`, Kestra, Windmill, GitHub Actions workflow). Deliverable: a proposed YAML
-schema for a Trigger job that covers cron, one-off, and webhook triggers uniformly, with
-runtime/model selection per job. Must also express a **step list** (per
-[[0008-workflows-deterministic-steps]]): each step's kind/runtime/model/agent, its
-secrets/permissions block ([[0006-secrets-and-agent-permissions]]), and the two routing
-conditions (`on_success`, `on_failure`). A single-step job and a multi-step workflow use the
-same shape.
+### R3 — Declarative config schema  *(drafted → [[config-schema]])*
+A first draft exists in [[config-schema]] (GitHub-Actions-like: jobs → trigger → ordered
+steps; script or agent; resolve-once). Remaining: validate the shape against agent-minder
+`jobs.yaml`, Kestra, and Windmill for anything missed; firm up the webhook trigger and
+permissions sub-schemas (depend on R2/R5/R6).
 
 ### R4 — TUI framework choice
 Confirm bubbletea v2 / lipgloss v2 is still the right TUI base (agent-minder uses it), or
