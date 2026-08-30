@@ -51,3 +51,23 @@ For each "lift verbatim" item: copy the package, run its existing tests against 
 module, and only then adapt. A transplanted package that still passes its own tests carries
 its hardening with it. A rewritten one starts at zero hardening — reserve that for the
 pattern-only items.
+
+## Farming the harvest to side agents
+
+Each "lift verbatim" row is a **discrete, verifiable task** suitable for an opencode side
+agent (once the Trigger repo exists) — it keeps the mechanical transplant off the main
+session's context. A self-contained task per row:
+
+> Copy `~/repos/agent-minder/internal/<pkg>` into the Trigger module as
+> `internal/<pkg>`, fix the import path, run `go test ./internal/<pkg>/...`, and report the
+> result. Do **not** adapt behavior — a clean copy that passes its own tests is the goal.
+> If tests fail, report why; do not paper over them.
+
+Rules for the farmed work:
+- One package per task; the package's own passing tests are the acceptance gate (this is the
+  hardening carrying across — see Method).
+- "Lift the pattern" rows are **not** farmed as copies — they are rewrites against the new
+  design and belong with the person/agent doing that module, not a mechanical transplant.
+- The agent reports pass/fail and any test it could not carry; a human/main session decides
+  on failures rather than the side agent forcing green.
+

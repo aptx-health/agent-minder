@@ -38,10 +38,12 @@ as the single source of truth.
   - [0012](docs/adr/0012-failure-handling-blocked-and-release.md) — Failure handling: bounded retry, then park as blocked for reasoning
   - [0013](docs/adr/0013-ask-and-resume-instead-of-bail.md) — Ask-and-resume: agents pause for clarification or scope instead of bailing
   - [0014](docs/adr/0014-answer-authority.md) — Answer authority: human or charter-bounded orchestrator
+  - [0015](docs/adr/0015-principal-by-transport.md) — Principal-by-transport authority binding
 - Design specs — [docs/design/](docs/design/):
   - [config-schema.md](docs/design/config-schema.md) — The declarative job/step config (GitHub-Actions-like)
   - [trigger-abstraction.md](docs/design/trigger-abstraction.md) — How a trigger fires a workflow (Fire event, pull vs push, dedup, lifecycle)
   - [run-lifecycle-and-slots.md](docs/design/run-lifecycle-and-slots.md) — Run state machine, atomic claim, slot model, crash reconcile, blocked/release
+  - [daemon-api.md](docs/design/daemon-api.md) — One Service, thin faces (HTTP/MCP/webhook); transport implies principal; SSE event stream
 - Guidance — [docs/guidance/](docs/guidance/):
   - [glossary.md](docs/guidance/glossary.md) — Terminology (supervisor vs orchestrator, fire, buses, parking family)
   - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
