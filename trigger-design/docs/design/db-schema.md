@@ -42,6 +42,9 @@ CREATE TABLE runs (
   request_json  TEXT,                     -- question schema / typed scope request
   answer_json   TEXT,
   input_timeout DATETIME,
+  within_charter TEXT,                    -- true | false | unknown — deterministic render field
+                                          -- for the current park; 'unknown' must NOT read as
+                                          -- approval (ADR 0014 open q, resolved by TUI need)
   -- liveness / scheduling
   owner         TEXT,                     -- daemon instance id while running
   heartbeat_at  DATETIME,

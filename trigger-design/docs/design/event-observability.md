@@ -78,10 +78,18 @@ Per [[0011-internal-pubsub-two-buses]], all downstream and best-effort:
 - Never let a subscriber's backpressure block the commit — sinks have bounded queues and drop
   or lag, they do not stall the supervisor.
 
+## Two refinements from the TUI design
+
+- **Firehose in v1.** The event stream is a firehose; clients filter locally (the TUI's `/`
+  filter). Server-side `?type=`/`?run=` filters on the SSE endpoint are a later addition if a
+  busy daemon outruns client-side filtering — not v1 ([[tui-mockups]] §6.1, [[daemon-api]]).
+- **`run.answered` always emits, even when auto-answered.** In `orchestrator` authority mode the
+  human is not interrupted, but the decision must still be visible: `run.answered` (with who,
+  mode, `within_charter`) flows through the stream so a passenger-seat operator sees what was
+  decided ([[0014-answer-authority]], [[tui-mockups]] §6.3).
+
 ## Open questions
 
 - Event retention policy (age/size cap) and when `truncated_through` advances.
-- Whether the TUI needs server-side topic filters (by run/job) or a firehose + client filter is
-  enough for v1 ([[daemon-api]] open question).
 - `data` schema per event type — start loose (JSON), tighten as the TUI consumes specific
   fields.
