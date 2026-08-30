@@ -71,10 +71,15 @@ fast-follow — prove the scheduler/trigger core first.
 Keep dropped (BYOA-deprioritized) or plan a slot for it later? Leaning: dropped for v1,
 revisit on evidence.
 
-### D4 — Charter authoring ownership
-Who writes the red charter/behavioral tests that a future autopilot consumes: manual for
-now, pr-triage front-of-loop, or a Trigger pre-stage? Leaning: manual now; decide once the
-consumption loop is proven. (Ties to D2.)
+### D4 — Charter authoring ownership  *(resolved by [[0016-trigger-owns-proactive-loop]])*
+**Resolved:** Trigger owns it — charter authoring is a first-class Trigger workflow
+(fast-follow after v1 core). pr-triage narrows to the reactive gate.
+
+### D5 — Charter workflow design input
+The first-class charter workflow will be grounded in a **real run-through**: the codex-runtime
+implementation being done in pr-triage is a manual test of the charter process. Save its
+learnings + design docs; they become the input spec for the charter workflow's own design doc
+(deferred until those learnings land). See [[0016-trigger-owns-proactive-loop]].
 
 ## Answered
 

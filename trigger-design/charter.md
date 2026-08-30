@@ -24,7 +24,15 @@ A single local daemon that:
 The dogfood target: run Trigger's own scheduled and triggered jobs against opencode,
 using Dustin's OpenCode/OpenRouter credits, and watch them in the TUI.
 
-## Scope boundaries — explicitly OUT of v1
+## Front-of-loop ownership (ADR 0016)
+
+Trigger owns the **proactive loop**: charter authoring is a first-class Trigger *workflow*
+(charter → red tests → implement → verify → open PR), built on the engine's primitives — a
+**fast-follow after the v1 core**, not v1 core itself. pr-triage narrows to the reactive review
+gate and stays standalone for now. See [[0016-trigger-owns-proactive-loop]]. The items below are
+the **v1 core** scope; the charter workflow lands right after it.
+
+## Scope boundaries — explicitly OUT of v1 core
 
 - **No review agent, no auto-merge.** The PR is the review surface. pr-triage or a
   human gates it. (See [[project_minder_vs_pr_triage]] reasoning.)

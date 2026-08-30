@@ -39,6 +39,7 @@ as the single source of truth.
   - [0013](docs/adr/0013-ask-and-resume-instead-of-bail.md) — Ask-and-resume: agents pause for clarification or scope instead of bailing
   - [0014](docs/adr/0014-answer-authority.md) — Answer authority: human or charter-bounded orchestrator
   - [0015](docs/adr/0015-principal-by-transport.md) — Principal-by-transport authority binding
+  - [0016](docs/adr/0016-trigger-owns-proactive-loop.md) — Trigger owns the proactive loop; the charter is a Trigger workflow
 - Design specs — [docs/design/](docs/design/):
   - [config-schema.md](docs/design/config-schema.md) — The declarative job/step config (GitHub-Actions-like)
   - [trigger-abstraction.md](docs/design/trigger-abstraction.md) — How a trigger fires a workflow (Fire event, pull vs push, dedup, lifecycle)
