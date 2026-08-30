@@ -52,6 +52,14 @@ module, and only then adapt. A transplanted package that still passes its own te
 its hardening with it. A rewritten one starts at zero hardening — reserve that for the
 pattern-only items.
 
+## Detailed per-package notes
+
+Deep-dive harvest notes (what a package provides, the hardening that must survive, the
+transplant contract, the test acceptance gate) live in `docs/harvest/<pkg>.md`. Side agents
+produce one per lifted package. First: [[sqliteutil-wal-recovery]] — includes the
+WAL-deletion-truncates-history contract that the event cursor design depends on
+([[event-observability]]).
+
 ## Farming the harvest to side agents
 
 Each "lift verbatim" row is a **discrete, verifiable task** suitable for an opencode side

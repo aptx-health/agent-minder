@@ -71,10 +71,13 @@ Tools mirror the Service: `fire_job`, `list_runs`, `get_run`, `list_parked`, `an
 ## Event streaming: SSE + durable cursor
 
 The event bus ([[0011-internal-pubsub-two-buses]]) is exposed as **Server-Sent Events** —
-simple, one-way, fits best-effort fan-out. Each event carries the durable log id as its cursor
-(harvest agent-minder's autoincrement event id). A client reconnects with `?since={cursor}` to
-replay missed events from the durable log, then continues live. This gives the TUI live updates
-and crash-safe catch-up with one mechanism.
+simple, one-way, fits best-effort fan-out. The cursor is **`(epoch, id)`**, not just the
+autoincrement id, because WAL recovery can truncate history and rotate the epoch
+([[event-observability]], [[sqliteutil-wal-recovery]]). A client reconnects with
+`?since={epoch}:{id}` to replay from the durable log; a stale epoch or a `since` below the
+retention floor returns a **resync** signal so the client re-reads current state instead of
+silently missing events. This gives the TUI live updates and crash-safe catch-up with one
+mechanism. Full taxonomy and record shape in [[event-observability]].
 
 ## Service interface (sketch)
 

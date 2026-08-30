@@ -44,10 +44,13 @@ as the single source of truth.
   - [trigger-abstraction.md](docs/design/trigger-abstraction.md) — How a trigger fires a workflow (Fire event, pull vs push, dedup, lifecycle)
   - [run-lifecycle-and-slots.md](docs/design/run-lifecycle-and-slots.md) — Run state machine, atomic claim, slot model, crash reconcile, blocked/release
   - [daemon-api.md](docs/design/daemon-api.md) — One Service, thin faces (HTTP/MCP/webhook); transport implies principal; SSE event stream
+  - [event-observability.md](docs/design/event-observability.md) — Event record, (epoch,id) cursor, taxonomy, subscribers (TUI/MCP/sinks)
 - Guidance — [docs/guidance/](docs/guidance/):
   - [glossary.md](docs/guidance/glossary.md) — Terminology (supervisor vs orchestrator, fire, buses, parking family)
   - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
   - [harvest-map.md](docs/guidance/harvest-map.md) — What to lift from agent-minder and pr-triage
+- Harvest notes — [docs/harvest/](docs/harvest/): per-package deep dives (side-agent produced)
+  - [sqliteutil-wal-recovery.md](docs/harvest/sqliteutil-wal-recovery.md) — WAL recovery + the epoch/cursor truncation contract
 - Research — [docs/research/](docs/research/):
   - [open-questions.md](docs/research/open-questions.md) — Decisions still open; research tasks for side agents
   - [ask-and-resume-prior-art.md](docs/research/ask-and-resume-prior-art.md) — Prior art behind ADR 0013 (MCP elicitation, LangGraph, Temporal, ACP…)
