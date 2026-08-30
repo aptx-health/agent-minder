@@ -1,16 +1,15 @@
 ---
 title: "ADR 0023 — Handoff packet and pickup verb: completion is a reproducible summary plus a restore, not a machine signal"
-status: deferred
+status: accepted
 date: 2026-08-30
-tags: [architecture, workflow, completion, handoff, pickup, tui, human, deferred]
+tags: [architecture, workflow, completion, handoff, pickup, tui, human]
 superseded_by:
 ---
 
-<!-- deferred: ratified in conversation 2026-08-30; flip to accepted on Dustin's sign-off.
-     Supersedes the completion-contract direction of [[0022-station-completion-contract]]:
-     completion is not a signal for workflow 2; it is a packet + a pickup verb. 0022 stays
-     as history (its grammar/signal direction is dead). LLM summaries are a deprioritized
-     dogfood; v1 is mechanical naming. -->
+<!-- Ratified 2026-08-30. Supersedes the completion-contract direction of
+     [[0022-station-completion-contract]]: completion is not a signal for workflow 2; it is a
+     packet + a pickup/handoff verb. 0022 stays as history (its grammar/signal direction is
+     dead). LLM summaries are a deprioritized dogfood; v1 is mechanical naming. -->
 
 ## Context
 

@@ -45,7 +45,8 @@ as the single source of truth.
   - [0019](docs/adr/0019-human-attention-budget-conformance-layers.md) — Human attention budget: three conformance layers; gates present scenarios not bindings
   - [0020](docs/adr/0020-expected-red-and-topology-agnostic-review.md) — Expected-RED is an explicit phase; review intent decoupled from branch topology
   - [0021](docs/adr/0021-step-execution-and-done.md) — Steps carry execution + done; gates fold into done.approve; stations are parked runs *(accepted; supersedes 0014)*
-  - [0022](docs/adr/0022-station-completion-contract.md) — Station completion contract: a workflow may declare a machine-checkable "done, fan-out may begin" signal *(deferred — open gap)*
+  - [0022](docs/adr/0022-station-completion-contract.md) — Station completion contract *(superseded by 0023 — the seam is the operator, not a machine signal)*
+  - [0023](docs/adr/0023-handoff-packet-and-pickup-verb.md) — Handoff packet + pickup/handoff verbs: completion is a reproducible projection + a restore, not a signal *(supersedes 0022)*
 - Design specs — [docs/design/](docs/design/):
   - [config-schema.md](docs/design/config-schema.md) — The declarative job/step config (GitHub-Actions-like)
   - [trigger-abstraction.md](docs/design/trigger-abstraction.md) — How a trigger fires a workflow (Fire event, pull vs push, dedup, lifecycle)
@@ -57,7 +58,7 @@ as the single source of truth.
   - [tui-mockup-brief.md](docs/design/tui-mockup-brief.md) — Pasteable prompt to commission TUI mockups from a design agent
   - [tui-mockups.md](docs/design/tui-mockups.md) — TUI mockups + interaction design (recommended direction, answer flows, keymap); rendered preview in [tui-mockup.html](docs/design/tui-mockup.html)
   - [charter-workflow.md](docs/design/charter-workflow.md) — The front-of-loop as a Trigger workflow: ordered steps, two ratification gates, three agent defs, grounded in the dogfood (the design doc ADR 0016 deferred)
-  - [execution-model-brief.md](docs/design/execution-model-brief.md) — Execution and handoff model: stations, execution/done attributes, the two layers of "done" (ADR 0021/0022)
+  - [execution-model-brief.md](docs/design/execution-model-brief.md) — Execution and handoff model: stations, execution/done attributes, two layers of "done", completion-is-a-packet (ADR 0021/0023)
 - Guidance — [docs/guidance/](docs/guidance/):
   - [glossary.md](docs/guidance/glossary.md) — Terminology (supervisor vs orchestrator, fire, buses, parking family)
   - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
