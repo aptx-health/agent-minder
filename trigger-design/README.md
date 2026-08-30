@@ -46,6 +46,8 @@ as the single source of truth.
   - [daemon-api.md](docs/design/daemon-api.md) — One Service, thin faces (HTTP/MCP/webhook); transport implies principal; SSE event stream
   - [event-observability.md](docs/design/event-observability.md) — Event record, (epoch,id) cursor, taxonomy, subscribers (TUI/MCP/sinks)
   - [db-schema.md](docs/design/db-schema.md) — SQLite runtime state: runs, run_steps, events, trigger_state (config is NOT in the DB)
+  - [tui.md](docs/design/tui.md) — TUI design brief: attention-first, parked-runs headline, keep checkout + log stream
+  - [tui-mockup-brief.md](docs/design/tui-mockup-brief.md) — Pasteable prompt to commission TUI mockups from a design agent
 - Guidance — [docs/guidance/](docs/guidance/):
   - [glossary.md](docs/guidance/glossary.md) — Terminology (supervisor vs orchestrator, fire, buses, parking family)
   - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
