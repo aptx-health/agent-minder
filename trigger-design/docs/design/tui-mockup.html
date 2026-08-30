@@ -1,0 +1,619 @@
+<style>
+  :root {
+    /* page chrome neutrals — violet-biased, chosen not defaulted */
+    --page-bg: #f4f2f7;
+    --page-surface: #ffffff;
+    --page-ink: #201d2b;
+    --page-muted: #6c6780;
+    --page-line: #e2ddec;
+    --page-accent: #6b4ee6;
+
+    /* terminal world — fixed dark, the subject's committed look */
+    --t-base: #0e0d13;
+    --t-surface: #17151f;
+    --t-overlay: #221f2e;
+    --t-line: #2c2839;
+    --t-text: #e6e3ef;
+    --t-muted: #8a869b;
+    --t-faint: #5d5872;
+    --t-needs: #f5a623;
+    --t-blocked: #f2555a;
+    --t-running: #45c8e0;
+    --t-ok: #4ec9a3;
+    --t-accent: #a78bfa;
+    --t-escal: #f0b429;
+
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --maxw: 1080px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page-bg: #0b0a10;
+      --page-surface: #131119;
+      --page-ink: #e6e3ef;
+      --page-muted: #948fa8;
+      --page-line: #262233;
+      --page-accent: #a78bfa;
+    }
+  }
+  :root[data-theme="light"] {
+    --page-bg: #f4f2f7; --page-surface: #ffffff; --page-ink: #201d2b;
+    --page-muted: #6c6780; --page-line: #e2ddec; --page-accent: #6b4ee6;
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #0b0a10; --page-surface: #131119; --page-ink: #e6e3ef;
+    --page-muted: #948fa8; --page-line: #262233; --page-accent: #a78bfa;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .page {
+    background: var(--page-bg);
+    color: var(--page-ink);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    padding: clamp(1.5rem, 4vw, 4rem) clamp(1rem, 4vw, 2rem) 4rem;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; }
+
+  /* ---- title block ---- */
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--page-accent); font-weight: 600; margin: 0 0 0.9rem;
+  }
+  h1 {
+    font-size: clamp(1.9rem, 5vw, 3.1rem); line-height: 1.04; margin: 0;
+    font-weight: 700; letter-spacing: -0.02em; text-wrap: balance;
+  }
+  h1 .dim { color: var(--page-muted); font-weight: 400; }
+  .lede {
+    max-width: 60ch; margin: 1.1rem 0 0; font-size: 1.05rem; color: var(--page-muted);
+  }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 0.5rem 1.4rem; margin-top: 1.4rem;
+    font-family: var(--mono); font-size: 0.76rem; color: var(--page-muted);
+  }
+  .meta b { color: var(--page-ink); font-weight: 600; }
+
+  section { margin-top: clamp(2.5rem, 6vw, 4.5rem); }
+  .sec-head { display: flex; align-items: baseline; gap: 0.8rem; margin-bottom: 1.3rem; }
+  .sec-num {
+    font-family: var(--mono); font-size: 0.8rem; color: var(--page-accent);
+    font-weight: 700; letter-spacing: 0.05em;
+  }
+  h2 { font-size: 1.4rem; margin: 0; letter-spacing: -0.01em; font-weight: 650; }
+  .sec-sub { color: var(--page-muted); margin: 0.3rem 0 0; max-width: 62ch; }
+
+  /* ---- terminal widget ---- */
+  .term {
+    background: var(--t-base);
+    border-radius: 12px;
+    border: 1px solid #000;
+    box-shadow: 0 24px 60px -20px rgba(40,20,90,0.45), 0 2px 0 rgba(255,255,255,0.02) inset;
+    overflow: hidden;
+    font-family: var(--mono);
+    color: var(--t-text);
+    font-size: 13.5px;
+    line-height: 1.65;
+  }
+  .term.hero { box-shadow: 0 40px 90px -30px rgba(90,60,180,0.5); }
+  .term-bar {
+    display: flex; align-items: center; gap: 0.6rem;
+    padding: 0.6rem 0.85rem;
+    background: linear-gradient(#1b1826, #17151f);
+    border-bottom: 1px solid var(--t-line);
+  }
+  .dots { display: flex; gap: 0.45rem; }
+  .dots i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .dots i:nth-child(1) { background: #ff5f57; }
+  .dots i:nth-child(2) { background: #febc2e; }
+  .dots i:nth-child(3) { background: #28c840; }
+  .term-title { color: var(--t-muted); font-size: 12px; letter-spacing: 0.02em; }
+  .term-status { margin-left: auto; color: var(--t-muted); font-size: 12px; }
+  .term-status .live { color: var(--t-ok); }
+  .live-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--t-ok); margin-right: 5px; vertical-align: middle;
+    box-shadow: 0 0 7px var(--t-ok);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  .term-body { padding: 0.9rem 1.1rem 0; }
+  .term-foot {
+    border-top: 1px solid var(--t-line); margin-top: 0.6rem;
+    padding: 0.6rem 1.1rem; color: var(--t-muted); font-size: 12px;
+    display: flex; flex-wrap: wrap; gap: 0.3rem 0.55rem; align-items: center;
+  }
+  kbd {
+    font-family: var(--mono); font-size: 11px; color: var(--t-text);
+    background: #26222f; border: 1px solid #34303f; border-bottom-color: #201d29;
+    border-radius: 5px; padding: 1px 6px; margin-right: 3px;
+  }
+  .term-foot .sep { color: var(--t-faint); }
+
+  /* summary strip */
+  .stat-strip {
+    display: flex; flex-wrap: wrap; gap: 0.5rem 1.6rem; padding: 0.35rem 0 0.9rem;
+    font-size: 14px;
+  }
+  .stat { display: inline-flex; align-items: center; gap: 0.5rem; }
+  .stat .n { font-weight: 700; }
+  .stat.needs { color: var(--t-needs); }
+  .stat.run { color: var(--t-running); }
+  .stat.ok { color: var(--t-muted); }
+  .stat.ok b { color: var(--t-ok); }
+  .stat.ok .f { color: var(--t-blocked); }
+  .glyph { font-style: normal; }
+
+  /* panels */
+  .panel-label {
+    color: var(--t-faint); font-size: 11px; letter-spacing: 0.16em;
+    text-transform: uppercase; border-top: 1px solid var(--t-line);
+    padding-top: 0.55rem; margin-top: 0.2rem;
+  }
+  .rows { padding: 0.3rem 0 0.55rem; }
+  .prow {
+    display: grid; grid-template-columns: 3px 62px 1fr auto;
+    align-items: center; gap: 0.7rem; padding: 0.28rem 0; border-radius: 5px;
+  }
+  .prow .stripe { align-self: stretch; border-radius: 3px; min-height: 1.2rem; }
+  .prow.amber .stripe { background: var(--t-needs); box-shadow: 0 0 10px -2px var(--t-needs); }
+  .prow.red .stripe { background: var(--t-blocked); box-shadow: 0 0 10px -2px var(--t-blocked); }
+  .prow .rid { color: var(--t-accent); font-weight: 600; }
+  .prow .body { color: var(--t-text); }
+  .prow .body .job { color: var(--t-muted); }
+  .prow .body .q { color: var(--t-needs); }
+  .prow.red .body .q { color: var(--t-blocked); }
+  .prow .age { color: var(--t-faint); font-variant-numeric: tabular-nums; }
+  .prow.focus { background: #1d1a28; outline: 1px solid #3a3550; }
+
+  /* live stream */
+  .srow {
+    display: grid; grid-template-columns: 72px 58px 1fr; gap: 0.7rem;
+    padding: 0.16rem 0; font-size: 13px;
+  }
+  .srow .ts { color: var(--t-faint); font-variant-numeric: tabular-nums; }
+  .srow .rid { color: var(--t-accent); }
+  .srow .ev .type { color: var(--t-text); }
+  .srow .ev .meta2 { color: var(--t-muted); }
+  .srow.live .ev { color: var(--t-running); font-style: italic; opacity: 0.9; }
+  .srow .g-ok { color: var(--t-ok); }
+  .srow .g-run { color: var(--t-running); }
+  .srow .g-warn { color: var(--t-escal); }
+  .srow .g-err { color: var(--t-blocked); }
+  .spin { display: inline-block; animation: spin 1.6s steps(4) infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .cursor {
+    display: inline-block; width: 7px; height: 1em; background: var(--t-running);
+    vertical-align: -2px; margin-left: 2px; animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .allclear { padding: 0.5rem 0 0.9rem; color: var(--t-ok); font-size: 13px; }
+
+  /* legend */
+  .legend {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.7rem; margin-top: 1.2rem;
+  }
+  .lg {
+    background: var(--page-surface); border: 1px solid var(--page-line);
+    border-radius: 10px; padding: 0.8rem 0.9rem; font-family: var(--mono); font-size: 12.5px;
+  }
+  .lg .top { display: flex; align-items: center; gap: 0.5rem; font-weight: 600; }
+  .lg .swatch { width: 12px; height: 12px; border-radius: 4px; }
+  .lg .state { color: var(--page-ink); }
+  .lg p { margin: 0.4rem 0 0; color: var(--page-muted); font-family: var(--sans); font-size: 12px; }
+
+  /* overlay gallery */
+  .gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.4rem; }
+  .card figcaption {
+    margin: 0.7rem 0 0; font-size: 0.82rem; color: var(--page-muted);
+  }
+  .card figcaption b { color: var(--page-ink); font-weight: 600; }
+  figure { margin: 0; }
+
+  /* overlay inner */
+  .ov { padding: 0.9rem 1.05rem 1rem; }
+  .ov-head {
+    display: flex; align-items: baseline; gap: 0.55rem; flex-wrap: wrap;
+    padding-bottom: 0.6rem; margin-bottom: 0.6rem; border-bottom: 1px solid var(--t-line);
+  }
+  .ov-head .rid { color: var(--t-accent); font-weight: 700; }
+  .badge {
+    font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 1px 7px; border-radius: 999px; font-weight: 600;
+  }
+  .badge.needs { color: var(--t-needs); background: rgba(245,166,35,0.13); border: 1px solid rgba(245,166,35,0.35); }
+  .badge.blocked { color: var(--t-blocked); background: rgba(242,85,90,0.13); border: 1px solid rgba(242,85,90,0.35); }
+  .badge.act { color: var(--t-accent); background: rgba(167,139,250,0.13); border: 1px solid rgba(167,139,250,0.35); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.9rem; font-size: 12.5px; margin-bottom: 0.7rem; }
+  .kv dt { color: var(--t-faint); }
+  .kv dd { margin: 0; color: var(--t-text); }
+  .kv dd.warn { color: var(--t-escal); }
+  .field-label { color: var(--t-faint); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; margin: 0.6rem 0 0.3rem; }
+  .qtext { color: var(--t-text); }
+  .input {
+    background: #0b0a11; border: 1px solid #34303f; border-radius: 6px;
+    padding: 0.4rem 0.6rem; color: var(--t-text); font-size: 13px; margin-top: 0.15rem;
+  }
+  .input .prefill { color: var(--t-text); }
+  .evidence { color: var(--t-muted); font-size: 12px; margin-top: 0.5rem; }
+  .evidence .lbl { color: var(--t-faint); }
+  .req { font-size: 12.5px; margin: 0.15rem 0; }
+  .req .verb { color: var(--t-accent); display: inline-block; width: 3.2em; }
+  .fail { color: var(--t-blocked); font-size: 12.5px; }
+  .fail .case { color: var(--t-muted); }
+  .ov-actions {
+    display: flex; flex-wrap: wrap; gap: 0.35rem 0.5rem; margin-top: 0.85rem;
+    padding-top: 0.65rem; border-top: 1px solid var(--t-line); font-size: 12px; color: var(--t-muted);
+  }
+  .amenu { display: grid; gap: 0.12rem; font-size: 13px; }
+  .amenu .ai { display: grid; grid-template-columns: 24px 1fr auto; gap: 0.6rem; padding: 0.22rem 0; align-items: baseline; }
+  .amenu .ai kbd { justify-self: start; }
+  .amenu .ai .lab { color: var(--t-text); }
+  .amenu .ai .hint { color: var(--t-faint); }
+  .prov { margin-top: 0.7rem; padding-top: 0.6rem; border-top: 1px solid var(--t-line); color: var(--t-muted); font-size: 12px; }
+  .prov .lbl { color: var(--t-faint); }
+
+  .steps { display: grid; gap: 0.1rem; font-size: 13px; }
+  .step { display: grid; grid-template-columns: 20px 1.4rem 1fr auto; gap: 0.5rem; align-items: baseline; }
+  .step .n { color: var(--t-faint); }
+  .step .nm { color: var(--t-text); }
+  .step .t { color: var(--t-faint); font-variant-numeric: tabular-nums; }
+  .step.done .g { color: var(--t-ok); }
+  .step.run .g { color: var(--t-running); }
+  .step.run .nm { color: var(--t-running); }
+  .step.queued .g, .step.queued .nm { color: var(--t-faint); }
+  .logtail { margin-top: 0.6rem; padding-top: 0.55rem; border-top: 1px solid var(--t-line); }
+  .logtail .ll { font-size: 12px; color: var(--t-muted); }
+
+  /* rationale */
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.4rem; }
+  .rcard {
+    background: var(--page-surface); border: 1px solid var(--page-line);
+    border-radius: 12px; padding: 1.2rem 1.3rem;
+  }
+  .rcard h3 { margin: 0 0 0.7rem; font-size: 1.02rem; }
+  .rcard ul { margin: 0; padding-left: 1.1rem; }
+  .rcard li { margin: 0.4rem 0; color: var(--page-muted); font-size: 0.92rem; }
+  .rcard li b { color: var(--page-ink); font-weight: 600; }
+  .keys-tbl { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  .keys-tbl td { padding: 0.3rem 0.4rem; border-bottom: 1px solid var(--page-line); vertical-align: top; }
+  .keys-tbl td:first-child { white-space: nowrap; width: 1%; }
+  .keys-tbl td:last-child { color: var(--page-muted); }
+
+  /* citations */
+  .cites { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1rem; }
+  .cite {
+    border: 1px solid var(--page-line); border-left: 3px solid var(--page-accent);
+    border-radius: 8px; padding: 0.8rem 0.95rem; background: var(--page-surface);
+  }
+  .cite .src { font-family: var(--mono); font-size: 0.82rem; font-weight: 600; color: var(--page-ink); }
+  .cite p { margin: 0.35rem 0 0; font-size: 0.85rem; color: var(--page-muted); }
+
+  .note {
+    margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--page-line);
+    color: var(--page-muted); font-size: 0.82rem; font-family: var(--mono);
+  }
+
+  a { color: var(--page-accent); }
+  :focus-visible { outline: 2px solid var(--page-accent); outline-offset: 2px; border-radius: 3px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot, .spin, .cursor { animation: none !important; }
+  }
+</style>
+
+<div class="page">
+  <div class="wrap">
+
+    <header>
+      <p class="eyebrow">Trigger · TUI design · mockup</p>
+      <h1>Does anything need me,<br><span class="dim">and can I act on it right here?</span></h1>
+      <p class="lede">
+        The terminal interface for Trigger — a local daemon that runs scheduled and triggered
+        agent workflows. An attention-routing surface, not a dashboard: parked runs are the
+        headline, the live log stream stays home, and every action is one keystroke away.
+      </p>
+      <div class="meta">
+        <span><b>Direction:</b> persistent panels + overlay</span>
+        <span><b>Base:</b> bubbletea v2 / lipgloss</span>
+        <span><b>Spec:</b> tui-mockups.md</span>
+        <span><b>Date:</b> 2026-08-29</span>
+      </div>
+    </header>
+
+    <!-- ================= HERO: HOME SCREEN ================= -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">01</span>
+        <div>
+          <h2>The home screen</h2>
+          <p class="sec-sub">A fixed attention strip over a stable live stream — neither moves as counts change (the lazygit spatial-consistency rule). Detail and actions arrive as overlays.</p>
+        </div>
+      </div>
+
+      <div class="term hero">
+        <div class="term-bar">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span class="term-title">trigger — ~/.trigger</span>
+          <span class="term-status"><span class="live-dot"></span><span class="live">live</span> · epoch 3</span>
+        </div>
+        <div class="term-body">
+
+          <div class="stat-strip">
+            <span class="stat needs"><span class="glyph">■</span> <span class="n">2</span> need you</span>
+            <span class="stat run"><span class="glyph spin">◐</span> <span class="n">3</span> running</span>
+            <span class="stat ok"><span class="glyph">✓</span> <b>12</b> ok · <span class="f">✗ 1</span> failed</span>
+          </div>
+
+          <div class="panel-label">Needs you</div>
+          <div class="rows">
+            <div class="prow amber focus">
+              <span class="stripe"></span>
+              <span class="rid">run#41</span>
+              <span class="body"><span class="job">nightly-triage</span> &nbsp; <span class="q">“which base branch?”</span></span>
+              <span class="age">3m</span>
+            </div>
+            <div class="prow red">
+              <span class="stripe"></span>
+              <span class="rid">run#38</span>
+              <span class="body"><span class="job">deps-update</span> &nbsp; <span class="q">tests failed · step build</span></span>
+              <span class="age">12m</span>
+            </div>
+          </div>
+
+          <div class="panel-label">Live</div>
+          <div class="rows">
+            <div class="srow"><span class="ts">12:04:11</span><span class="rid">run#42</span><span class="ev"><span class="g-run">◐</span> <span class="type">step.started</span> <span class="meta2">build</span></span></div>
+            <div class="srow live"><span class="ts">12:04:09</span><span class="rid">run#42</span><span class="ev">▪ compiling packages…<span class="cursor"></span></span></div>
+            <div class="srow"><span class="ts">12:03:58</span><span class="rid">run#40</span><span class="ev"><span class="g-ok">✓</span> <span class="type">run.succeeded</span> <span class="meta2">PR #211</span></span></div>
+            <div class="srow"><span class="ts">12:03:41</span><span class="rid">run#39</span><span class="ev"><span class="g-warn">↻</span> <span class="type">step.retrying</span> <span class="meta2">push (2/3)</span></span></div>
+            <div class="srow"><span class="ts">12:02:40</span><span class="rid">run#36</span><span class="ev"><span class="g-warn">⚑</span> <span class="type">authority.escalated</span> <span class="meta2">beyond charter</span></span></div>
+            <div class="srow"><span class="ts">12:02:02</span><span class="rid">run#35</span><span class="ev"><span class="g-err">✗</span> <span class="type">run.failed</span> <span class="meta2">step test</span></span></div>
+          </div>
+
+        </div>
+        <div class="term-foot">
+          <span><kbd>↑</kbd><kbd>↓</kbd> move</span><span class="sep">·</span>
+          <span><kbd>enter</kbd> act</span><span class="sep">·</span>
+          <span><kbd>c</kbd> checkout</span><span class="sep">·</span>
+          <span><kbd>l</kbd> log</span><span class="sep">·</span>
+          <span><kbd>f</kbd> fire</span><span class="sep">·</span>
+          <span><kbd>/</kbd> filter</span><span class="sep">·</span>
+          <span><kbd>?</kbd> help</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= STATE LANGUAGE ================= -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">02</span>
+        <div>
+          <h2>State reads at a glance</h2>
+          <p class="sec-sub">Each run state maps to a glyph + colour + card weight, so status never depends on colour alone. Semantic hues are separate from the violet accent.</p>
+        </div>
+      </div>
+      <div class="legend">
+        <div class="lg"><div class="top"><span class="swatch" style="background:#f5a623"></span><span class="glyph" style="color:#f5a623">■</span> <span class="state">awaiting_input</span></div><p>Agent paused to ask a question or request scope. Loud, top of strip.</p></div>
+        <div class="lg"><div class="top"><span class="swatch" style="background:#f2555a"></span><span class="glyph" style="color:#f2555a">✗</span> <span class="state">blocked / failed</span></div><p>A failure needs diagnosis. Loud, with the failing step named.</p></div>
+        <div class="lg"><div class="top"><span class="swatch" style="background:#45c8e0"></span><span class="glyph" style="color:#45c8e0">◐</span> <span class="state">running</span></div><p>In flight. Animated glyph; live step line renders dim/italic.</p></div>
+        <div class="lg"><div class="top"><span class="swatch" style="background:#4ec9a3"></span><span class="glyph" style="color:#4ec9a3">✓</span> <span class="state">succeeded</span></div><p>Done. Quiet — a durable transition in the stream, not an alert.</p></div>
+        <div class="lg"><div class="top"><span class="swatch" style="background:#a78bfa"></span><span class="glyph" style="color:#a78bfa">▸</span> <span class="state">focus / selection</span></div><p>The violet accent marks focus and the checkout class only.</p></div>
+      </div>
+    </section>
+
+    <!-- ================= OVERLAYS ================= -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">03</span>
+        <div>
+          <h2>Answer in place — the parked-run overlays</h2>
+          <p class="sec-sub">Press <kbd>enter</kbd> on a parked run and a floating card takes over. Three shapes share one release path; the runtime session resumes without a restart.</p>
+        </div>
+      </div>
+
+      <div class="gallery">
+
+        <!-- question -->
+        <figure class="card">
+          <div class="term">
+            <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span class="term-title">answer</span></div>
+            <div class="ov">
+              <div class="ov-head"><span class="rid">run#41</span><span class="badge needs">awaiting_input</span></div>
+              <dl class="kv">
+                <dt>job</dt><dd>nightly-triage</dd>
+                <dt>step</dt><dd>choose-base</dd>
+                <dt>timeout</dt><dd class="warn">in 57m</dd>
+                <dt>authority</dt><dd>interactive · you may answer</dd>
+              </dl>
+              <div class="field-label">Question</div>
+              <p class="qtext" style="margin:0">Which base branch should the PR target?</p>
+              <div class="field-label">Answer <span style="text-transform:none;letter-spacing:0">(schema: string)</span></div>
+              <div class="input"><span class="prefill">main</span><span class="cursor"></span></div>
+              <p class="evidence"><span class="lbl">evidence</span> &nbsp;repo default is <b>main</b>; 2 release/* branches exist</p>
+              <div class="ov-actions"><kbd>enter</kbd> submit <span class="sep">·</span> <kbd>l</kbd> open log <span class="sep">·</span> <kbd>esc</kbd> cancel</div>
+            </div>
+          </div>
+          <figcaption><b>A question.</b> Validated against the declared schema, injected as data (not instructions), then the session resumes in place.</figcaption>
+        </figure>
+
+        <!-- scope -->
+        <figure class="card">
+          <div class="term">
+            <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span class="term-title">scope request</span></div>
+            <div class="ov">
+              <div class="ov-head"><span class="rid">run#38</span><span class="badge needs">scope request</span></div>
+              <dl class="kv">
+                <dt>job</dt><dd>deps-update</dd>
+                <dt>authority</dt><dd class="warn">orchestrator · beyond charter → escalated to you</dd>
+              </dl>
+              <div class="field-label">Requests</div>
+              <p class="req"><span class="verb">write</span> package-lock.json</p>
+              <p class="req"><span class="verb">run</span> npm audit fix</p>
+              <p class="evidence"><span class="lbl">reason</span> &nbsp;transitive CVE fix needs a lockfile write outside the declared path</p>
+              <div class="ov-actions"><kbd>g</kbd> grant (this run) <span class="sep">·</span> <kbd>d</kbd> deny <span class="sep">·</span> <kbd>esc</kbd></div>
+            </div>
+          </div>
+          <figcaption><b>A scope request.</b> Granting mutates the run's permission record for the approved continuation, then resumes. Beyond-charter always routes to the human.</figcaption>
+        </figure>
+
+        <!-- blocked -->
+        <figure class="card">
+          <div class="term">
+            <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span class="term-title">blocked</span></div>
+            <div class="ov">
+              <div class="ov-head"><span class="rid">run#38</span><span class="badge blocked">blocked</span></div>
+              <dl class="kv">
+                <dt>failing</dt><dd>step test · attempt 3/3</dd>
+                <dt>class</dt><dd>logic (on_failure: escalate)</dd>
+              </dl>
+              <div class="field-label">failure_detail</div>
+              <p class="fail">2 tests failed in api/handlers_test.go<br><span class="case">· TestClaim_RaceFree &nbsp; · TestClaim_PerJobCap</span></p>
+              <div class="field-label">Release note</div>
+              <div class="input"><span class="prefill">flaky claim test, re-run</span><span class="cursor"></span></div>
+              <div class="ov-actions"><kbd>r</kbd> release → queued <span class="sep">·</span> <kbd>c</kbd> checkout <span class="sep">·</span> <kbd>l</kbd> log</div>
+            </div>
+          </div>
+          <figcaption><b>A blocked run.</b> Release is <code>blocked → queued</code>: resets attempts, attaches who/why, idempotent — the same path as ask-and-resume.</figcaption>
+        </figure>
+
+        <!-- checkout -->
+        <figure class="card">
+          <div class="term">
+            <div class="term-bar"><span class="dots"><i></i><i></i><i></i></span><span class="term-title">actions</span></div>
+            <div class="ov">
+              <div class="ov-head"><span class="rid">run#40</span><span class="badge act">actions</span></div>
+              <div class="amenu">
+                <div class="ai"><kbd>w</kbd><span class="lab">checkout worktree</span><span class="hint">~/.trigger/wt/run-40</span></div>
+                <div class="ai"><kbd>p</kbd><span class="lab">open PR</span><span class="hint">#211 ↗</span></div>
+                <div class="ai"><kbd>l</kbd><span class="lab">tail agent log</span><span class="hint">follow</span></div>
+                <div class="ai"><kbd>L</kbd><span class="lab">open raw log</span><span class="hint">$PAGER</span></div>
+                <div class="ai"><kbd>d</kbd><span class="lab">cd shell here</span><span class="hint"></span></div>
+                <div class="ai"><kbd>x</kbd><span class="lab">cancel run</span><span class="hint"></span></div>
+              </div>
+              <p class="prov"><span class="lbl">provenance</span> &nbsp;claude-code · 1m48s · $0.06 · 14 turns</p>
+            </div>
+          </div>
+          <figcaption><b>Checkout / actions.</b> The interaction Dustin loved, kept first-class. Checkout runs in the background; the provenance line is an evidence label, not a conclusion.</figcaption>
+        </figure>
+
+      </div>
+    </section>
+
+    <!-- ================= RUN DETAIL ================= -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">04</span>
+        <div>
+          <h2>Drill into a run — steps as the spine</h2>
+          <p class="sec-sub">Press <kbd>enter</kbd> on a stream line (k9s-style drill-down). Steps are deterministic facts; the log tail is live. Behavioural scenarios slot in here later as sub-rows going red→green.</p>
+        </div>
+      </div>
+
+      <div class="term" style="max-width:640px">
+        <div class="term-bar">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span class="term-title">run#42 · nightly-triage</span>
+          <span class="term-status"><span class="g-run" style="color:var(--t-running)"><span class="spin">◐</span></span> step 2/4</span>
+        </div>
+        <div class="term-body">
+          <div class="steps">
+            <div class="step done"><span class="g">✓</span><span class="n">1</span><span class="nm">checkout</span><span class="t">0.4s</span></div>
+            <div class="step run"><span class="g spin">◐</span><span class="n">2</span><span class="nm">build</span><span class="t">compiling…</span></div>
+            <div class="step queued"><span class="g">○</span><span class="n">3</span><span class="nm">test</span><span class="t">queued</span></div>
+            <div class="step queued"><span class="g">○</span><span class="n">4</span><span class="nm">open-pr</span><span class="t">queued</span></div>
+          </div>
+          <div class="logtail">
+            <div class="panel-label" style="border:0;padding:0;margin:0 0 0.35rem">log · follow</div>
+            <div class="ll">12:04:11 build: go build ./...</div>
+            <div class="ll">12:04:12 build: ▪ internal/db…<span class="cursor"></span></div>
+          </div>
+        </div>
+        <div class="term-foot">
+          <span><kbd>esc</kbd> back</span><span class="sep">·</span>
+          <span><kbd>l</kbd> full log</span><span class="sep">·</span>
+          <span><kbd>c</kbd> checkout</span><span class="sep">·</span>
+          <span><kbd>x</kbd> cancel</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= RATIONALE ================= -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">05</span>
+        <div>
+          <h2>Why it's built this way</h2>
+          <p class="sec-sub">The interaction and disclosure model, harvested from the current TUI wave.</p>
+        </div>
+      </div>
+      <div class="cols">
+        <div class="rcard">
+          <h3>Keyboard model</h3>
+          <table class="keys-tbl">
+            <tr><td><kbd>↑↓</kbd> / <kbd>j</kbd><kbd>k</kbd></td><td>move</td></tr>
+            <tr><td><kbd>enter</kbd></td><td>answer (strip) / drill in (stream)</td></tr>
+            <tr><td><kbd>tab</kbd></td><td>switch panel — footer keys follow focus</td></tr>
+            <tr><td><kbd>c</kbd></td><td>checkout / actions menu</td></tr>
+            <tr><td><kbd>l</kbd> / <kbd>L</kbd></td><td>tail log / open raw log</td></tr>
+            <tr><td><kbd>p</kbd></td><td>jump to PR</td></tr>
+            <tr><td><kbd>f</kbd> / <kbd>x</kbd></td><td>fire job / cancel run</td></tr>
+            <tr><td><kbd>g</kbd> / <kbd>:</kbd></td><td>go-to <code>:run N</code>, <code>:job name</code></td></tr>
+          </table>
+        </div>
+        <div class="rcard">
+          <h3>Default vs. on demand</h3>
+          <ul>
+            <li><b>Default:</b> the headline count, the parked runs, and the live stream. The answer to “does anything need me?”</li>
+            <li><b>One key deeper:</b> full request payload, schema, evidence, and the answer overlay.</li>
+            <li><b>Drill-in:</b> the step list, per-step timing, provenance, worktree + PR.</li>
+            <li><b>Never shown:</b> secrets — <code>summary</code>/<code>data</code> are secret-free at the source.</li>
+            <li><b>Live-only:</b> progress telemetry renders dim/italic and is never promoted to history.</li>
+          </ul>
+        </div>
+        <div class="rcard">
+          <h3>Crash-safe by construction</h3>
+          <ul>
+            <li>The header shows the <b>(epoch, id)</b> cursor and a live dot.</li>
+            <li>Reconnect resumes from the cursor; on <b>epoch mismatch</b> the client resyncs and shows a <code>⟳ resynced</code> toast rather than drifting.</li>
+            <li>The TUI is a thin client — never the source of truth, never blocks the daemon.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= CITATIONS ================= -->
+    <section>
+      <div class="sec-head">
+        <span class="sec-num">06</span>
+        <div>
+          <h2>Design provenance</h2>
+          <p class="sec-sub">This direction harvests the 2026 TUI wave rather than inventing from scratch.</p>
+        </div>
+      </div>
+      <div class="cites">
+        <div class="cite"><span class="src">hyperb1iss/hyperskills · tui-design</span><p>The ranked pattern / anti-pattern library these foundations follow — semantic colour tokens, three-tier disclosure, spatial consistency.</p></div>
+        <div class="cite"><span class="src">lazygit / lazydocker</span><p>Persistent multi-panel with single-letter actions. Source of the rule that panels never move.</p></div>
+        <div class="cite"><span class="src">k9s</span><p>Drill-down stack (list → detail → log) with <code>:</code> jumps — the run-detail navigation.</p></div>
+        <div class="cite"><span class="src">btop</span><p>Unicode block glyphs and semantic status symbols (● ○ ◐) for state at a glance.</p></div>
+        <div class="cite"><span class="src">Bubble Tea v2 (Feb 2026)</span><p>Mode-2026 synchronized output removes tearing on a scrolling stream — the stable base for the live view.</p></div>
+        <div class="cite"><span class="src">Charm Lipgloss</span><p>Semantic style tokens, layered surfaces, rounded borders — the modern-maximal look, degrading to 16-colour.</p></div>
+        <div class="cite"><span class="src">“TUI Renaissance 2026” writeups</span><p>Design-in-layers, keyboard-first / mouse-optional, async-everything, evidence over conclusions.</p></div>
+      </div>
+    </section>
+
+    <p class="note">
+      Mockup — not shipping UI. Screens rendered as HTML/CSS to preview the true-colour target
+      (Ghostty-class terminal); the real build is bubbletea/lipgloss and degrades to 16 colours.
+      Full spec: <b>trigger-design/docs/design/tui-mockups.md</b>.
+    </p>
+
+  </div>
+</div>

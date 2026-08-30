@@ -48,6 +48,7 @@ as the single source of truth.
   - [db-schema.md](docs/design/db-schema.md) — SQLite runtime state: runs, run_steps, events, trigger_state (config is NOT in the DB)
   - [tui.md](docs/design/tui.md) — TUI design brief: attention-first, parked-runs headline, keep checkout + log stream
   - [tui-mockup-brief.md](docs/design/tui-mockup-brief.md) — Pasteable prompt to commission TUI mockups from a design agent
+  - [tui-mockups.md](docs/design/tui-mockups.md) — TUI mockups + interaction design (recommended direction, answer flows, keymap); rendered preview in [tui-mockup.html](docs/design/tui-mockup.html)
 - Guidance — [docs/guidance/](docs/guidance/):
   - [glossary.md](docs/guidance/glossary.md) — Terminology (supervisor vs orchestrator, fire, buses, parking family)
   - [config-resolve-once.md](docs/guidance/config-resolve-once.md) — Resolve config once per run; store it on the run
