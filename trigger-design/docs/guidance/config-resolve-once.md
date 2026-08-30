@@ -34,4 +34,11 @@ Trigger inherits it.
 
 An empty `model` at a level means "inherit / let the runtime or agent choose its own
 default," not "set model to empty string." A set value overrides; an empty value defers.
-This mirrors pr-triage's opencode adapter (omit `-m` when the model is empty).
+This mirrors pr-triage's opencode adapter (omit `-m` when the model is empty). Empty means the
+**runtime** default, never a specific vendor's default (Expedition V, [[fable-expedition-crosswalk]]).
+
+**Resolved ≠ observed for `model`.** The *requested* model comes from resolve-once and is
+stored as `model_requested`. The *resolved* model (`model_resolved`) is what the runtime
+actually reports it ran — it is **never written from config** and may be NULL if unconfirmed.
+Warn when they disagree. This is the one field where storing the resolved config value would
+lie ([[db-schema]]).

@@ -184,6 +184,14 @@ type StepDefaults struct {
 }
 ```
 
+## Record which config revision loaded
+
+The loader must record **which config revision a run used** — path, SHA-256, load time, and
+any validation error (Expedition I DM-3, [[fable-expedition-crosswalk]]). agent-minder had no
+such record, so "why did this run behave that way" was unanswerable after an edit. Surface it
+via `GET /version`/status and stamp it on runs, so a run is traceable to the exact config that
+produced it.
+
 ## Open items
 
 - Webhook trigger transport and auth — see R2 / R6.

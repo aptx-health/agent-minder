@@ -9,10 +9,19 @@ related: "[[0011-internal-pubsub-two-buses]], [[0004-daemon-interface-split]]"
 
 # Harvest: durable event log
 
+**This code is the implementation of an adversarially-reviewed design** — Expedition IV,
+the snapshot/event consistency contract ([[fable-expedition-crosswalk]] has the summary;
+the full R-1–R-10 rules, identity model, client state machines, and rejected
+alternatives live in `agent-minder/docs/research/fable-expedition/04-…md`). Read it
+before changing any of the invariants below.
+
 The core invariant (R-1): **commit is the publish**. An event row is appended in the
 *same transaction* as the state change it describes — there is no separate publish
 step that can fail, be skipped, or double-fire. Any TUI/GUI/live view replays from
-the table; nothing else is authoritative.
+the table; nothing else is authoritative. Companions: R-2 (publish to live channels
+only *after* commit) and the identity trio — durable cursor (ID-1), log epoch (ID-2),
+worker incarnation (ID-3, scopes live-only state like tool/step ticks, which are
+ephemeral: never persisted, delivered id-less).
 
 ## Table shape (`events`)
 

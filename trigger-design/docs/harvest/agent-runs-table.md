@@ -52,6 +52,21 @@ CREATE INDEX idx_agent_runs_job ON agent_runs(job_id);
 6. **No FK on `run_id` in events** — events reference runs loosely (`run_id 0` when
    unattributable) so event writes never fail on ordering.
 
+## Expedition V column additions (conformance spec)
+
+The audit ([[fable-expedition-crosswalk]]) adds to this shape for Trigger:
+
+- `model_requested` (resolved config string) vs `model_resolved` (**runtime-observed
+  from its init/result event, never written from config** — null when unobserved),
+  with a visible warning on mismatch.
+- `model_source` — which precedence rank won (stage/agent/job/deployment/repo/user/
+  runtime_default); makes [[config-resolve-once]] auditable per run.
+- `cost_basis` (`exact|estimated|unavailable`) and `turn_basis` (`cli_turns|
+  completed_turns|message_steps`) — a number without a basis label is a lie.
+- Every resume attempt gets its own row: `attempt = prior + 1`,
+  `stop_reason = "resumed_from:<prior run id>"`. (Resumed attempts currently write
+  no row — the audit's hole.)
+
 ## Interplay with the event log
 
 `SnapshotControl` joins `agent_runs → jobs` to stay deployment-scoped — the join
